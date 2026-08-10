@@ -1,18 +1,25 @@
 import axios from "axios";
 
+const WHATSAPP_API_VERSION = "v23.0";
+const REQUEST_TIMEOUT_MS = 15000;
+
 export async function sendWhatsAppMessage(to, message) {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
-  if (!to || !message) {
-    throw new Error("Recipient and message are required");
+  if (!to || typeof to !== "string") {
+    throw new Error("Valid recipient is required");
+  }
+
+  if (!message || typeof message !== "string") {
+    throw new Error("Valid message is required");
   }
 
   if (!accessToken || !phoneNumberId) {
     throw new Error("WhatsApp credentials are not configured");
   }
 
-  const url = `https://graph.facebook.com/v23.0/${phoneNumberId}/messages`;
+  const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`;
 
   try {
     const response = await axios.post(
@@ -31,15 +38,18 @@ export async function sendWhatsAppMessage(to, message) {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
+        timeout: REQUEST_TIMEOUT_MS,
       },
     );
 
     return response.data;
   } catch (error) {
-    console.error(
-      "WhatsApp API error:",
-      error.response?.data || error.message,
-    );
+    const apiError = error.response?.data;
+
+    console.error("WhatsApp API error:", {
+      status: error.response?.status,
+      data: apiError || error.message,
+    });
 
     throw new Error("Failed to send WhatsApp message");
   }

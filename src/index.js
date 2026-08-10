@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import express from "express";
 import dotenv from "dotenv";
 import helmet from "helmet";
@@ -10,11 +11,21 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
+const META_APP_SECRET = process.env.META_APP_SECRET;
 
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(compression());
-app.use(express.json({ limit: "100kb" }));
+
+// Capture raw body for Meta webhook signature verification.
+app.use(
+  express.json({
+    limit: "100kb",
+    verify: (req, res, buf) => {
+      req.rawBody = Buffer.from(buf);
+    },
+  }),
+);
 
 // Health check
 app.get("/", (req, res) => {
@@ -38,15 +49,47 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+// Verify Meta X-Hub-Signature-256 header.
+function verifyMetaSignature(req) {
+  if (!META_APP_SECRET) {
+    return false;
+  }
+
+  const signature = req.get("x-hub-signature-256");
+
+  if (!signature || !req.rawBody) {
+    return false;
+  }
+
+  const expectedSignature = `sha256=${crypto
+    .createHmac("sha256", META_APP_SECRET)
+    .update(req.rawBody)
+    .digest("hex")}`;
+
+  const receivedBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expectedSignature);
+
+  if (receivedBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+}
+
 // WhatsApp webhook receiver
 app.post("/webhook", async (req, res) => {
   try {
+    if (!verifyMetaSignature(req)) {
+      console.warn("Invalid WhatsApp webhook signature");
+      return res.sendStatus(403);
+    }
+
     console.log("WhatsApp webhook received");
 
     const message =
       req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message?.text?.body) {
+    if (!message?.text?.body || !message?.from) {
       return res.sendStatus(200);
     }
 
@@ -59,7 +102,6 @@ app.post("/webhook", async (req, res) => {
 
     console.log("Gemini reply:", reply);
 
-    // WhatsApp credentials must be configured before sending
     if (
       process.env.WHATSAPP_ACCESS_TOKEN &&
       process.env.WHATSAPP_PHONE_NUMBER_ID
