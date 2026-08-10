@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import helmet from "helmet";
 import compression from "compression";
 import { generateGeminiReply } from "./services/gemini.service.js";
+import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
 
 dotenv.config();
 
@@ -10,7 +11,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 
-// Basic security
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(compression());
@@ -43,13 +43,15 @@ app.post("/webhook", async (req, res) => {
   try {
     console.log("WhatsApp webhook received");
 
-    const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const message =
+      req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
     if (!message?.text?.body) {
       return res.sendStatus(200);
     }
 
     const incomingMessage = message.text.body;
+    const senderNumber = message.from;
 
     console.log("Incoming message:", incomingMessage);
 
@@ -57,16 +59,23 @@ app.post("/webhook", async (req, res) => {
 
     console.log("Gemini reply:", reply);
 
-    return res.status(200).json({
-      status: "ok",
-      reply,
-    });
+    // WhatsApp credentials must be configured before sending
+    if (
+      process.env.WHATSAPP_ACCESS_TOKEN &&
+      process.env.WHATSAPP_PHONE_NUMBER_ID
+    ) {
+      await sendWhatsAppMessage(senderNumber, reply);
+      console.log("WhatsApp reply sent");
+    } else {
+      console.log(
+        "WhatsApp credentials not configured. Reply was generated but not sent.",
+      );
+    }
+
+    return res.sendStatus(200);
   } catch (error) {
     console.error("Webhook error:", error);
-    return res.status(200).json({
-      status: "error",
-      message: "Webhook processing failed",
-    });
+    return res.sendStatus(200);
   }
 });
 
