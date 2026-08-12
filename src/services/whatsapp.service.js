@@ -2,6 +2,7 @@ import axios from "axios";
 
 const WHATSAPP_API_VERSION = "v23.0";
 const REQUEST_TIMEOUT_MS = 15000;
+const MAX_MESSAGE_LENGTH = 4096;
 
 export async function sendWhatsAppMessage(to, message) {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -11,8 +12,16 @@ export async function sendWhatsAppMessage(to, message) {
     throw new Error("Valid recipient is required");
   }
 
+  if (!/^\d{7,15}$/.test(to)) {
+    throw new Error("Invalid WhatsApp recipient number");
+  }
+
   if (!message || typeof message !== "string") {
     throw new Error("Valid message is required");
+  }
+
+  if (message.length > MAX_MESSAGE_LENGTH) {
+    throw new Error("WhatsApp message is too long");
   }
 
   if (!accessToken || !phoneNumberId) {
