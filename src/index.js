@@ -25,12 +25,26 @@ const META_APP_SECRET = process.env.META_APP_SECRET;
 // Environment validation
 // --------------------------------------------------
 
-if (!WEBHOOK_VERIFY_TOKEN) {
-  console.warn("WEBHOOK_VERIFY_TOKEN is not configured");
-}
+const REQUIRED_ENV_VARS = [
+  "GEMINI_API_KEY",
+  "WEBHOOK_VERIFY_TOKEN",
+  "META_APP_SECRET",
+  "WHATSAPP_ACCESS_TOKEN",
+  "WHATSAPP_PHONE_NUMBER_ID",
+];
 
-if (!META_APP_SECRET) {
-  console.warn("META_APP_SECRET is not configured");
+const missingEnvVars = REQUIRED_ENV_VARS.filter(
+  (name) => !process.env[name]?.trim(),
+);
+
+if (missingEnvVars.length > 0) {
+  const message = `Missing required environment variables: ${missingEnvVars.join(", ")}`;
+
+  if (IS_PRODUCTION) {
+    throw new Error(message);
+  }
+
+  console.warn(message);
 }
 
 // --------------------------------------------------
@@ -79,9 +93,6 @@ app.use(helmet());
 app.use(compression());
 app.use(httpLogger);
 
-// General API protection.
-// Webhook handling remains lightweight and Meta retries
-// are handled separately through signature validation.
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
@@ -312,9 +323,7 @@ app.use((error, req, res, next) => {
 
   return res.status(500).json({
     status: "error",
-    message: IS_PRODUCTION
-      ? "Internal server error"
-      : error.message,
+    message: IS_PRODUCTION ? "Internal server error" : error.message,
   });
 });
 
