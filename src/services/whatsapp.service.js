@@ -12,7 +12,9 @@ export async function sendWhatsAppMessage(to, message) {
     throw new Error("Valid recipient is required");
   }
 
-  if (!/^\d{7,15}$/.test(to)) {
+  const trimmedTo = to.trim();
+
+  if (!/^\d{7,15}$/.test(trimmedTo)) {
     throw new Error("Invalid WhatsApp recipient number");
   }
 
@@ -20,7 +22,13 @@ export async function sendWhatsAppMessage(to, message) {
     throw new Error("Valid message is required");
   }
 
-  if (message.length > MAX_MESSAGE_LENGTH) {
+  const trimmedMessage = message.trim();
+
+  if (!trimmedMessage) {
+    throw new Error("Valid message is required");
+  }
+
+  if (trimmedMessage.length > MAX_MESSAGE_LENGTH) {
     throw new Error("WhatsApp message is too long");
   }
 
@@ -36,10 +44,10 @@ export async function sendWhatsAppMessage(to, message) {
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to,
+        to: trimmedTo,
         type: "text",
         text: {
-          body: message,
+          body: trimmedMessage,
         },
       },
       {
@@ -53,11 +61,17 @@ export async function sendWhatsAppMessage(to, message) {
 
     return response.data;
   } catch (error) {
-    const apiError = error.response?.data;
+    const isTimeout = error.code === "ECONNABORTED";
 
+    // Safe diagnostics only: never log tokens, phone numbers,
+    // message content, or the raw Meta response body.
     console.error("WhatsApp API error:", {
+      category: isTimeout
+        ? "timeout"
+        : error.response
+          ? "api_error"
+          : "unknown",
       status: error.response?.status,
-      data: apiError || error.message,
     });
 
     throw new Error("Failed to send WhatsApp message");
