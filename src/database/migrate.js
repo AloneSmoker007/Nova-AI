@@ -8,6 +8,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const migrationsDirectory = path.resolve(__dirname, "../../database");
 
+// One transaction-level advisory lock prevents multiple Nova-AI
+// instances from applying migrations concurrently during startup.
+const MIGRATION_ADVISORY_LOCK_ID = 7_421_991;
+
 async function getMigrationFiles() {
   const entries = await fs.readdir(migrationsDirectory, { withFileTypes: true });
 
@@ -26,6 +30,12 @@ export async function runMigrations() {
 
   try {
     await client.query("BEGIN");
+
+    // Transaction-scoped: automatically released by PostgreSQL at COMMIT/ROLLBACK.
+    await client.query("SELECT pg_advisory_xact_lock($1)", [
+      MIGRATION_ADVISORY_LOCK_ID,
+    ]);
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         id BIGSERIAL PRIMARY KEY,
