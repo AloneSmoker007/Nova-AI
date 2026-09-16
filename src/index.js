@@ -21,10 +21,6 @@ const IS_PRODUCTION = NODE_ENV === "production";
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 
-// --------------------------------------------------
-// Environment validation
-// --------------------------------------------------
-
 const REQUIRED_ENV_VARS = [
   "GEMINI_API_KEY",
   "WEBHOOK_VERIFY_TOKEN",
@@ -47,10 +43,6 @@ if (missingEnvVars.length > 0) {
   console.warn(message);
 }
 
-// --------------------------------------------------
-// Logger
-// --------------------------------------------------
-
 const logger = pino({
   level: process.env.LOG_LEVEL || (IS_PRODUCTION ? "info" : "debug"),
   redact: {
@@ -69,7 +61,12 @@ const logger = pino({
 
 const httpLogger = pinoHttp({
   logger,
-  genReqId: (req) => req.headers["x-request-id"] || uuidv4(),
+  genReqId: (req) => {
+    const incomingId = req.headers["x-request-id"];
+    return typeof incomingId === "string" && incomingId.length <= 128
+      ? incomingId
+      : uuidv4();
+  },
   serializers: {
     req: (req) => ({
       id: req.id,
@@ -81,10 +78,6 @@ const httpLogger = pinoHttp({
     }),
   },
 });
-
-// --------------------------------------------------
-// App security & middleware
-// --------------------------------------------------
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
@@ -102,7 +95,6 @@ app.use(
   }),
 );
 
-// Capture raw body for Meta HMAC verification.
 app.use(
   express.json({
     limit: "100kb",
@@ -111,10 +103,6 @@ app.use(
     },
   }),
 );
-
-// --------------------------------------------------
-// Health check
-// --------------------------------------------------
 
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -131,10 +119,6 @@ app.get("/health", (req, res) => {
     uptime: process.uptime(),
   });
 });
-
-// --------------------------------------------------
-// Meta webhook verification
-// --------------------------------------------------
 
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -155,10 +139,6 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// --------------------------------------------------
-// Meta signature verification
-// --------------------------------------------------
-
 function verifyMetaSignature(req) {
   if (!META_APP_SECRET || !req.rawBody) {
     return false;
@@ -166,7 +146,7 @@ function verifyMetaSignature(req) {
 
   const signature = req.get("x-hub-signature-256");
 
-  if (!signature || !signature.startsWith("sha256=")) {
+  if (!signature || !/^sha256=[a-f0-9]{64}$/.test(signature)) {
     return false;
   }
 
@@ -187,10 +167,6 @@ function verifyMetaSignature(req) {
   return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
-// --------------------------------------------------
-// WhatsApp message processing
-// --------------------------------------------------
-
 async function processWhatsAppMessage(message, log) {
   try {
     const incomingMessage = message.text?.body;
@@ -202,44 +178,25 @@ async function processWhatsAppMessage(message, log) {
     }
 
     log.info(
-      {
-        messageId: message.id,
-      },
+      { messageId: message.id },
       "Processing WhatsApp message",
     );
 
     const reply = await generateGeminiReply(incomingMessage);
 
-    if (
-      process.env.WHATSAPP_ACCESS_TOKEN &&
-      process.env.WHATSAPP_PHONE_NUMBER_ID
-    ) {
-      await sendWhatsAppMessage(senderNumber, reply);
+    await sendWhatsAppMessage(senderNumber, reply);
 
-      log.info(
-        {
-          messageId: message.id,
-        },
-        "WhatsApp reply sent",
-      );
-    } else {
-      log.warn(
-        "WhatsApp credentials are not configured. Gemini reply was generated but not sent.",
-      );
-    }
+    log.info(
+      { messageId: message.id },
+      "WhatsApp reply sent",
+    );
   } catch (error) {
     log.error(
-      {
-        error: error.message,
-      },
+      { error: error.message },
       "WhatsApp message processing failed",
     );
   }
 }
-
-// --------------------------------------------------
-// WhatsApp webhook receiver
-// --------------------------------------------------
 
 app.post("/webhook", (req, res) => {
   if (!verifyMetaSignature(req)) {
@@ -250,23 +207,16 @@ app.post("/webhook", (req, res) => {
   const message =
     req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-  // Ignore delivery/read/status events for now.
-  if (!message?.text?.body || !message?.from) {
+  if (!message?.text?.body || !message?.from || !message?.id) {
     return res.sendStatus(200);
   }
 
-  // Acknowledge Meta immediately.
   res.sendStatus(200);
 
-  // Process AI response in background.
   setImmediate(() => {
     void processWhatsAppMessage(message, req.log);
   });
 });
-
-// --------------------------------------------------
-// Gemini test endpoint
-// --------------------------------------------------
 
 const geminiTestSchema = Joi.object({
   message: Joi.string().trim().min(1).max(4000).required(),
@@ -294,10 +244,6 @@ app.post("/api/test/gemini", async (req, res, next) => {
   }
 });
 
-// --------------------------------------------------
-// 404 handler
-// --------------------------------------------------
-
 app.use((req, res) => {
   res.status(404).json({
     status: "error",
@@ -305,15 +251,9 @@ app.use((req, res) => {
   });
 });
 
-// --------------------------------------------------
-// Global error handler
-// --------------------------------------------------
-
 app.use((error, req, res, next) => {
   req.log?.error(
-    {
-      error: error.message,
-    },
+    { error: error.message },
     "Unhandled application error",
   );
 
@@ -327,19 +267,11 @@ app.use((error, req, res, next) => {
   });
 });
 
-// --------------------------------------------------
-// Server startup
-// --------------------------------------------------
-
 const server = app.listen(PORT, () => {
   logger.info(
     `Nova-AI server running on port ${PORT} [${NODE_ENV}]`,
   );
 });
-
-// --------------------------------------------------
-// Graceful shutdown
-// --------------------------------------------------
 
 function shutdown(signal) {
   logger.info(`Received ${signal}, shutting down gracefully`);
@@ -347,9 +279,7 @@ function shutdown(signal) {
   server.close((error) => {
     if (error) {
       logger.error(
-        {
-          error: error.message,
-        },
+        { error: error.message },
         "Server shutdown error",
       );
 
