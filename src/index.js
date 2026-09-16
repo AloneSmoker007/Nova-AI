@@ -21,6 +21,7 @@ import {
   markMessageCompleted,
   releaseMessage,
 } from "./services/idempotency.service.js";
+import { resolveTenantByPhoneNumberId } from "./services/tenant.service.js";
 
 const app = express();
 
@@ -165,10 +166,7 @@ app.get("/ready", async (req, res) => {
       database: "connected",
     });
   } catch (error) {
-    req.log.error(
-      { error: error.message },
-      "Readiness check failed",
-    );
+    req.log.error({ error: error.message }, "Readiness check failed");
 
     return res.status(503).json({
       status: "not_ready",
@@ -210,10 +208,7 @@ function verifyMetaSignature(req) {
 
   const expectedSignature =
     "sha256=" +
-    crypto
-      .createHmac("sha256", META_APP_SECRET)
-      .update(req.rawBody)
-      .digest("hex");
+    crypto.createHmac("sha256", META_APP_SECRET).update(req.rawBody).digest("hex");
 
   const receivedBuffer = Buffer.from(signature, "utf8");
   const expectedBuffer = Buffer.from(expectedSignature, "utf8");
@@ -223,6 +218,28 @@ function verifyMetaSignature(req) {
   }
 
   return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+}
+
+function extractWebhookMessage(body) {
+  const value = body?.entry?.[0]?.changes?.[0]?.value;
+  const message = value?.messages?.[0];
+  const phoneNumberId = value?.metadata?.phone_number_id;
+
+  if (!message?.text?.body || !message?.from || !message?.id) {
+    return null;
+  }
+
+  if (
+    typeof phoneNumberId !== "string" ||
+    !/^\d{5,30}$/.test(phoneNumberId)
+  ) {
+    return null;
+  }
+
+  return {
+    ...message,
+    phoneNumberId,
+  };
 }
 
 async function processWhatsAppMessage(message, log) {
@@ -238,28 +255,55 @@ async function processWhatsAppMessage(message, log) {
   }
 
   try {
-    const incomingMessage = message.text?.body;
+    const incomingMessage = message.text.body;
     const senderNumber = message.from;
+    const tenant = await resolveTenantByPhoneNumberId(message.phoneNumberId);
 
-    if (!incomingMessage || !senderNumber) {
+    if (!tenant) {
       releaseMessage(messageId);
-      log.debug("WhatsApp message missing text or sender");
+      log.warn(
+        { messageId, phoneNumberId: message.phoneNumberId },
+        "Ignoring WhatsApp message: no active tenant mapping",
+      );
       return;
     }
 
-    log.info({ messageId }, "Processing WhatsApp message");
+    log.info(
+      {
+        messageId,
+        tenantId: tenant.tenantId,
+        whatsappNumberId: tenant.whatsappNumberId,
+      },
+      "Processing tenant WhatsApp message",
+    );
 
     const reply = await generateGeminiReply(incomingMessage);
 
-    await sendWhatsAppMessage(senderNumber, reply);
+    // Tenant-scoped outbound credentials are wired separately. Until the
+    // credential encryption layer is installed, do not fall back to global
+    // credentials because that could cross tenant boundaries.
+    if (!tenant.accessTokenEncrypted) {
+      throw new Error("Tenant WhatsApp credentials are not configured");
+    }
+
+    await sendWhatsAppMessage({
+      to: senderNumber,
+      message: reply,
+      accessToken: tenant.accessTokenEncrypted,
+      phoneNumberId: tenant.phoneNumberId,
+    });
+
     markMessageCompleted(messageId);
 
-    log.info({ messageId }, "WhatsApp reply sent");
+    log.info(
+      { messageId, tenantId: tenant.tenantId },
+      "WhatsApp reply sent",
+    );
   } catch (error) {
     releaseMessage(messageId);
 
     log.error(
-      { error: error.message },
+      { error: error.message, messageId },
       "WhatsApp message processing failed",
     );
   }
@@ -271,10 +315,9 @@ app.post("/webhook", (req, res) => {
     return res.sendStatus(403);
   }
 
-  const message =
-    req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  const message = extractWebhookMessage(req.body);
 
-  if (!message?.text?.body || !message?.from || !message?.id) {
+  if (!message) {
     return res.sendStatus(200);
   }
 
@@ -345,9 +388,7 @@ async function startServer() {
   }
 
   const server = app.listen(PORT, () => {
-    logger.info(
-      `Nova-AI server running on port ${PORT} [${NODE_ENV}]`,
-    );
+    logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`);
   });
 
   function shutdown(signal) {
@@ -359,7 +400,6 @@ async function startServer() {
           { error: error.message },
           "Server shutdown error",
         );
-
         process.exit(1);
       }
 
