@@ -11,6 +11,11 @@ import { v4 as uuidv4 } from "uuid";
 
 import { generateGeminiReply } from "./services/gemini.service.js";
 import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
+import {
+  claimMessage,
+  markMessageCompleted,
+  releaseMessage,
+} from "./services/idempotency.service.js";
 
 const app = express();
 
@@ -168,29 +173,38 @@ function verifyMetaSignature(req) {
 }
 
 async function processWhatsAppMessage(message, log) {
+  const messageId = message.id;
+  const claim = claimMessage(messageId);
+
+  if (!claim.claimed) {
+    log.info(
+      { messageId, reason: claim.reason },
+      "Ignoring duplicate WhatsApp message",
+    );
+    return;
+  }
+
   try {
     const incomingMessage = message.text?.body;
     const senderNumber = message.from;
 
     if (!incomingMessage || !senderNumber) {
+      releaseMessage(messageId);
       log.debug("WhatsApp message missing text or sender");
       return;
     }
 
-    log.info(
-      { messageId: message.id },
-      "Processing WhatsApp message",
-    );
+    log.info({ messageId }, "Processing WhatsApp message");
 
     const reply = await generateGeminiReply(incomingMessage);
 
     await sendWhatsAppMessage(senderNumber, reply);
+    markMessageCompleted(messageId);
 
-    log.info(
-      { messageId: message.id },
-      "WhatsApp reply sent",
-    );
+    log.info({ messageId }, "WhatsApp reply sent");
   } catch (error) {
+    releaseMessage(messageId);
+
     log.error(
       { error: error.message },
       "WhatsApp message processing failed",
