@@ -9,6 +9,11 @@ import pino from "pino";
 import pinoHttp from "pino-http";
 import { v4 as uuidv4 } from "uuid";
 
+import {
+  checkDatabaseConnection,
+  closeDatabaseConnection,
+} from "./config/database.js";
+import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
 import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
 import {
@@ -32,6 +37,7 @@ const REQUIRED_ENV_VARS = [
   "META_APP_SECRET",
   "WHATSAPP_ACCESS_TOKEN",
   "WHATSAPP_PHONE_NUMBER_ID",
+  ...(IS_PRODUCTION ? ["DATABASE_URL"] : []),
 ];
 
 const missingEnvVars = REQUIRED_ENV_VARS.filter(
@@ -123,6 +129,53 @@ app.get("/health", (req, res) => {
     service: "Nova-AI",
     uptime: process.uptime(),
   });
+});
+
+app.get("/ready", async (req, res) => {
+  try {
+    const database = await checkDatabaseConnection();
+
+    if (!database.configured) {
+      if (IS_PRODUCTION) {
+        return res.status(503).json({
+          status: "not_ready",
+          service: "Nova-AI",
+          database: "not_configured",
+        });
+      }
+
+      return res.status(200).json({
+        status: "ready",
+        service: "Nova-AI",
+        database: "not_configured",
+      });
+    }
+
+    if (!database.connected) {
+      return res.status(503).json({
+        status: "not_ready",
+        service: "Nova-AI",
+        database: "disconnected",
+      });
+    }
+
+    return res.status(200).json({
+      status: "ready",
+      service: "Nova-AI",
+      database: "connected",
+    });
+  } catch (error) {
+    req.log.error(
+      { error: error.message },
+      "Readiness check failed",
+    );
+
+    return res.status(503).json({
+      status: "not_ready",
+      service: "Nova-AI",
+      database: "error",
+    });
+  }
 });
 
 app.get("/webhook", (req, res) => {
@@ -281,36 +334,64 @@ app.use((error, req, res, next) => {
   });
 });
 
-const server = app.listen(PORT, () => {
-  logger.info(
-    `Nova-AI server running on port ${PORT} [${NODE_ENV}]`,
-  );
-});
+async function startServer() {
+  if (IS_PRODUCTION || process.env.DATABASE_URL) {
+    const migrationResult = await runMigrations();
 
-function shutdown(signal) {
-  logger.info(`Received ${signal}, shutting down gracefully`);
+    logger.info(
+      { applied: migrationResult.applied },
+      "Database migrations checked",
+    );
+  }
 
-  server.close((error) => {
-    if (error) {
-      logger.error(
-        { error: error.message },
-        "Server shutdown error",
-      );
-
-      process.exit(1);
-    }
-
-    logger.info("Nova-AI server closed successfully");
-    process.exit(0);
+  const server = app.listen(PORT, () => {
+    logger.info(
+      `Nova-AI server running on port ${PORT} [${NODE_ENV}]`,
+    );
   });
 
-  setTimeout(() => {
-    logger.error("Forced shutdown after 10 seconds");
-    process.exit(1);
-  }, 10_000).unref();
+  function shutdown(signal) {
+    logger.info(`Received ${signal}, shutting down gracefully`);
+
+    server.close(async (error) => {
+      if (error) {
+        logger.error(
+          { error: error.message },
+          "Server shutdown error",
+        );
+
+        process.exit(1);
+      }
+
+      try {
+        await closeDatabaseConnection();
+        logger.info("Nova-AI server closed successfully");
+        process.exit(0);
+      } catch (shutdownError) {
+        logger.error(
+          { error: shutdownError.message },
+          "Database shutdown error",
+        );
+        process.exit(1);
+      }
+    });
+
+    setTimeout(() => {
+      logger.error("Forced shutdown after 10 seconds");
+      process.exit(1);
+    }, 10_000).unref();
+  }
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+startServer().catch((error) => {
+  logger.fatal(
+    { error: error.message },
+    "Nova-AI failed to start",
+  );
+  process.exit(1);
+});
 
 export default app;
