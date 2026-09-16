@@ -16,6 +16,7 @@ import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
 import { claimMessage, markMessageCompleted, releaseMessage } from "./services/idempotency.service.js";
 import { resolveTenantByPhoneNumberId } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
+import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -127,10 +128,11 @@ function verifyMetaSignature(req) {
 function extractWebhookMessage(body) {
   const value = body?.entry?.[0]?.changes?.[0]?.value;
   const message = value?.messages?.[0];
+  const profileName = value?.contacts?.[0]?.profile?.name;
   const phoneNumberId = value?.metadata?.phone_number_id;
   if (!message?.text?.body || !message?.from || !message?.id) return null;
   if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return null;
-  return { ...message, phoneNumberId };
+  return { ...message, phoneNumberId, profileName };
 }
 
 async function processWhatsAppMessage(message, log) {
@@ -156,14 +158,45 @@ async function processWhatsAppMessage(message, log) {
 
     if (!tenant.accessTokenEncrypted) throw new Error("Tenant WhatsApp credentials are not configured");
     const accessToken = decryptSecret(tenant.accessTokenEncrypted);
+
+    const persistedInbound = await persistInboundMessage({
+      tenantId: tenant.tenantId,
+      whatsappNumberId: tenant.whatsappNumberId,
+      waId: senderNumber,
+      profileName: message.profileName,
+      whatsappMessageId: messageId,
+      messageType: "text",
+      body: incomingMessage,
+      receivedAt: new Date(),
+    });
+
+    if (persistedInbound.duplicate) {
+      markMessageCompleted(messageId);
+      log.info({ messageId, tenantId: tenant.tenantId }, "Ignoring duplicate WhatsApp message already persisted");
+      return;
+    }
+
     const reply = await generateGeminiReply(incomingMessage);
 
-    await sendWhatsAppMessage({
+    const sentMessage = await sendWhatsAppMessage({
       to: senderNumber,
       message: reply,
       accessToken,
       phoneNumberId: tenant.phoneNumberId,
     });
+
+    try {
+      await persistOutboundMessage({
+        tenantId: tenant.tenantId,
+        conversationId: persistedInbound.conversationId,
+        whatsappMessageId: sentMessage?.messages?.[0]?.id ?? null,
+        messageType: "text",
+        body: reply,
+        sentAt: new Date(),
+      });
+    } catch (persistenceError) {
+      log.error({ error: persistenceError.message, messageId, tenantId: tenant.tenantId }, "Outbound WhatsApp message sent but persistence failed");
+    }
 
     markMessageCompleted(messageId);
     log.info({ messageId, tenantId: tenant.tenantId }, "WhatsApp reply sent");
