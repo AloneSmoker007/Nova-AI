@@ -87,17 +87,12 @@ export async function loginUser(email, password) {
 
   const normalizedEmail = email.toLowerCase().trim();
 
-  let result;
-  try {
-    result = await dbPool.query(
-      `SELECT id, tenant_id, email, password_hash, role, status
-       FROM users
-       WHERE email = $1`,
-      [normalizedEmail],
-    );
-  } catch (dbError) {
-    throw dbError;
-  }
+  const result = await dbPool.query(
+    `SELECT id, tenant_id, email, password_hash, role, status
+     FROM users
+     WHERE email = $1`,
+    [normalizedEmail],
+  );
 
   const user = result.rows[0];
   const hashToVerify = user?.password_hash || DUMMY_HASH;
