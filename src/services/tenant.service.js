@@ -1,0 +1,63 @@
+import { dbPool, isDatabaseConfigured } from "../config/database.js";
+
+/**
+ * Resolve the Nova-AI tenant from Meta's WhatsApp phone_number_id.
+ *
+ * The phone_number_id is the tenant routing key. No caller-supplied
+ * tenant identifier is trusted for webhook processing.
+ */
+export async function resolveTenantByPhoneNumberId(phoneNumberId) {
+  if (!isDatabaseConfigured() || !dbPool) {
+    throw new Error("Database is not configured");
+  }
+
+  if (
+    typeof phoneNumberId !== "string" ||
+    !/^\d{5,30}$/.test(phoneNumberId)
+  ) {
+    return null;
+  }
+
+  const result = await dbPool.query(
+    `
+      SELECT
+        wn.id AS whatsapp_number_id,
+        wn.tenant_id,
+        wn.phone_number_id,
+        wn.access_token_encrypted,
+        wn.display_name,
+        wn.phone_number,
+        wn.status AS whatsapp_status,
+        t.name AS tenant_name,
+        t.slug AS tenant_slug,
+        t.status AS tenant_status
+      FROM whatsapp_numbers AS wn
+      INNER JOIN tenants AS t
+        ON t.id = wn.tenant_id
+      WHERE wn.phone_number_id = $1
+      LIMIT 1
+    `,
+    [phoneNumberId],
+  );
+
+  const row = result.rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  if (row.whatsapp_status !== "active" || row.tenant_status !== "active") {
+    return null;
+  }
+
+  return {
+    tenantId: row.tenant_id,
+    tenantName: row.tenant_name,
+    tenantSlug: row.tenant_slug,
+    whatsappNumberId: row.whatsapp_number_id,
+    phoneNumberId: row.phone_number_id,
+    accessTokenEncrypted: row.access_token_encrypted,
+    displayName: row.display_name,
+    phoneNumber: row.phone_number,
+  };
+}
