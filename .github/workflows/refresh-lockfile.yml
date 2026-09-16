@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - package.json
+      - .github/workflows/refresh-lockfile.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
