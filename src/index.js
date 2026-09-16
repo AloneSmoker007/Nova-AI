@@ -17,6 +17,7 @@ import { claimMessage, markMessageCompleted, releaseMessage } from "./services/i
 import { resolveTenantByPhoneNumberId } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
+import { getBusinessBrain } from "./services/business-brain.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -176,7 +177,17 @@ async function processWhatsAppMessage(message, log) {
       return;
     }
 
-    const reply = await generateGeminiReply(incomingMessage);
+    let brain = null;
+    try {
+      brain = await getBusinessBrain(tenant.tenantId);
+    } catch (brainError) {
+      log.error(
+        { error: brainError.message, tenantId: tenant.tenantId, messageId },
+        "Failed to load Business Brain, falling back to default",
+      );
+    }
+
+    const reply = await generateGeminiReply(incomingMessage, brain);
 
     const sentMessage = await sendWhatsAppMessage({
       to: senderNumber,
