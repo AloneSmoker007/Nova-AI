@@ -39,11 +39,11 @@ export async function persistInboundMessage({
 
     const contactResult = await client.query(
       `
-        INSERT INTO contacts (tenant_id, wa_id, profile_name)
+        INSERT INTO contacts (tenant_id, wa_id, display_name)
         VALUES ($1, $2, $3)
         ON CONFLICT (tenant_id, wa_id)
         DO UPDATE SET
-          profile_name = COALESCE(EXCLUDED.profile_name, contacts.profile_name),
+          display_name = COALESCE(EXCLUDED.display_name, contacts.display_name),
           updated_at = NOW()
         RETURNING id
       `,
@@ -62,10 +62,10 @@ export async function persistInboundMessage({
           status,
           last_message_at
         )
-        VALUES ($1, $2, $3, 'open', $4)
+        VALUES ($1, $2, $3, 'active', $4)
         ON CONFLICT (whatsapp_number_id, contact_id)
         DO UPDATE SET
-          status = 'open',
+          status = 'active',
           last_message_at = EXCLUDED.last_message_at,
           updated_at = NOW()
         RETURNING id
@@ -84,11 +84,11 @@ export async function persistInboundMessage({
           whatsapp_message_id,
           direction,
           message_type,
-          body,
+          "text",
           status
         )
         VALUES ($1, $2, $3, 'inbound', $4, $5, 'received')
-        ON CONFLICT (whatsapp_message_id)
+        ON CONFLICT (tenant_id, whatsapp_message_id)
         DO NOTHING
         RETURNING id
       `,
@@ -142,12 +142,12 @@ export async function persistOutboundMessage({
         whatsapp_message_id,
         direction,
         message_type,
-        body,
+        "text",
         status,
         created_at
       )
       VALUES ($1, $2, $3, 'outbound', $4, $5, 'sent', $6)
-      ON CONFLICT (whatsapp_message_id)
+      ON CONFLICT (tenant_id, whatsapp_message_id)
       DO NOTHING
       RETURNING id
     `,
