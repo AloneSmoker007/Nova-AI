@@ -1,24 +1,32 @@
 import axios from "axios";
 
-const WHATSAPP_API_VERSION = "v23.0";
+const WHATSAPP_API_VERSION = process.env.META_GRAPH_API_VERSION || "v23.0";
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_MESSAGE_LENGTH = 4096;
 
-export async function sendWhatsAppMessage(to, message) {
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-
-  if (!to || typeof to !== "string") {
-    throw new Error("Valid recipient is required");
+function validateCredentials(accessToken, phoneNumberId) {
+  if (typeof accessToken !== "string" || !accessToken.trim()) {
+    throw new Error("WhatsApp access token is required");
   }
 
-  const trimmedTo = to.trim();
+  if (
+    typeof phoneNumberId !== "string" ||
+    !/^\d{5,30}$/.test(phoneNumberId)
+  ) {
+    throw new Error("Invalid WhatsApp phone number ID");
+  }
+}
 
-  if (!/^\d{7,15}$/.test(trimmedTo)) {
+function validateRecipient(to) {
+  if (typeof to !== "string" || !/^\d{7,15}$/.test(to.trim())) {
     throw new Error("Invalid WhatsApp recipient number");
   }
 
-  if (!message || typeof message !== "string") {
+  return to.trim();
+}
+
+function validateMessage(message) {
+  if (typeof message !== "string") {
     throw new Error("Valid message is required");
   }
 
@@ -32,10 +40,19 @@ export async function sendWhatsAppMessage(to, message) {
     throw new Error("WhatsApp message is too long");
   }
 
-  if (!accessToken || !phoneNumberId) {
-    throw new Error("WhatsApp credentials are not configured");
-  }
+  return trimmedMessage;
+}
 
+export async function sendWhatsAppMessage({
+  to,
+  message,
+  accessToken,
+  phoneNumberId,
+}) {
+  validateCredentials(accessToken, phoneNumberId);
+
+  const recipient = validateRecipient(to);
+  const body = validateMessage(message);
   const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`;
 
   try {
@@ -44,10 +61,10 @@ export async function sendWhatsAppMessage(to, message) {
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to: trimmedTo,
+        to: recipient,
         type: "text",
         text: {
-          body: trimmedMessage,
+          body,
         },
       },
       {
@@ -63,8 +80,6 @@ export async function sendWhatsAppMessage(to, message) {
   } catch (error) {
     const isTimeout = error.code === "ECONNABORTED";
 
-    // Safe diagnostics only: never log tokens, phone numbers,
-    // message content, or the raw Meta response body.
     console.error("WhatsApp API error:", {
       category: isTimeout
         ? "timeout"
