@@ -17,7 +17,10 @@ import { claimMessage, markMessageCompleted, releaseMessage } from "./services/i
 import { resolveTenantByPhoneNumberId } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
-import { getBusinessBrain } from "./services/business-brain.service.js";
+import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
+import { loginUser } from "./services/auth.service.js";
+import { requireAuth } from "./middleware/auth.js";
+import { requireRole } from "./middleware/require-role.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -31,7 +34,7 @@ const REQUIRED_ENV_VARS = [
   "WEBHOOK_VERIFY_TOKEN",
   "META_APP_SECRET",
   "CREDENTIAL_ENCRYPTION_KEY",
-  ...(IS_PRODUCTION ? ["DATABASE_URL"] : []),
+  ...(IS_PRODUCTION ? ["DATABASE_URL", "JWT_SECRET"] : []),
 ];
 
 const missingEnvVars = REQUIRED_ENV_VARS.filter((name) => !process.env[name]?.trim());
@@ -53,6 +56,9 @@ const logger = pino({
       "*.secret",
       "*.accessToken",
       "*.accessTokenEncrypted",
+      "*.password",
+      "*.password_hash",
+      "*.passwordHash",
     ],
     censor: "[REDACTED]",
   },
@@ -71,6 +77,8 @@ const httpLogger = pinoHttp({
 });
 
 app.disable("x-powered-by");
+// Trust one reverse proxy hop (Railway/Render/Fly.io). Adjust this if the
+// deployment topology changes; an incorrect value can weaken IP rate limits.
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(compression());
@@ -80,6 +88,14 @@ app.use(express.json({
   limit: "100kb",
   verify: (req, res, buffer) => { req.rawBody = Buffer.from(buffer); },
 }));
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: "error", error: "Too many login attempts. Please try again later." },
+});
 
 app.get("/", (req, res) => res.status(200).json({ status: "ok", service: "Nova-AI", message: "Nova-AI server is running" }));
 app.get("/health", (req, res) => res.status(200).json({ status: "ok", service: "Nova-AI", uptime: process.uptime() }));
@@ -104,6 +120,8 @@ app.get("/ready", async (req, res) => {
   }
 });
 
+// WhatsApp webhook verification and delivery use Meta's verification token
+// and HMAC signature respectively; they intentionally do not use JWT auth.
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -228,17 +246,73 @@ app.post("/webhook", (req, res) => {
   setImmediate(() => { void processWhatsAppMessage(message, req.log); });
 });
 
-const geminiTestSchema = Joi.object({ message: Joi.string().trim().min(1).max(4000).required() });
-app.post("/api/test/gemini", async (req, res, next) => {
+// ── Auth Routes (NO JWT required) ──────────────────────────
+const loginSchema = Joi.object({
+  email: Joi.string().email().max(255).required(),
+  password: Joi.string().min(8).max(128).required(),
+});
+
+app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
   try {
-    const { error, value } = geminiTestSchema.validate(req.body);
-    if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
-    const reply = await generateGeminiReply(value.message);
-    return res.status(200).json({ status: "ok", reply });
+    const { error, value } = loginSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ status: "error", error: "Invalid request" });
+    }
+
+    const result = await loginUser(value.email, value.password);
+
+    return res.status(200).json({
+      status: "ok",
+      token: result.token,
+      user: result.user,
+    });
   } catch (error) {
+    if (error.message === "Invalid credentials") {
+      return res.status(401).json({ status: "error", error: "Invalid credentials" });
+    }
     return next(error);
   }
 });
+
+// ── Business Brain API (AUTH REQUIRED) ──────────────────────
+app.get("/api/business-brain", requireAuth, async (req, res) => {
+  try {
+    const brain = await getBusinessBrain(req.user.tenantId);
+    return res.status(200).json({ status: "ok", data: brain || {} });
+  } catch (error) {
+    req.log.error({ error: error.message, tenantId: req.user.tenantId }, "Failed to fetch Business Brain");
+    return res.status(500).json({ status: "error", error: "Failed to fetch Business Brain" });
+  }
+});
+
+app.put("/api/business-brain", requireAuth, requireRole("owner", "admin"), async (req, res) => {
+  try {
+    await upsertBusinessBrain(req.user.tenantId, req.body);
+    const brain = await getBusinessBrain(req.user.tenantId);
+    return res.status(200).json({ status: "ok", data: brain });
+  } catch (error) {
+    if (error.message.includes("Invalid") || error.message.includes("must be")) {
+      return res.status(400).json({ status: "error", error: error.message });
+    }
+    req.log.error({ error: error.message, tenantId: req.user.tenantId }, "Failed to update Business Brain");
+    return res.status(500).json({ status: "error", error: "Failed to update Business Brain" });
+  }
+});
+
+// Gemini test is intentionally development-only to prevent production API-key abuse.
+const geminiTestSchema = Joi.object({ message: Joi.string().trim().min(1).max(4000).required() });
+if (!IS_PRODUCTION) {
+  app.post("/api/test/gemini", async (req, res, next) => {
+    try {
+      const { error, value } = geminiTestSchema.validate(req.body);
+      if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
+      const reply = await generateGeminiReply(value.message);
+      return res.status(200).json({ status: "ok", reply });
+    } catch (error) {
+      return next(error);
+    }
+  });
+}
 
 app.use((req, res) => res.status(404).json({ status: "error", message: "Route not found" }));
 app.use((error, req, res, next) => {
