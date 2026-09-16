@@ -279,13 +279,19 @@ async function processWhatsAppMessage(message, log) {
 
     const reply = await generateGeminiReply(incomingMessage);
 
-    // Tenant-scoped outbound credentials are wired separately. Until the
-    // credential encryption layer is installed, do not fall back to global
-    // credentials because that could cross tenant boundaries.
+    // Do not fall back to global credentials here. The database credential
+    // encryption/decryption layer must be installed before tenant messages
+    // can be sent, otherwise one tenant could receive another tenant's reply.
     if (!tenant.accessTokenEncrypted) {
       throw new Error("Tenant WhatsApp credentials are not configured");
     }
 
+    throw new Error(
+      "Tenant WhatsApp credential decryption is not configured yet",
+    );
+
+    // Intentionally unreachable until tenant credential decryption is added.
+    // eslint-disable-next-line no-unreachable
     await sendWhatsAppMessage({
       to: senderNumber,
       message: reply,
@@ -362,10 +368,7 @@ app.use((req, res) => {
 });
 
 app.use((error, req, res, next) => {
-  req.log?.error(
-    { error: error.message },
-    "Unhandled application error",
-  );
+  req.log?.error({ error: error.message }, "Unhandled application error");
 
   if (res.headersSent) {
     return next(error);
@@ -396,10 +399,7 @@ async function startServer() {
 
     server.close(async (error) => {
       if (error) {
-        logger.error(
-          { error: error.message },
-          "Server shutdown error",
-        );
+        logger.error({ error: error.message }, "Server shutdown error");
         process.exit(1);
       }
 
@@ -427,10 +427,7 @@ async function startServer() {
 }
 
 startServer().catch((error) => {
-  logger.fatal(
-    { error: error.message },
-    "Nova-AI failed to start",
-  );
+  logger.fatal({ error: error.message }, "Nova-AI failed to start");
   process.exit(1);
 });
 
