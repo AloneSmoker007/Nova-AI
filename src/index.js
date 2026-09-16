@@ -9,26 +9,18 @@ import pino from "pino";
 import pinoHttp from "pino-http";
 import { v4 as uuidv4 } from "uuid";
 
-import {
-  checkDatabaseConnection,
-  closeDatabaseConnection,
-} from "./config/database.js";
+import { checkDatabaseConnection, closeDatabaseConnection } from "./config/database.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
 import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
-import {
-  claimMessage,
-  markMessageCompleted,
-  releaseMessage,
-} from "./services/idempotency.service.js";
+import { claimMessage, markMessageCompleted, releaseMessage } from "./services/idempotency.service.js";
 import { resolveTenantByPhoneNumberId } from "./services/tenant.service.js";
+import { decryptSecret } from "./services/secrets.service.js";
 
 const app = express();
-
 const PORT = Number(process.env.PORT) || 3000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PRODUCTION = NODE_ENV === "production";
-
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 
@@ -36,22 +28,14 @@ const REQUIRED_ENV_VARS = [
   "GEMINI_API_KEY",
   "WEBHOOK_VERIFY_TOKEN",
   "META_APP_SECRET",
-  "WHATSAPP_ACCESS_TOKEN",
-  "WHATSAPP_PHONE_NUMBER_ID",
+  "CREDENTIAL_ENCRYPTION_KEY",
   ...(IS_PRODUCTION ? ["DATABASE_URL"] : []),
 ];
 
-const missingEnvVars = REQUIRED_ENV_VARS.filter(
-  (name) => !process.env[name]?.trim(),
-);
-
+const missingEnvVars = REQUIRED_ENV_VARS.filter((name) => !process.env[name]?.trim());
 if (missingEnvVars.length > 0) {
   const message = `Missing required environment variables: ${missingEnvVars.join(", ")}`;
-
-  if (IS_PRODUCTION) {
-    throw new Error(message);
-  }
-
+  if (IS_PRODUCTION) throw new Error(message);
   console.warn(message);
 }
 
@@ -66,6 +50,7 @@ const logger = pino({
       "*.apiKey",
       "*.secret",
       "*.accessToken",
+      "*.accessTokenEncrypted",
     ],
     censor: "[REDACTED]",
   },
@@ -75,104 +60,45 @@ const httpLogger = pinoHttp({
   logger,
   genReqId: (req) => {
     const incomingId = req.headers["x-request-id"];
-    return typeof incomingId === "string" && incomingId.length <= 128
-      ? incomingId
-      : uuidv4();
+    return typeof incomingId === "string" && incomingId.length <= 128 ? incomingId : uuidv4();
   },
   serializers: {
-    req: (req) => ({
-      id: req.id,
-      method: req.method,
-      url: req.url,
-    }),
-    res: (res) => ({
-      statusCode: res.statusCode,
-    }),
+    req: (req) => ({ id: req.id, method: req.method, url: req.url }),
+    res: (res) => ({ statusCode: res.statusCode }),
   },
 });
 
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
-
 app.use(helmet());
 app.use(compression());
 app.use(httpLogger);
+app.use(rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false }));
+app.use(express.json({
+  limit: "100kb",
+  verify: (req, res, buffer) => { req.rawBody = Buffer.from(buffer); },
+}));
 
-app.use(
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: 120,
-    standardHeaders: true,
-    legacyHeaders: false,
-  }),
-);
-
-app.use(
-  express.json({
-    limit: "100kb",
-    verify: (req, res, buffer) => {
-      req.rawBody = Buffer.from(buffer);
-    },
-  }),
-);
-
-app.get("/", (req, res) => {
-  res.status(200).json({
-    status: "ok",
-    service: "Nova-AI",
-    message: "Nova-AI server is running",
-  });
-});
-
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "ok",
-    service: "Nova-AI",
-    uptime: process.uptime(),
-  });
-});
+app.get("/", (req, res) => res.status(200).json({ status: "ok", service: "Nova-AI", message: "Nova-AI server is running" }));
+app.get("/health", (req, res) => res.status(200).json({ status: "ok", service: "Nova-AI", uptime: process.uptime() }));
 
 app.get("/ready", async (req, res) => {
   try {
     const database = await checkDatabaseConnection();
-
     if (!database.configured) {
-      if (IS_PRODUCTION) {
-        return res.status(503).json({
-          status: "not_ready",
-          service: "Nova-AI",
-          database: "not_configured",
-        });
-      }
-
-      return res.status(200).json({
-        status: "ready",
+      return res.status(IS_PRODUCTION ? 503 : 200).json({
+        status: IS_PRODUCTION ? "not_ready" : "ready",
         service: "Nova-AI",
         database: "not_configured",
       });
     }
-
     if (!database.connected) {
-      return res.status(503).json({
-        status: "not_ready",
-        service: "Nova-AI",
-        database: "disconnected",
-      });
+      return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "disconnected" });
     }
-
-    return res.status(200).json({
-      status: "ready",
-      service: "Nova-AI",
-      database: "connected",
-    });
+    return res.status(200).json({ status: "ready", service: "Nova-AI", database: "connected" });
   } catch (error) {
     req.log.error({ error: error.message }, "Readiness check failed");
-
-    return res.status(503).json({
-      status: "not_ready",
-      service: "Nova-AI",
-      database: "error",
-    });
+    return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "error" });
   }
 });
 
@@ -180,77 +106,38 @@ app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-
-  if (
-    mode === "subscribe" &&
-    WEBHOOK_VERIFY_TOKEN &&
-    token === WEBHOOK_VERIFY_TOKEN &&
-    challenge
-  ) {
+  if (mode === "subscribe" && WEBHOOK_VERIFY_TOKEN && token === WEBHOOK_VERIFY_TOKEN && challenge) {
     logger.info("WhatsApp webhook verification successful");
     return res.status(200).send(challenge);
   }
-
   logger.warn("WhatsApp webhook verification failed");
   return res.sendStatus(403);
 });
 
 function verifyMetaSignature(req) {
-  if (!META_APP_SECRET || !req.rawBody) {
-    return false;
-  }
-
+  if (!META_APP_SECRET || !req.rawBody) return false;
   const signature = req.get("x-hub-signature-256");
-
-  if (!signature || !/^sha256=[a-f0-9]{64}$/.test(signature)) {
-    return false;
-  }
-
-  const expectedSignature =
-    "sha256=" +
-    crypto.createHmac("sha256", META_APP_SECRET).update(req.rawBody).digest("hex");
-
+  if (!signature || !/^sha256=[a-f0-9]{64}$/.test(signature)) return false;
+  const expectedSignature = `sha256=${crypto.createHmac("sha256", META_APP_SECRET).update(req.rawBody).digest("hex")}`;
   const receivedBuffer = Buffer.from(signature, "utf8");
   const expectedBuffer = Buffer.from(expectedSignature, "utf8");
-
-  if (receivedBuffer.length !== expectedBuffer.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+  return receivedBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
 function extractWebhookMessage(body) {
   const value = body?.entry?.[0]?.changes?.[0]?.value;
   const message = value?.messages?.[0];
   const phoneNumberId = value?.metadata?.phone_number_id;
-
-  if (!message?.text?.body || !message?.from || !message?.id) {
-    return null;
-  }
-
-  if (
-    typeof phoneNumberId !== "string" ||
-    !/^\d{5,30}$/.test(phoneNumberId)
-  ) {
-    return null;
-  }
-
-  return {
-    ...message,
-    phoneNumberId,
-  };
+  if (!message?.text?.body || !message?.from || !message?.id) return null;
+  if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return null;
+  return { ...message, phoneNumberId };
 }
 
 async function processWhatsAppMessage(message, log) {
   const messageId = message.id;
   const claim = claimMessage(messageId);
-
   if (!claim.claimed) {
-    log.info(
-      { messageId, reason: claim.reason },
-      "Ignoring duplicate WhatsApp message",
-    );
+    log.info({ messageId, reason: claim.reason }, "Ignoring duplicate WhatsApp message");
     return;
   }
 
@@ -261,57 +148,28 @@ async function processWhatsAppMessage(message, log) {
 
     if (!tenant) {
       releaseMessage(messageId);
-      log.warn(
-        { messageId, phoneNumberId: message.phoneNumberId },
-        "Ignoring WhatsApp message: no active tenant mapping",
-      );
+      log.warn({ messageId, phoneNumberId: message.phoneNumberId }, "Ignoring WhatsApp message: no active tenant mapping");
       return;
     }
 
-    log.info(
-      {
-        messageId,
-        tenantId: tenant.tenantId,
-        whatsappNumberId: tenant.whatsappNumberId,
-      },
-      "Processing tenant WhatsApp message",
-    );
+    log.info({ messageId, tenantId: tenant.tenantId, whatsappNumberId: tenant.whatsappNumberId }, "Processing tenant WhatsApp message");
 
+    if (!tenant.accessTokenEncrypted) throw new Error("Tenant WhatsApp credentials are not configured");
+    const accessToken = decryptSecret(tenant.accessTokenEncrypted);
     const reply = await generateGeminiReply(incomingMessage);
 
-    // Do not fall back to global credentials here. The database credential
-    // encryption/decryption layer must be installed before tenant messages
-    // can be sent, otherwise one tenant could receive another tenant's reply.
-    if (!tenant.accessTokenEncrypted) {
-      throw new Error("Tenant WhatsApp credentials are not configured");
-    }
-
-    throw new Error(
-      "Tenant WhatsApp credential decryption is not configured yet",
-    );
-
-    // Intentionally unreachable until tenant credential decryption is added.
-    // eslint-disable-next-line no-unreachable
     await sendWhatsAppMessage({
       to: senderNumber,
       message: reply,
-      accessToken: tenant.accessTokenEncrypted,
+      accessToken,
       phoneNumberId: tenant.phoneNumberId,
     });
 
     markMessageCompleted(messageId);
-
-    log.info(
-      { messageId, tenantId: tenant.tenantId },
-      "WhatsApp reply sent",
-    );
+    log.info({ messageId, tenantId: tenant.tenantId }, "WhatsApp reply sent");
   } catch (error) {
     releaseMessage(messageId);
-
-    log.error(
-      { error: error.message, messageId },
-      "WhatsApp message processing failed",
-    );
+    log.error({ error: error.message, messageId }, "WhatsApp message processing failed");
   }
 }
 
@@ -320,106 +178,56 @@ app.post("/webhook", (req, res) => {
     req.log.warn("Rejected WhatsApp webhook: invalid signature");
     return res.sendStatus(403);
   }
-
   const message = extractWebhookMessage(req.body);
-
-  if (!message) {
-    return res.sendStatus(200);
-  }
-
+  if (!message) return res.sendStatus(200);
   res.sendStatus(200);
-
-  setImmediate(() => {
-    void processWhatsAppMessage(message, req.log);
-  });
+  setImmediate(() => { void processWhatsAppMessage(message, req.log); });
 });
 
-const geminiTestSchema = Joi.object({
-  message: Joi.string().trim().min(1).max(4000).required(),
-});
-
+const geminiTestSchema = Joi.object({ message: Joi.string().trim().min(1).max(4000).required() });
 app.post("/api/test/gemini", async (req, res, next) => {
   try {
     const { error, value } = geminiTestSchema.validate(req.body);
-
-    if (error) {
-      return res.status(400).json({
-        status: "error",
-        message: "Invalid request body",
-      });
-    }
-
+    if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
     const reply = await generateGeminiReply(value.message);
-
-    return res.status(200).json({
-      status: "ok",
-      reply,
-    });
+    return res.status(200).json({ status: "ok", reply });
   } catch (error) {
     return next(error);
   }
 });
 
-app.use((req, res) => {
-  res.status(404).json({
-    status: "error",
-    message: "Route not found",
-  });
-});
-
+app.use((req, res) => res.status(404).json({ status: "error", message: "Route not found" }));
 app.use((error, req, res, next) => {
   req.log?.error({ error: error.message }, "Unhandled application error");
-
-  if (res.headersSent) {
-    return next(error);
-  }
-
-  return res.status(500).json({
-    status: "error",
-    message: IS_PRODUCTION ? "Internal server error" : error.message,
-  });
+  if (res.headersSent) return next(error);
+  return res.status(500).json({ status: "error", message: IS_PRODUCTION ? "Internal server error" : error.message });
 });
 
 async function startServer() {
   if (IS_PRODUCTION || process.env.DATABASE_URL) {
     const migrationResult = await runMigrations();
-
-    logger.info(
-      { applied: migrationResult.applied },
-      "Database migrations checked",
-    );
+    logger.info({ applied: migrationResult.applied }, "Database migrations checked");
   }
 
-  const server = app.listen(PORT, () => {
-    logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`);
-  });
+  const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
 
   function shutdown(signal) {
     logger.info(`Received ${signal}, shutting down gracefully`);
-
     server.close(async (error) => {
       if (error) {
         logger.error({ error: error.message }, "Server shutdown error");
         process.exit(1);
       }
-
       try {
         await closeDatabaseConnection();
         logger.info("Nova-AI server closed successfully");
         process.exit(0);
       } catch (shutdownError) {
-        logger.error(
-          { error: shutdownError.message },
-          "Database shutdown error",
-        );
+        logger.error({ error: shutdownError.message }, "Database shutdown error");
         process.exit(1);
       }
     });
-
-    setTimeout(() => {
-      logger.error("Forced shutdown after 10 seconds");
-      process.exit(1);
-    }, 10_000).unref();
+    setTimeout(() => { logger.error("Forced shutdown after 10 seconds"); process.exit(1); }, 10_000).unref();
   }
 
   process.on("SIGTERM", () => shutdown("SIGTERM"));
