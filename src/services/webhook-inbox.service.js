@@ -190,6 +190,28 @@ export async function saveGeneratedResponse(inboxId, tenantId, leaseToken, respo
   return result.rows[0].generated_response;
 }
 
+export async function recordProviderMessageId(inboxId, tenantId, leaseToken, providerMessageId) {
+  assertDatabase();
+
+  if (typeof providerMessageId !== "string" || !providerMessageId.trim()) {
+    throw new Error("Provider message ID is invalid");
+  }
+
+  const result = await dbPool.query(
+    "UPDATE webhook_messages SET provider_message_id = COALESCE(provider_message_id, $4), " +
+      "updated_at = NOW() WHERE id = $1 AND tenant_id = $2 " +
+      "AND state = 'PROCESSING' AND lease_token = $3::uuid " +
+      "RETURNING provider_message_id",
+    [inboxId, tenantId, leaseToken, providerMessageId.trim()],
+  );
+
+  if (result.rowCount !== 1) {
+    throw new Error("Inbox lease is no longer valid");
+  }
+
+  return result.rows[0].provider_message_id;
+}
+
 export async function markCompleted(inboxId, tenantId, leaseToken, providerMessageId) {
   assertDatabase();
 
