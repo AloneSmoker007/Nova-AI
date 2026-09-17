@@ -1,30 +1,27 @@
-name: Nova-AI CI
+name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
-  workflow_dispatch:
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   quality:
-    name: Lint and syntax check
+    name: Lint, syntax check, and tests
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
           cache: npm
 
       - name: Install dependencies
@@ -35,6 +32,7 @@ jobs:
 
       - name: Check JavaScript syntax
         shell: bash
-        run: |
-          set -euo pipefail
-          find src -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+        run: find src tests -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Run tests
+        run: npm test
