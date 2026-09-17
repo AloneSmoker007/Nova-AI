@@ -20,15 +20,15 @@ test("requireRole allows an authorized role", () => {
 
 test("requireRole rejects an unauthorized role", () => {
   let nextCalled = false;
-  const req = { user: { role: "agent" } };
   let statusCode;
+  const req = { user: { role: "agent" } };
   const res = {
     status(code) {
       statusCode = code;
       return this;
     },
     json(body) {
-      assert.equal(body.status, "error");
+      assert.equal(body.error, "Insufficient permissions");
       return this;
     },
   };
@@ -50,7 +50,8 @@ test("requireRole rejects a request without an authenticated user", () => {
       statusCode = code;
       return this;
     },
-    json() {
+    json(body) {
+      assert.equal(body.error, "Authentication required");
       return this;
     },
   };
