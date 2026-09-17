@@ -432,7 +432,7 @@ async function startServer() {
   const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
 
   if (isQueueConfigured()) {
-    startWorker(async (jobData) => processInboxMessage(jobData.inboxId, jobData.tenantId, logger));
+    startWorker(async (jobData) => processInboxMessage(jobData.inboxId, logger));
     logger.info("WhatsApp queue worker started");
   }
 
