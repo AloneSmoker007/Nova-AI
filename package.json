@@ -10,7 +10,7 @@
     "dev": "nodemon src/index.js",
     "lint": "eslint src",
     "format": "prettier --write src",
-    "test": "node --test"
+    "test": "node --test tests"
   },
   "engines": {
     "node": ">=20.0.0"
