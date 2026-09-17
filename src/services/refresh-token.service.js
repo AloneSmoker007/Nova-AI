@@ -40,7 +40,7 @@ export async function issueRefreshToken(userId, tenantId) {
 
   await dbPool.query(
     `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at)
-     VALUES ($1, $2, $3, NOW() + INTERVAL '7 days')`,
+     VALUES ($1, $2, $3, NOW() + INTERVAL '${REFRESH_TOKEN_TTL_DAYS} days')`,
     [userId.trim(), tenantId.trim(), tokenHash],
   );
 
@@ -105,7 +105,7 @@ export async function rotateRefreshToken(rawToken) {
 
     await client.query(
       `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at)
-       VALUES ($1, $2, $3, NOW() + INTERVAL '7 days')`,
+       VALUES ($1, $2, $3, NOW() + INTERVAL '${REFRESH_TOKEN_TTL_DAYS} days')`,
       [row.user_id, row.tenant_id, newHash],
     );
 
