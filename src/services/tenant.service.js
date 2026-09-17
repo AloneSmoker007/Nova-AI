@@ -83,19 +83,27 @@ export async function isTenantActive(tenantId) {
   }
 }
 
-export async function isUserActive(userId) {
+export async function isUserActive(userId, tenantId) {
   if (!isDatabaseConfigured() || !dbPool) {
     return false;
   }
 
-  if (!userId || typeof userId !== "string") {
+  if (
+    !userId ||
+    typeof userId !== "string" ||
+    !tenantId ||
+    typeof tenantId !== "string"
+  ) {
     return false;
   }
 
   try {
     const result = await dbPool.query(
-      `SELECT status FROM users WHERE id = $1 LIMIT 1`,
-      [userId],
+      `SELECT status
+       FROM users
+       WHERE id = $1 AND tenant_id = $2
+       LIMIT 1`,
+      [userId, tenantId],
     );
 
     return result.rows[0]?.status === "active";

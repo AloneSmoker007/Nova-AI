@@ -30,7 +30,11 @@ export async function requireAuth(req, res, next) {
   }
 
   try {
-    const user = await getUserById(decoded.sub);
+    if (!decoded?.sub || typeof decoded.sub !== "string" || !decoded?.tenantId || typeof decoded.tenantId !== "string") {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+
+    const user = await getUserById(decoded.sub, decoded.tenantId);
     if (!user || user.status !== "active") {
       return res.status(401).json({ error: "Invalid or expired token" });
     }

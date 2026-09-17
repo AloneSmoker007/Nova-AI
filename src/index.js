@@ -176,7 +176,7 @@ async function processWhatsAppMessage(message, log = logger) {
     });
 
     if (persistedInbound.duplicate) {
-      await markMessageCompleted(messageId);
+      await markMessageCompleted(messageId, tenant.tenantId);
       log.info({ messageId, tenantId: tenant.tenantId }, "Ignoring duplicate WhatsApp message already persisted");
       return;
     }
@@ -204,10 +204,10 @@ async function processWhatsAppMessage(message, log = logger) {
       log.error({ error: persistenceError.message, messageId, tenantId: tenant.tenantId }, "Outbound WhatsApp message sent but persistence failed");
     }
 
-    await markMessageCompleted(messageId);
+    await markMessageCompleted(messageId, tenant.tenantId);
     log.info({ messageId, tenantId: tenant.tenantId }, "WhatsApp reply sent");
   } catch (error) {
-    await markMessageFailed(messageId, error.message);
+    await markMessageFailed(messageId, tenant.tenantId, error.message);
     log.error({ error: error.message, messageId, tenantId: tenant.tenantId }, "WhatsApp message processing failed");
     throw error;
   }
@@ -236,8 +236,8 @@ app.post("/api/auth/refresh", async (req, res) => {
   try {
     const rotatedToken = await rotateRefreshToken(value.refreshToken);
     if (!rotatedToken) return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
-    const user = await getUserById(rotatedToken.userId);
-    if (!user || user.status !== "active" || !(await isTenantActive(user.tenant_id))) return res.status(401).json({ status: "error", error: "Account is inactive" });
+    const user = await getUserById(rotatedToken.userId, rotatedToken.tenantId);
+    if (!user || user.status !== "active" || !(await isTenantActive(rotatedToken.tenantId))) return res.status(401).json({ status: "error", error: "Account is inactive" });
     const token = generateToken(user);
     return res.status(200).json({ status: "ok", token, refreshToken: rotatedToken.refreshToken, user: { id: user.id, email: user.email, role: user.role, tenantId: user.tenant_id } });
   } catch (error) {
@@ -260,7 +260,7 @@ app.post("/api/auth/logout", async (req, res) => {
 
 app.get("/api/auth/me", requireAuth, async (req, res) => {
   try {
-    const user = await getUserById(req.user.id);
+    const user = await getUserById(req.user.id, req.user.tenantId);
     if (!user || user.status !== "active") return res.status(401).json({ status: "error", error: "Invalid or expired token" });
     return res.status(200).json({ status: "ok", user: { id: user.id, email: user.email, role: user.role, tenantId: user.tenant_id } });
   } catch {
