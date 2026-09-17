@@ -11,7 +11,6 @@ import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
 import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
-import { markMessageCompleted, markMessageFailed } from "./services/idempotency.service.js";
 import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
