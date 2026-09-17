@@ -65,7 +65,6 @@ export async function persistInboundMessage({
         VALUES ($1, $2, $3, 'active', $4)
         ON CONFLICT (whatsapp_number_id, contact_id)
         DO UPDATE SET
-          status = 'active',
           last_message_at = EXCLUDED.last_message_at,
           updated_at = NOW()
         RETURNING id
@@ -119,7 +118,7 @@ export async function persistInboundMessage({
 export async function persistOutboundMessage({
   tenantId,
   conversationId,
-  whatsappMessageId = null,
+  whatsappMessageId,
   messageType = "text",
   body,
   sentAt = new Date(),
@@ -130,41 +129,63 @@ export async function persistOutboundMessage({
     throw new Error("Missing required outbound message identifiers");
   }
 
+  if (!whatsappMessageId || typeof whatsappMessageId !== "string" || !whatsappMessageId.trim()) {
+    throw new Error("whatsappMessageId is required for outbound messages");
+  }
+
   if (typeof body !== "string" || !body.trim()) {
     throw new Error("Outbound message body is invalid");
   }
 
-  const result = await dbPool.query(
-    `
-      INSERT INTO messages (
-        tenant_id,
-        conversation_id,
-        whatsapp_message_id,
-        direction,
-        message_type,
-        "text",
-        status,
-        created_at
-      )
-      VALUES ($1, $2, $3, 'outbound', $4, $5, 'sent', $6)
-      ON CONFLICT (tenant_id, whatsapp_message_id)
-      DO NOTHING
-      RETURNING id
-    `,
-    [tenantId, conversationId, whatsappMessageId, messageType, body.slice(0, 4096), sentAt],
-  );
+  const client = await dbPool.connect();
 
-  await dbPool.query(
-    `
-      UPDATE conversations
-      SET last_message_at = $2, updated_at = NOW()
-      WHERE tenant_id = $1 AND id = $3
-    `,
-    [tenantId, sentAt, conversationId],
-  );
+  try {
+    await client.query("BEGIN");
 
-  return {
-    duplicate: result.rowCount === 0,
-    messageId: result.rows[0]?.id ?? null,
-  };
+    const result = await client.query(
+      `
+        INSERT INTO messages (
+          tenant_id,
+          conversation_id,
+          whatsapp_message_id,
+          direction,
+          message_type,
+          "text",
+          status,
+          created_at
+        )
+        VALUES ($1, $2, $3, 'outbound', $4, $5, 'sent', $6)
+        ON CONFLICT (tenant_id, whatsapp_message_id)
+        DO NOTHING
+        RETURNING id
+      `,
+      [tenantId, conversationId, whatsappMessageId, messageType, body.slice(0, 4096), sentAt],
+    );
+
+    if (result.rowCount === 0) {
+      await client.query("COMMIT");
+      return { duplicate: true, messageId: null };
+    }
+
+    await client.query(
+      `
+        UPDATE conversations
+        SET last_message_at = $2, updated_at = NOW()
+        WHERE tenant_id = $1 AND id = $3
+      `,
+      [tenantId, sentAt, conversationId],
+    );
+
+    await client.query("COMMIT");
+
+    return {
+      duplicate: false,
+      messageId: result.rows[0].id,
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
