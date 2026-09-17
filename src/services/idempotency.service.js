@@ -1,7 +1,6 @@
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
 import { logger } from "../config/logger.js";
 
-const STALE_PROCESSING_INTERVAL = "10 minutes";
 const DEFAULT_CLEANUP_DAYS = 30;
 
 function validateMessageId(messageId) {
