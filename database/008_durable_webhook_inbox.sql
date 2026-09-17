@@ -2,10 +2,16 @@
 -- Migration 008: Durable Webhook Inbox
 -- ============================================================
 
+-- The composite foreign key below requires a matching unique key on
+-- whatsapp_numbers. This additive constraint makes the tenant/number
+-- relationship enforceable without changing the existing primary key.
+ALTER TABLE whatsapp_numbers
+  ADD CONSTRAINT uq_whatsapp_numbers_tenant_id UNIQUE (tenant_id, id);
+
 CREATE TABLE webhook_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  whatsapp_number_id UUID NOT NULL REFERENCES whatsapp_numbers(id) ON DELETE CASCADE,
+  whatsapp_number_id UUID NOT NULL,
   phone_number_id TEXT NOT NULL,
   whatsapp_message_id TEXT NOT NULL,
   wa_id TEXT NOT NULL,
@@ -26,8 +32,8 @@ CREATE TABLE webhook_messages (
   completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT uq_webhook_messages_tenant_message UNIQUE (tenant_id, whatsapp_message_id),
-  CONSTRAINT uq_whatsapp_numbers_tenant_id UNIQUE (tenant_id, id),
+  CONSTRAINT uq_webhook_messages_tenant_message
+    UNIQUE (tenant_id, whatsapp_message_id),
   CONSTRAINT fk_webhook_messages_tenant_number
     FOREIGN KEY (tenant_id, whatsapp_number_id)
     REFERENCES whatsapp_numbers (tenant_id, id)

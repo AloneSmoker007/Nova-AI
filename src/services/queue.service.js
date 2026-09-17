@@ -32,24 +32,20 @@ export function isQueueConfigured() {
   return Boolean(process.env.REDIS_URL);
 }
 
-function validateJobInput(inboxId, tenantId) {
-  return (
-    typeof inboxId === "string" &&
-    inboxId.trim() !== "" &&
-    typeof tenantId === "string" &&
-    tenantId.trim() !== ""
-  );
+function validateInboxId(inboxId) {
+  return typeof inboxId === "string" && inboxId.trim() !== "";
 }
 
-export async function enqueueWhatsAppMessage({ inboxId, tenantId }) {
+export async function enqueueWhatsAppMessage({ inboxId }) {
   if (!isQueueConfigured()) {
     throw new Error("Queue is not configured (REDIS_URL missing)");
   }
 
-  if (!validateJobInput(inboxId, tenantId)) {
+  if (!validateInboxId(inboxId)) {
     throw new Error("Invalid durable inbox job");
   }
 
+  const normalizedInboxId = inboxId.trim();
   if (!messageQueue) {
     messageQueue = new Queue(QUEUE_NAME, {
       connection: getConnection(),
@@ -58,13 +54,13 @@ export async function enqueueWhatsAppMessage({ inboxId, tenantId }) {
 
   await messageQueue.add(
     "process",
-    { inboxId: inboxId.trim(), tenantId: tenantId.trim() },
+    { inboxId: normalizedInboxId },
     {
       attempts: MAX_ATTEMPTS,
       backoff: { type: "exponential", delay: BACKOFF_MS },
       removeOnComplete: { age: 3600, count: 1000 },
       removeOnFail: { age: 86400, count: 5000 },
-      jobId: inboxId.trim(),
+      jobId: normalizedInboxId,
     },
   );
 }

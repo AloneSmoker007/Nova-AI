@@ -93,11 +93,7 @@ app.get("/ready", async (req, res) => {
   try {
     const database = await checkDatabaseConnection();
     if (!database.configured) {
-      return res.status(IS_PRODUCTION ? 503 : 200).json({
-        status: IS_PRODUCTION ? "not_ready" : "ready",
-        service: "Nova-AI",
-        database: "not_configured",
-      });
+      return res.status(IS_PRODUCTION ? 503 : 200).json({ status: IS_PRODUCTION ? "not_ready" : "ready", service: "Nova-AI", database: "not_configured" });
     }
     if (!database.connected) return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "disconnected" });
     return res.status(200).json({ status: "ready", service: "Nova-AI", database: "connected" });
@@ -169,14 +165,14 @@ function extractWebhookMessages(body) {
     .map((message) => ({ ...message, phoneNumberId }));
 }
 
-async function processInboxMessage(inboxId, tenantId, log = logger) {
-  const inbox = await getInboxMessage(inboxId, tenantId);
+async function processInboxMessage(inboxId, log = logger) {
+  const inbox = await getInboxMessage(inboxId);
   if (!inbox) return;
 
-  const claim = await claimInboxMessage(inboxId, tenantId);
+  const claim = await claimInboxMessage(inboxId);
   if (!claim.claimed) {
     if (claim.reason !== "processing") {
-      log.info({ inboxId, tenantId, reason: claim.reason }, "Skipping durable inbox message");
+      log.info({ inboxId, reason: claim.reason }, "Skipping durable inbox message");
     }
     return;
   }
@@ -251,12 +247,7 @@ async function processInboxMessage(inboxId, tenantId, log = logger) {
       throw new Error("WhatsApp API returned no message ID");
     }
 
-    await recordProviderMessageId(
-      message.id,
-      message.tenant_id,
-      leaseToken,
-      providerMessageId,
-    );
+    await recordProviderMessageId(message.id, message.tenant_id, leaseToken, providerMessageId);
 
     await persistOutboundMessage({
       tenantId: message.tenant_id,
@@ -287,10 +278,10 @@ async function dispatchPendingInboxMessages() {
     for (const row of pending) {
       try {
         if (isQueueConfigured()) {
-          await enqueueWhatsAppMessage({ inboxId: row.id, tenantId: row.tenant_id });
+          await enqueueWhatsAppMessage({ inboxId: row.id });
           await markQueueDispatched(row.id, row.tenant_id);
         } else {
-          await processInboxMessage(row.id, row.tenant_id, logger);
+          await processInboxMessage(row.id, logger);
         }
       } catch (error) {
         logger.error(
@@ -429,7 +420,7 @@ async function startServer() {
   const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
 
   if (isQueueConfigured()) {
-    startWorker(async (jobData) => processInboxMessage(jobData.inboxId, jobData.tenantId, logger));
+    startWorker(async (jobData) => processInboxMessage(jobData.inboxId, logger));
     logger.info("WhatsApp queue worker started");
   }
 

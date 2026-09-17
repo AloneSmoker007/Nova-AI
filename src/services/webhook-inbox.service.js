@@ -85,25 +85,23 @@ export async function ingestWebhookMessage({ message, tenant }) {
   return result.rows[0];
 }
 
-export async function getInboxMessage(inboxId, tenantId) {
+export async function getInboxMessage(inboxId) {
   assertDatabase();
 
-  if (!validateInboxId(inboxId) || !validateTenantId(tenantId)) {
-    return null;
-  }
+  if (!validateInboxId(inboxId)) return null;
 
   const result = await dbPool.query(
-    "SELECT * FROM webhook_messages WHERE id = $1 AND tenant_id = $2 LIMIT 1",
-    [inboxId.trim(), tenantId.trim()],
+    "SELECT * FROM webhook_messages WHERE id = $1 LIMIT 1",
+    [inboxId.trim()],
   );
 
   return result.rows[0] ?? null;
 }
 
-export async function claimInboxMessage(inboxId, tenantId) {
+export async function claimInboxMessage(inboxId) {
   assertDatabase();
 
-  if (!validateInboxId(inboxId) || !validateTenantId(tenantId)) {
+  if (!validateInboxId(inboxId)) {
     return { claimed: false, reason: "invalid" };
   }
 
@@ -111,21 +109,21 @@ export async function claimInboxMessage(inboxId, tenantId) {
   const result = await dbPool.query(
     "UPDATE webhook_messages SET state = 'PROCESSING', " +
       "attempts = attempts + 1, " +
-      "lease_until = NOW() + ($3 * INTERVAL '1 second'), " +
-      "lease_token = $4::uuid, updated_at = NOW() " +
-      "WHERE id = $1 AND tenant_id = $2 AND " +
+      "lease_until = NOW() + ($2 * INTERVAL '1 second'), " +
+      "lease_token = $3::uuid, updated_at = NOW() " +
+      "WHERE id = $1 AND " +
       "(state IN ('RECEIVED', 'QUEUED', 'RETRY_WAIT') OR " +
       "(state = 'PROCESSING' AND lease_until < NOW())) AND " +
-      "available_at <= NOW() AND attempts < $5 " +
+      "available_at <= NOW() AND attempts < $4 " +
       "RETURNING *",
-    [inboxId.trim(), tenantId.trim(), LEASE_SECONDS, leaseToken, MAX_ATTEMPTS],
+    [inboxId.trim(), LEASE_SECONDS, leaseToken, MAX_ATTEMPTS],
   );
 
   if (result.rowCount === 1) {
     return { claimed: true, leaseToken, message: result.rows[0] };
   }
 
-  const current = await getInboxMessage(inboxId, tenantId);
+  const current = await getInboxMessage(inboxId);
   if (!current) return { claimed: false, reason: "invalid" };
   if (current.state === "COMPLETED") return { claimed: false, reason: "completed" };
   if (current.attempts >= MAX_ATTEMPTS || current.state === "DEAD_LETTER") {
