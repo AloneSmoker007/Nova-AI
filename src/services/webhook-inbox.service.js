@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
 
 const LEASE_SECONDS = 120;
+const LEASE_HEARTBEAT_SECONDS = 30;
+const MAX_HEARTBEAT_SECONDS = 30 * 60;
 const MAX_ATTEMPTS = 5;
 const MAX_ERROR_LENGTH = 1000;
 
@@ -23,6 +25,45 @@ function validateInboxId(inboxId) {
 function normalizeError(error) {
   const value = error instanceof Error ? error.message : String(error ?? "");
   return value.slice(0, MAX_ERROR_LENGTH);
+}
+
+function startLeaseHeartbeat(inboxId, tenantId, leaseToken) {
+  let elapsedSeconds = 0;
+  let stopped = false;
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+  };
+
+  const timer = setInterval(async () => {
+    if (stopped) return;
+    elapsedSeconds += LEASE_HEARTBEAT_SECONDS;
+    if (elapsedSeconds > MAX_HEARTBEAT_SECONDS) {
+      stop();
+      return;
+    }
+
+    try {
+      const result = await dbPool.query(
+        "UPDATE webhook_messages SET lease_until = NOW() + ($4 * INTERVAL '1 second'), updated_at = NOW() " +
+          "WHERE id = $1 AND tenant_id = $2 AND state = 'PROCESSING' " +
+          "AND lease_token = $3::uuid AND lease_until >= NOW() " +
+          "RETURNING id",
+        [inboxId, tenantId, leaseToken, LEASE_SECONDS],
+      );
+
+      if (result.rowCount !== 1) stop();
+    } catch {
+      // A transient heartbeat failure is bounded by the current lease. If it
+      // persists, recovery will reclaim the row and the token check will stop
+      // this heartbeat from renewing a reclaimed lease.
+    }
+  }, LEASE_HEARTBEAT_SECONDS * 1000);
+
+  timer.unref();
+  return stop;
 }
 
 export async function ingestWebhookMessage({ message, tenant }) {
@@ -85,45 +126,58 @@ export async function ingestWebhookMessage({ message, tenant }) {
   return result.rows[0];
 }
 
-export async function getInboxMessage(inboxId) {
+export async function getInboxMessage(inboxId, tenantId) {
   assertDatabase();
 
   if (!validateInboxId(inboxId)) return null;
+  if (tenantId !== undefined && !validateTenantId(tenantId)) return null;
 
+  const predicates = tenantId === undefined ? "id = $1" : "id = $1 AND tenant_id = $2";
+  const values = tenantId === undefined ? [inboxId.trim()] : [inboxId.trim(), tenantId.trim()];
   const result = await dbPool.query(
-    "SELECT * FROM webhook_messages WHERE id = $1 LIMIT 1",
-    [inboxId.trim()],
+    `SELECT * FROM webhook_messages WHERE ${predicates} LIMIT 1`,
+    values,
   );
 
   return result.rows[0] ?? null;
 }
 
-export async function claimInboxMessage(inboxId) {
+export async function claimInboxMessage(inboxId, tenantId) {
   assertDatabase();
 
   if (!validateInboxId(inboxId)) {
     return { claimed: false, reason: "invalid" };
   }
+  if (tenantId !== undefined && !validateTenantId(tenantId)) {
+    return { claimed: false, reason: "invalid" };
+  }
 
   const leaseToken = crypto.randomUUID();
+  const identity = tenantId === undefined ? "id = $1" : "id = $1 AND tenant_id = $2";
+  const values = tenantId === undefined
+    ? [inboxId.trim(), LEASE_SECONDS, leaseToken, MAX_ATTEMPTS]
+    : [inboxId.trim(), tenantId.trim(), LEASE_SECONDS, leaseToken, MAX_ATTEMPTS];
+  const offset = tenantId === undefined ? 0 : 1;
   const result = await dbPool.query(
-    "UPDATE webhook_messages SET state = 'PROCESSING', " +
-      "attempts = attempts + 1, " +
-      "lease_until = NOW() + ($2 * INTERVAL '1 second'), " +
-      "lease_token = $3::uuid, updated_at = NOW() " +
-      "WHERE id = $1 AND " +
-      "(state IN ('RECEIVED', 'QUEUED', 'RETRY_WAIT') OR " +
-      "(state = 'PROCESSING' AND lease_until < NOW())) AND " +
-      "available_at <= NOW() AND attempts < $4 " +
-      "RETURNING *",
-    [inboxId.trim(), LEASE_SECONDS, leaseToken, MAX_ATTEMPTS],
+    `UPDATE webhook_messages SET state = 'PROCESSING',
+      attempts = attempts + 1,
+      lease_until = NOW() + ($${2 + offset} * INTERVAL '1 second'),
+      lease_token = $${3 + offset}::uuid, updated_at = NOW()
+      WHERE ${identity} AND
+      (state IN ('RECEIVED', 'QUEUED', 'RETRY_WAIT') OR
+      (state = 'PROCESSING' AND lease_until < NOW())) AND
+      available_at <= NOW() AND attempts < $${4 + offset}
+      RETURNING *`,
+    values,
   );
 
   if (result.rowCount === 1) {
-    return { claimed: true, leaseToken, message: result.rows[0] };
+    const row = result.rows[0];
+    const stopHeartbeat = startLeaseHeartbeat(row.id, row.tenant_id, leaseToken);
+    return { claimed: true, leaseToken, stopHeartbeat, message: row };
   }
 
-  const current = await getInboxMessage(inboxId);
+  const current = await getInboxMessage(inboxId, tenantId);
   if (!current) return { claimed: false, reason: "invalid" };
   if (current.state === "COMPLETED") return { claimed: false, reason: "completed" };
   if (current.attempts >= MAX_ATTEMPTS || current.state === "DEAD_LETTER") {
