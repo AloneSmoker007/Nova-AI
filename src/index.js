@@ -31,6 +31,7 @@ import {
   markQueueDispatched,
   markRetry,
   saveGeneratedResponse,
+  recordProviderMessageId,
   markCompleted,
   findUndispatchedMessages,
   recoverExpiredLeases,
@@ -244,6 +245,13 @@ async function processInboxMessage(inboxId, tenantId, log = logger) {
     if (!providerMessageId || typeof providerMessageId !== "string") {
       throw new Error("WhatsApp API returned no message ID");
     }
+
+    await recordProviderMessageId(
+      message.id,
+      message.tenant_id,
+      leaseToken,
+      providerMessageId,
+    );
 
     try {
       await persistOutboundMessage({
