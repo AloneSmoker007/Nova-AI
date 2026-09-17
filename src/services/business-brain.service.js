@@ -1,16 +1,68 @@
+import Joi from "joi";
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
+import logger from "../config/logger.js";
 
 const MAX_TEXT_LENGTH = 4000;
 const MAX_LIST_ITEMS = 100;
+
+const businessBrainSchema = Joi.object({
+  businessName: Joi.string().allow("", null).max(4000),
+  category: Joi.string().allow("", null).max(4000),
+  description: Joi.string().allow("", null).max(4000),
+  location: Joi.string().allow("", null).max(4000),
+  contact: Joi.string().allow("", null).max(4000),
+  aiTone: Joi.string().allow("", null).max(200),
+  aiLanguage: Joi.string().allow("", null).max(100),
+  customInstructions: Joi.string().allow("", null).max(4000),
+  products: Joi.array().max(MAX_LIST_ITEMS).items(
+    Joi.alternatives().try(
+      Joi.string().max(200),
+      Joi.object({
+        name: Joi.string().max(200),
+        title: Joi.string().max(200),
+        price: Joi.string().max(100),
+        description: Joi.string().max(1000),
+      }),
+    ),
+  ).default([]),
+  faqs: Joi.array().max(MAX_LIST_ITEMS).items(
+    Joi.alternatives().try(
+      Joi.string().max(2000),
+      Joi.object({
+        question: Joi.string().max(500),
+        q: Joi.string().max(500),
+        answer: Joi.string().max(2000),
+        a: Joi.string().max(2000),
+      }),
+    ),
+  ).default([]),
+  hours: Joi.object().pattern(
+    /^[a-zA-Z0-9 _-]{1,30}$/,
+    Joi.string().max(200),
+  ).default({}),
+  rules: Joi.array().max(MAX_LIST_ITEMS).items(
+    Joi.alternatives().try(
+      Joi.string().max(500),
+      Joi.object({
+        rule: Joi.string().max(500),
+        text: Joi.string().max(500),
+      }),
+    ),
+  ).default([]),
+}).unknown(true);
+
+export function validateBusinessBrain(input) {
+  const { error, value } = businessBrainSchema.validate(input, { abortEarly: false });
+  if (error) {
+    throw new Error(`Invalid Business Brain input: ${error.message}`);
+  }
+  return value;
+}
 
 function normalizeText(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed.slice(0, MAX_TEXT_LENGTH) : null;
-}
-
-function normalizeJson(value, fallback) {
-  return value === undefined || value === null ? fallback : value;
 }
 
 export async function getBusinessBrain(tenantId) {
@@ -64,18 +116,7 @@ export async function upsertBusinessBrain(tenantId, brain = {}) {
     throw new Error("Database is not configured");
   }
 
-  const products = normalizeJson(brain.products, []);
-  const faqs = normalizeJson(brain.faqs, []);
-  const hours = normalizeJson(brain.hours, {});
-  const rules = normalizeJson(brain.rules, []);
-
-  if (!Array.isArray(products) || !Array.isArray(faqs) || !Array.isArray(rules)) {
-    throw new Error("Business Brain lists must be arrays");
-  }
-
-  if (typeof hours !== "object" || Array.isArray(hours)) {
-    throw new Error("Business Brain hours must be an object");
-  }
+  const validated = validateBusinessBrain(brain);
 
   const result = await dbPool.query(
     `
@@ -103,20 +144,21 @@ export async function upsertBusinessBrain(tenantId, brain = {}) {
     `,
     [
       tenantId,
-      normalizeText(brain.businessName),
-      normalizeText(brain.category),
-      normalizeText(brain.description),
-      JSON.stringify(products.slice(0, MAX_LIST_ITEMS)),
-      JSON.stringify(faqs.slice(0, MAX_LIST_ITEMS)),
-      JSON.stringify(hours),
-      normalizeText(brain.location),
-      normalizeText(brain.contact),
-      normalizeText(brain.aiTone),
-      normalizeText(brain.aiLanguage),
-      normalizeText(brain.customInstructions),
-      JSON.stringify(rules.slice(0, MAX_LIST_ITEMS)),
+      normalizeText(validated.businessName),
+      normalizeText(validated.category),
+      normalizeText(validated.description),
+      JSON.stringify(validated.products.slice(0, MAX_LIST_ITEMS)),
+      JSON.stringify(validated.faqs.slice(0, MAX_LIST_ITEMS)),
+      JSON.stringify(validated.hours),
+      normalizeText(validated.location),
+      normalizeText(validated.contact),
+      normalizeText(validated.aiTone),
+      normalizeText(validated.aiLanguage),
+      normalizeText(validated.customInstructions),
+      JSON.stringify(validated.rules.slice(0, MAX_LIST_ITEMS)),
     ],
   );
 
+  logger.info({ tenantId }, "Upserted Business Brain successfully");
   return Boolean(result.rows[0]);
 }

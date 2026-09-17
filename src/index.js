@@ -5,20 +5,24 @@ import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import Joi from "joi";
-import pino from "pino";
 import pinoHttp from "pino-http";
 import { v4 as uuidv4 } from "uuid";
 
-import { checkDatabaseConnection, closeDatabaseConnection } from "./config/database.js";
+import logger from "./config/logger.js";
+import { checkDatabaseConnection, closeDatabaseConnection, isDatabaseConfigured } from "./config/database.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
 import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
-import { claimMessage, markMessageCompleted, releaseMessage } from "./services/idempotency.service.js";
+import { claimMessage, markMessageCompleted, markMessageFailed } from "./services/idempotency.service.js";
 import { resolveTenantByPhoneNumberId } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
-import { loginUser } from "./services/auth.service.js";
+import { loginUser, getUserById, generateToken } from "./services/auth.service.js";
+import { issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from "./services/refresh-token.service.js";
+import { isQueueConfigured, enqueueWhatsAppMessage, startWorker, closeQueue } from "./services/queue.service.js";
+import { metricsMiddleware, metricsEndpoint, messagesProcessedTotal, geminiDurationSeconds } from "./services/metrics.service.js";
+import { tenantRateLimit } from "./middleware/tenant-rate-limit.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 
@@ -26,6 +30,11 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PRODUCTION = NODE_ENV === "production";
+
+if (!process.env.NODE_ENV) {
+  logger.warn("NODE_ENV is not explicitly set; defaulting to 'development'.");
+}
+
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 
@@ -41,28 +50,8 @@ const missingEnvVars = REQUIRED_ENV_VARS.filter((name) => !process.env[name]?.tr
 if (missingEnvVars.length > 0) {
   const message = `Missing required environment variables: ${missingEnvVars.join(", ")}`;
   if (IS_PRODUCTION) throw new Error(message);
-  console.warn(message);
+  logger.warn(message);
 }
-
-const logger = pino({
-  level: process.env.LOG_LEVEL || (IS_PRODUCTION ? "info" : "debug"),
-  redact: {
-    paths: [
-      "req.headers.authorization",
-      'req.headers["x-hub-signature-256"]',
-      "req.headers.cookie",
-      "*.token",
-      "*.apiKey",
-      "*.secret",
-      "*.accessToken",
-      "*.accessTokenEncrypted",
-      "*.password",
-      "*.password_hash",
-      "*.passwordHash",
-    ],
-    censor: "[REDACTED]",
-  },
-});
 
 const httpLogger = pinoHttp({
   logger,
@@ -77,13 +66,21 @@ const httpLogger = pinoHttp({
 });
 
 app.disable("x-powered-by");
-// Trust one reverse proxy hop (Railway/Render/Fly.io). Adjust this if the
-// deployment topology changes; an incorrect value can weaken IP rate limits.
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(compression());
+app.use(metricsMiddleware);
 app.use(httpLogger);
-app.use(rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false }));
+
+const globalRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === "/webhook" || req.path === "/metrics",
+});
+app.use(globalRateLimiter);
+
 app.use(express.json({
   limit: "100kb",
   verify: (req, res, buffer) => { req.rawBody = Buffer.from(buffer); },
@@ -99,6 +96,7 @@ const loginLimiter = rateLimit({
 
 app.get("/", (req, res) => res.status(200).json({ status: "ok", service: "Nova-AI", message: "Nova-AI server is running" }));
 app.get("/health", (req, res) => res.status(200).json({ status: "ok", service: "Nova-AI", uptime: process.uptime() }));
+app.get("/metrics", metricsEndpoint);
 
 app.get("/ready", async (req, res) => {
   try {
@@ -120,8 +118,6 @@ app.get("/ready", async (req, res) => {
   }
 });
 
-// WhatsApp webhook verification and delivery use Meta's verification token
-// and HMAC signature respectively; they intentionally do not use JWT auth.
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -134,7 +130,7 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-function verifyMetaSignature(req) {
+export function verifyMetaSignature(req) {
   if (!META_APP_SECRET || !req.rawBody) return false;
   const signature = req.get("x-hub-signature-256");
   if (!signature || !/^sha256=[a-f0-9]{64}$/.test(signature)) return false;
@@ -144,32 +140,45 @@ function verifyMetaSignature(req) {
   return receivedBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
-function extractWebhookMessage(body) {
-  const value = body?.entry?.[0]?.changes?.[0]?.value;
-  const message = value?.messages?.[0];
-  const profileName = value?.contacts?.[0]?.profile?.name;
-  const phoneNumberId = value?.metadata?.phone_number_id;
-  if (!message?.text?.body || !message?.from || !message?.id) return null;
-  if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return null;
-  return { ...message, phoneNumberId, profileName };
+export function extractWebhookMessages(body) {
+  const messages = [];
+  if (!body || !Array.isArray(body.entry)) return messages;
+
+  for (const entry of body.entry) {
+    if (!Array.isArray(entry?.changes)) continue;
+    for (const change of entry.changes) {
+      const value = change?.value;
+      if (!value) continue;
+      const phoneNumberId = value.metadata?.phone_number_id;
+      if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) continue;
+      const profileName = value.contacts?.[0]?.profile?.name;
+
+      if (Array.isArray(value.messages)) {
+        for (const msg of value.messages) {
+          if (msg?.text?.body && msg?.from && msg?.id) {
+            messages.push({ ...msg, phoneNumberId, profileName });
+          }
+        }
+      }
+    }
+  }
+  return messages;
 }
 
-async function processWhatsAppMessage(message, log) {
+export async function processWhatsAppMessage(message, log = logger) {
   const messageId = message.id;
-  const claim = claimMessage(messageId);
-  if (!claim.claimed) {
-    log.info({ messageId, reason: claim.reason }, "Ignoring duplicate WhatsApp message");
-    return;
-  }
 
   try {
-    const incomingMessage = message.text.body;
-    const senderNumber = message.from;
     const tenant = await resolveTenantByPhoneNumberId(message.phoneNumberId);
 
     if (!tenant) {
-      releaseMessage(messageId);
       log.warn({ messageId, phoneNumberId: message.phoneNumberId }, "Ignoring WhatsApp message: no active tenant mapping");
+      return;
+    }
+
+    const claim = await claimMessage(messageId, tenant.tenantId);
+    if (!claim.claimed) {
+      log.info({ messageId, reason: claim.reason }, "Ignoring duplicate WhatsApp message");
       return;
     }
 
@@ -181,17 +190,25 @@ async function processWhatsAppMessage(message, log) {
     const persistedInbound = await persistInboundMessage({
       tenantId: tenant.tenantId,
       whatsappNumberId: tenant.whatsappNumberId,
-      waId: senderNumber,
+      waId: message.from,
       profileName: message.profileName,
       whatsappMessageId: messageId,
       messageType: "text",
-      body: incomingMessage,
+      body: message.text.body,
       receivedAt: new Date(),
     });
 
     if (persistedInbound.duplicate) {
-      markMessageCompleted(messageId);
+      await markMessageCompleted(messageId);
+      messagesProcessedTotal.inc({ tenant_id: tenant.tenantId, status: "duplicate" });
       log.info({ messageId, tenantId: tenant.tenantId }, "Ignoring duplicate WhatsApp message already persisted");
+      return;
+    }
+
+    if (persistedInbound.conversationStatus === "human") {
+      await markMessageCompleted(messageId);
+      messagesProcessedTotal.inc({ tenant_id: tenant.tenantId, status: "human_takeover" });
+      log.info({ messageId, tenantId: tenant.tenantId }, "Skipping AI reply: conversation is in human takeover status");
       return;
     }
 
@@ -205,20 +222,25 @@ async function processWhatsAppMessage(message, log) {
       );
     }
 
-    const reply = await generateGeminiReply(incomingMessage, brain);
+    const geminiStart = process.hrtime();
+    const reply = await generateGeminiReply(message.text.body, brain);
+    const geminiDiff = process.hrtime(geminiStart);
+    geminiDurationSeconds.observe(geminiDiff[0] + geminiDiff[1] / 1e9);
 
     const sentMessage = await sendWhatsAppMessage({
-      to: senderNumber,
+      to: message.from,
       message: reply,
       accessToken,
       phoneNumberId: tenant.phoneNumberId,
     });
 
+    const outboundWaId = sentMessage?.messages?.[0]?.id || `outbound-${messageId}`;
+
     try {
       await persistOutboundMessage({
         tenantId: tenant.tenantId,
         conversationId: persistedInbound.conversationId,
-        whatsappMessageId: sentMessage?.messages?.[0]?.id ?? null,
+        whatsappMessageId: outboundWaId,
         messageType: "text",
         body: reply,
         sentAt: new Date(),
@@ -227,11 +249,13 @@ async function processWhatsAppMessage(message, log) {
       log.error({ error: persistenceError.message, messageId, tenantId: tenant.tenantId }, "Outbound WhatsApp message sent but persistence failed");
     }
 
-    markMessageCompleted(messageId);
+    await markMessageCompleted(messageId);
+    messagesProcessedTotal.inc({ tenant_id: tenant.tenantId, status: "success" });
     log.info({ messageId, tenantId: tenant.tenantId }, "WhatsApp reply sent");
   } catch (error) {
-    releaseMessage(messageId);
+    await markMessageFailed(messageId, error.message);
     log.error({ error: error.message, messageId }, "WhatsApp message processing failed");
+    throw error;
   }
 }
 
@@ -240,13 +264,24 @@ app.post("/webhook", (req, res) => {
     req.log.warn("Rejected WhatsApp webhook: invalid signature");
     return res.sendStatus(403);
   }
-  const message = extractWebhookMessage(req.body);
-  if (!message) return res.sendStatus(200);
+  const messages = extractWebhookMessages(req.body);
+  if (messages.length === 0) return res.sendStatus(200);
+
   res.sendStatus(200);
-  setImmediate(() => { void processWhatsAppMessage(message, req.log); });
+
+  for (const msg of messages) {
+    if (isQueueConfigured()) {
+      enqueueWhatsAppMessage(msg).catch((err) => {
+        req.log.error({ error: err.message, messageId: msg.id }, "Failed to enqueue message, falling back to inline execution");
+        setImmediate(() => { void processWhatsAppMessage(msg, req.log).catch(() => undefined); });
+      });
+    } else {
+      setImmediate(() => { void processWhatsAppMessage(msg, req.log).catch(() => undefined); });
+    }
+  }
 });
 
-// ── Auth Routes (NO JWT required) ──────────────────────────
+// ── Auth Routes ──────────────────────────
 const loginSchema = Joi.object({
   email: Joi.string().email().max(255).required(),
   password: Joi.string().min(8).max(128).required(),
@@ -261,9 +296,15 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
 
     const result = await loginUser(value.email, value.password);
 
+    let refreshInfo = null;
+    if (isDatabaseConfigured()) {
+      refreshInfo = await issueRefreshToken(result.user.id, result.user.tenantId);
+    }
+
     return res.status(200).json({
       status: "ok",
       token: result.token,
+      refreshToken: refreshInfo?.refreshToken || null,
       user: result.user,
     });
   } catch (error) {
@@ -274,8 +315,65 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
   }
 });
 
-// ── Business Brain API (AUTH REQUIRED) ──────────────────────
-app.get("/api/business-brain", requireAuth, async (req, res) => {
+const refreshSchema = Joi.object({
+  refreshToken: Joi.string().required(),
+});
+
+app.post("/api/auth/refresh", async (req, res, next) => {
+  try {
+    const { error, value } = refreshSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ status: "error", error: "Invalid request" });
+    }
+
+    const rotated = await rotateRefreshToken(value.refreshToken);
+    if (!rotated) {
+      return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
+    }
+
+    const user = await getUserById(rotated.userId, rotated.tenantId);
+    if (!user) {
+      return res.status(401).json({ status: "error", error: "User account inactive or missing" });
+    }
+
+    const token = generateToken({ id: user.id, tenant_id: user.tenant_id, role: user.role });
+
+    return res.status(200).json({
+      status: "ok",
+      token,
+      refreshToken: rotated.refreshToken,
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/auth/logout", async (req, res, next) => {
+  try {
+    const { error, value } = refreshSchema.validate(req.body);
+    if (!error && value.refreshToken) {
+      await revokeRefreshToken(value.refreshToken);
+    }
+    return res.status(200).json({ status: "ok", message: "Logged out successfully" });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/auth/me", requireAuth, tenantRateLimit, async (req, res, next) => {
+  try {
+    const user = await getUserById(req.user.id, req.user.tenantId);
+    if (!user) {
+      return res.status(401).json({ status: "error", error: "User not found or inactive" });
+    }
+    return res.status(200).json({ status: "ok", user });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+// ── Business Brain API (AUTH REQUIRED + TENANT RATE LIMITED) ──────────────────────
+app.get("/api/business-brain", requireAuth, tenantRateLimit, async (req, res) => {
   try {
     const brain = await getBusinessBrain(req.user.tenantId);
     return res.status(200).json({ status: "ok", data: brain || {} });
@@ -285,7 +383,7 @@ app.get("/api/business-brain", requireAuth, async (req, res) => {
   }
 });
 
-app.put("/api/business-brain", requireAuth, requireRole("owner", "admin"), async (req, res) => {
+app.put("/api/business-brain", requireAuth, tenantRateLimit, requireRole("owner", "admin"), async (req, res) => {
   try {
     await upsertBusinessBrain(req.user.tenantId, req.body);
     const brain = await getBusinessBrain(req.user.tenantId);
@@ -327,6 +425,10 @@ async function startServer() {
     logger.info({ applied: migrationResult.applied }, "Database migrations checked");
   }
 
+  if (isQueueConfigured()) {
+    startWorker(processWhatsAppMessage);
+  }
+
   const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
 
   function shutdown(signal) {
@@ -337,11 +439,12 @@ async function startServer() {
         process.exit(1);
       }
       try {
+        await closeQueue();
         await closeDatabaseConnection();
         logger.info("Nova-AI server closed successfully");
         process.exit(0);
       } catch (shutdownError) {
-        logger.error({ error: shutdownError.message }, "Database shutdown error");
+        logger.error({ error: shutdownError.message }, "Shutdown error");
         process.exit(1);
       }
     });
@@ -352,9 +455,11 @@ async function startServer() {
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-startServer().catch((error) => {
-  logger.fatal({ error: error.message }, "Nova-AI failed to start");
-  process.exit(1);
-});
+if (process.env.NODE_ENV !== "test") {
+  startServer().catch((error) => {
+    logger.fatal({ error: error.message }, "Nova-AI failed to start");
+    process.exit(1);
+  });
+}
 
 export default app;

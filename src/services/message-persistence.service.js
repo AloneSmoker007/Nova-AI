@@ -1,4 +1,5 @@
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
+import logger from "../config/logger.js";
 
 function assertDatabase() {
   if (!isDatabaseConfigured() || !dbPool) {
@@ -30,6 +31,12 @@ export async function persistInboundMessage({
 
   if (typeof body !== "string" || !body.trim()) {
     throw new Error("Inbound message body is invalid");
+  }
+
+  let finalBody = body;
+  if (body.length > 4096) {
+    logger.warn({ tenantId, whatsappMessageId, length: body.length }, "Inbound message body truncated to 4096 characters");
+    finalBody = body.slice(0, 4096);
   }
 
   const client = await dbPool.connect();
@@ -65,15 +72,16 @@ export async function persistInboundMessage({
         VALUES ($1, $2, $3, 'active', $4)
         ON CONFLICT (whatsapp_number_id, contact_id)
         DO UPDATE SET
-          status = 'active',
           last_message_at = EXCLUDED.last_message_at,
           updated_at = NOW()
-        RETURNING id
+        RETURNING id, status
       `,
       [tenantId, whatsappNumberId, contactId, receivedAt],
     );
 
-    const conversationId = conversationResult.rows[0]?.id;
+    const conversationRow = conversationResult.rows[0];
+    const conversationId = conversationRow?.id;
+    const conversationStatus = conversationRow?.status;
     if (!conversationId) throw new Error("Failed to create or resolve conversation");
 
     const messageResult = await client.query(
@@ -92,12 +100,12 @@ export async function persistInboundMessage({
         DO NOTHING
         RETURNING id
       `,
-      [tenantId, conversationId, whatsappMessageId, messageType, body.slice(0, 4096)],
+      [tenantId, conversationId, whatsappMessageId, messageType, finalBody],
     );
 
     if (messageResult.rowCount === 0) {
       await client.query("ROLLBACK");
-      return { duplicate: true, conversationId, contactId, messageId: null };
+      return { duplicate: true, conversationId, contactId, messageId: null, conversationStatus };
     }
 
     await client.query("COMMIT");
@@ -107,6 +115,7 @@ export async function persistInboundMessage({
       contactId,
       conversationId,
       messageId: messageResult.rows[0].id,
+      conversationStatus,
     };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -119,7 +128,7 @@ export async function persistInboundMessage({
 export async function persistOutboundMessage({
   tenantId,
   conversationId,
-  whatsappMessageId = null,
+  whatsappMessageId,
   messageType = "text",
   body,
   sentAt = new Date(),
@@ -130,41 +139,64 @@ export async function persistOutboundMessage({
     throw new Error("Missing required outbound message identifiers");
   }
 
+  if (!whatsappMessageId || typeof whatsappMessageId !== "string" || !whatsappMessageId.trim()) {
+    throw new Error("Missing required whatsappMessageId for outbound message persistence");
+  }
+
   if (typeof body !== "string" || !body.trim()) {
     throw new Error("Outbound message body is invalid");
   }
 
-  const result = await dbPool.query(
-    `
-      INSERT INTO messages (
-        tenant_id,
-        conversation_id,
-        whatsapp_message_id,
-        direction,
-        message_type,
-        "text",
-        status,
-        created_at
-      )
-      VALUES ($1, $2, $3, 'outbound', $4, $5, 'sent', $6)
-      ON CONFLICT (tenant_id, whatsapp_message_id)
-      DO NOTHING
-      RETURNING id
-    `,
-    [tenantId, conversationId, whatsappMessageId, messageType, body.slice(0, 4096), sentAt],
-  );
+  let finalBody = body;
+  if (body.length > 4096) {
+    logger.warn({ tenantId, conversationId, whatsappMessageId, length: body.length }, "Outbound message body truncated to 4096 characters");
+    finalBody = body.slice(0, 4096);
+  }
 
-  await dbPool.query(
-    `
-      UPDATE conversations
-      SET last_message_at = $2, updated_at = NOW()
-      WHERE tenant_id = $1 AND id = $3
-    `,
-    [tenantId, sentAt, conversationId],
-  );
+  const client = await dbPool.connect();
 
-  return {
-    duplicate: result.rowCount === 0,
-    messageId: result.rows[0]?.id ?? null,
-  };
+  try {
+    await client.query("BEGIN");
+
+    const result = await client.query(
+      `
+        INSERT INTO messages (
+          tenant_id,
+          conversation_id,
+          whatsapp_message_id,
+          direction,
+          message_type,
+          "text",
+          status,
+          created_at
+        )
+        VALUES ($1, $2, $3, 'outbound', $4, $5, 'sent', $6)
+        ON CONFLICT (tenant_id, whatsapp_message_id)
+        DO NOTHING
+        RETURNING id
+      `,
+      [tenantId, conversationId, whatsappMessageId.trim(), messageType, finalBody, sentAt],
+    );
+
+    await client.query(
+      `
+        UPDATE conversations
+        SET last_message_at = $2, updated_at = NOW()
+        WHERE tenant_id = $1 AND id = $3
+      `,
+      [tenantId, sentAt, conversationId],
+    );
+
+    await client.query("COMMIT");
+
+    return {
+      duplicate: result.rowCount === 0,
+      messageId: result.rows[0]?.id ?? null,
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }

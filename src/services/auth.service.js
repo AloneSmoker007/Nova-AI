@@ -4,7 +4,7 @@ import { dbPool, isDatabaseConfigured } from "../config/database.js";
 
 const BCRYPT_ROUNDS = 12;
 const JWT_ALGORITHM = "HS256";
-const DEFAULT_EXPIRES_IN = "24h";
+const DEFAULT_EXPIRES_IN = "15m";
 
 // Valid 60-character bcrypt hash at cost 12.
 // Used only to keep bcrypt timing similar for unknown emails.
@@ -121,16 +121,16 @@ export async function loginUser(email, password) {
   };
 }
 
-export async function getUserById(userId) {
-  if (!isDatabaseConfigured() || !dbPool) {
+export async function getUserById(userId, tenantId) {
+  if (!isDatabaseConfigured() || !dbPool || !userId || !tenantId) {
     return null;
   }
 
   const result = await dbPool.query(
     `SELECT id, tenant_id, email, role, status
      FROM users
-     WHERE id = $1`,
-    [userId],
+     WHERE id = $1 AND tenant_id = $2 AND status = 'active'`,
+    [userId, tenantId],
   );
 
   return result.rows[0] || null;

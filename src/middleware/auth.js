@@ -1,36 +1,52 @@
 import { verifyToken } from "../services/auth.service.js";
+import { isUserActive, isTenantActive } from "../services/tenant.service.js";
 
-/**
- * Authenticate a request with a Bearer JWT.
- */
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || typeof authHeader !== "string") {
-    return res.status(401).json({ error: "Authentication required" });
+    return res.status(401).json({ status: "error", error: "Authentication token is missing" });
   }
 
-  if (!authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Authentication required" });
-  }
+  const [scheme, token] = authHeader.split(" ");
 
-  const token = authHeader.slice(7);
-
-  if (!token || typeof token !== "string") {
-    return res.status(401).json({ error: "Authentication required" });
+  if (scheme !== "Bearer" || !token) {
+    return res.status(401).json({ status: "error", error: "Invalid authorization format" });
   }
 
   try {
-    const decoded = verifyToken(token);
+    const payload = verifyToken(token);
+
+    if (!payload.sub || !payload.tenantId || !payload.role) {
+      return res.status(401).json({ status: "error", error: "Invalid token payload" });
+    }
+
+    const [userOk, tenantOk] = await Promise.all([
+      isUserActive(payload.sub, payload.tenantId),
+      isTenantActive(payload.tenantId),
+    ]);
+
+    if (!userOk || !tenantOk) {
+      return res.status(401).json({ status: "error", error: "User or tenant account is inactive" });
+    }
 
     req.user = {
-      id: decoded.sub,
-      tenantId: decoded.tenantId,
-      role: decoded.role,
+      id: payload.sub,
+      tenantId: payload.tenantId,
+      role: payload.role,
     };
 
-    next();
-  } catch {
-    return res.status(401).json({ error: "Invalid or expired token" });
+    return next();
+  } catch (error) {
+    if (
+      error.name === "JsonWebTokenError" ||
+      error.name === "TokenExpiredError" ||
+      error.name === "NotBeforeError"
+    ) {
+      return res.status(401).json({ status: "error", error: "Invalid or expired token" });
+    }
+
+    req.log?.error({ error: error.message }, "Auth middleware error");
+    return res.status(500).json({ status: "error", error: "Internal server error" });
   }
 }
