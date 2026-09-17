@@ -169,10 +169,11 @@ function extractWebhookMessages(body) {
     .map((message) => ({ ...message, phoneNumberId }));
 }
 
-async function processInboxMessage(inboxId, tenantId, log = logger) {
-  const inbox = await getInboxMessage(inboxId, tenantId);
+async function processInboxMessage(inboxId, log = logger) {
+  const inbox = await getInboxMessage(inboxId);
   if (!inbox) return;
 
+  const tenantId = inbox.tenant_id;
   const claim = await claimInboxMessage(inboxId, tenantId);
   if (!claim.claimed) {
     if (claim.reason !== "processing") {
@@ -293,7 +294,7 @@ async function dispatchPendingInboxMessages() {
           await enqueueWhatsAppMessage({ inboxId: row.id });
           await markQueueDispatched(row.id, row.tenant_id);
         } else {
-          await processInboxMessage(row.id, row.tenant_id, logger);
+          await processInboxMessage(row.id, logger);
         }
       } catch (error) {
         logger.error(
