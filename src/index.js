@@ -11,12 +11,14 @@ import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
 import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
-import { claimMessage, markMessageCompleted, releaseMessage } from "./services/idempotency.service.js";
-import { resolveTenantByPhoneNumberId } from "./services/tenant.service.js";
+import { claimMessage, markMessageCompleted, markMessageFailed } from "./services/idempotency.service.js";
+import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
-import { loginUser, getUserById } from "./services/auth.service.js";
+import { loginUser, getUserById, generateToken } from "./services/auth.service.js";
+import { issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from "./services/refresh-token.service.js";
+import { enqueueWhatsAppMessage, isQueueConfigured, startWorker, closeQueue } from "./services/queue.service.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 
@@ -75,15 +77,9 @@ app.get("/ready", async (req, res) => {
   try {
     const database = await checkDatabaseConnection();
     if (!database.configured) {
-      return res.status(IS_PRODUCTION ? 503 : 200).json({
-        status: IS_PRODUCTION ? "not_ready" : "ready",
-        service: "Nova-AI",
-        database: "not_configured",
-      });
+      return res.status(IS_PRODUCTION ? 503 : 200).json({ status: IS_PRODUCTION ? "not_ready" : "ready", service: "Nova-AI", database: "not_configured" });
     }
-    if (!database.connected) {
-      return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "disconnected" });
-    }
+    if (!database.connected) return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "disconnected" });
     return res.status(200).json({ status: "ready", service: "Nova-AI", database: "connected" });
   } catch (error) {
     req.log.error({ error: error.message }, "Readiness check failed");
@@ -91,8 +87,6 @@ app.get("/ready", async (req, res) => {
   }
 });
 
-// WhatsApp webhook verification and delivery use Meta's verification token
-// and HMAC signature respectively; they intentionally do not use JWT auth.
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -105,15 +99,28 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-app.post("/webhook", webhookLimiter, (req, res) => {
+app.post("/webhook", webhookLimiter, async (req, res) => {
   if (!verifyMetaSignature(req)) {
     req.log.warn("Rejected WhatsApp webhook: invalid signature");
     return res.sendStatus(403);
   }
   const messages = extractWebhookMessages(req.body);
-  if (!messages || messages.length === 0) return res.sendStatus(200);
   res.sendStatus(200);
-  setImmediate(() => { void processWhatsAppMessages(messages, req.log); });
+  if (messages.length === 0) return;
+
+  setImmediate(() => {
+    void Promise.all(messages.map(async (message) => {
+      try {
+        if (isQueueConfigured()) {
+          await enqueueWhatsAppMessage(message);
+        } else {
+          await processWhatsAppMessage(message, logger);
+        }
+      } catch (error) {
+        logger.error({ error: error.message, messageId: message.id }, "Failed to dispatch WhatsApp message");
+      }
+    }));
+  });
 });
 
 function verifyMetaSignature(req) {
@@ -132,37 +139,26 @@ function extractWebhookMessages(body) {
   const phoneNumberId = value?.metadata?.phone_number_id;
   if (!Array.isArray(messages) || messages.length === 0) return [];
   if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return [];
-
-  return messages
-    .filter((message) => message?.text?.body && message?.from && message?.id)
-    .map((message) => ({ ...message, phoneNumberId }));
+  return messages.filter((message) => message?.text?.body && message?.from && message?.id).map((message) => ({ ...message, phoneNumberId }));
 }
 
-async function processWhatsAppMessages(messages, log) {
-  for (const message of messages) {
-    await processWhatsAppMessage(message, log);
-  }
-}
-
-async function processWhatsAppMessage(message, log) {
+async function processWhatsAppMessage(message, log = logger) {
   const messageId = message.id;
-  const claim = claimMessage(messageId);
+  const tenant = await resolveTenantByPhoneNumberId(message.phoneNumberId);
+  if (!tenant) {
+    log.warn({ messageId, phoneNumberId: message.phoneNumberId }, "Ignoring WhatsApp message: no active tenant mapping");
+    return;
+  }
+
+  const claim = await claimMessage(messageId, tenant.tenantId);
   if (!claim.claimed) {
-    log.info({ messageId, reason: claim.reason }, "Ignoring duplicate WhatsApp message");
+    log.info({ messageId, tenantId: tenant.tenantId, reason: claim.reason }, "Ignoring duplicate WhatsApp message");
     return;
   }
 
   try {
     const incomingMessage = message.text.body;
     const senderNumber = message.from;
-    const tenant = await resolveTenantByPhoneNumberId(message.phoneNumberId);
-
-    if (!tenant) {
-      releaseMessage(messageId);
-      log.warn({ messageId, phoneNumberId: message.phoneNumberId }, "Ignoring WhatsApp message: no active tenant mapping");
-      return;
-    }
-
     log.info({ messageId, tenantId: tenant.tenantId, whatsappNumberId: tenant.whatsappNumberId }, "Processing tenant WhatsApp message");
 
     if (!tenant.accessTokenEncrypted) throw new Error("Tenant WhatsApp credentials are not configured");
@@ -180,7 +176,7 @@ async function processWhatsAppMessage(message, log) {
     });
 
     if (persistedInbound.duplicate) {
-      markMessageCompleted(messageId);
+      await markMessageCompleted(messageId);
       log.info({ messageId, tenantId: tenant.tenantId }, "Ignoring duplicate WhatsApp message already persisted");
       return;
     }
@@ -189,20 +185,11 @@ async function processWhatsAppMessage(message, log) {
     try {
       brain = await getBusinessBrain(tenant.tenantId);
     } catch (brainError) {
-      log.error(
-        { error: brainError.message, tenantId: tenant.tenantId, messageId },
-        "Failed to load Business Brain, falling back to default",
-      );
+      log.error({ error: brainError.message, tenantId: tenant.tenantId, messageId }, "Failed to load Business Brain, falling back to default");
     }
 
     const reply = await generateGeminiReply(incomingMessage, brain);
-
-    const sentMessage = await sendWhatsAppMessage({
-      to: senderNumber,
-      message: reply,
-      accessToken,
-      phoneNumberId: tenant.phoneNumberId,
-    });
+    const sentMessage = await sendWhatsAppMessage({ to: senderNumber, message: reply, accessToken, phoneNumberId: tenant.phoneNumberId });
 
     try {
       await persistOutboundMessage({
@@ -217,64 +204,70 @@ async function processWhatsAppMessage(message, log) {
       log.error({ error: persistenceError.message, messageId, tenantId: tenant.tenantId }, "Outbound WhatsApp message sent but persistence failed");
     }
 
-    markMessageCompleted(messageId);
+    await markMessageCompleted(messageId);
     log.info({ messageId, tenantId: tenant.tenantId }, "WhatsApp reply sent");
   } catch (error) {
-    releaseMessage(messageId);
-    log.error({ error: error.message, messageId }, "WhatsApp message processing failed");
+    await markMessageFailed(messageId, error.message);
+    log.error({ error: error.message, messageId, tenantId: tenant.tenantId }, "WhatsApp message processing failed");
+    throw error;
   }
 }
 
-// ── Auth Routes (NO JWT required) ──────────────────────────
-const loginSchema = Joi.object({
-  email: Joi.string().email().max(255).required(),
-  password: Joi.string().min(8).max(128).required(),
-});
+const loginSchema = Joi.object({ email: Joi.string().email().max(255).required(), password: Joi.string().min(8).max(128).required() });
+const refreshSchema = Joi.object({ refreshToken: Joi.string().trim().min(20).max(512).required() });
 
 app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
   try {
     const { error, value } = loginSchema.validate(req.body);
-    if (error) {
-      return res.status(400).json({ status: "error", error: "Invalid request" });
-    }
-
+    if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
     const result = await loginUser(value.email, value.password);
-
-    return res.status(200).json({
-      status: "ok",
-      token: result.token,
-      user: result.user,
-    });
+    const refreshToken = await issueRefreshToken(result.user.id, result.user.tenantId);
+    return res.status(200).json({ status: "ok", token: result.token, refreshToken, user: result.user });
   } catch (error) {
-    if (error.message === "Invalid credentials") {
-      return res.status(401).json({ status: "error", error: "Invalid credentials" });
-    }
+    if (error.message === "Invalid credentials") return res.status(401).json({ status: "error", error: "Invalid credentials" });
     next(error);
+  }
+});
+
+app.post("/api/auth/refresh", async (req, res) => {
+  const { error, value } = refreshSchema.validate(req.body);
+  if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
+
+  try {
+    const rotatedToken = await rotateRefreshToken(value.refreshToken);
+    if (!rotatedToken) return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
+    const user = await getUserById(rotatedToken.userId);
+    if (!user || user.status !== "active" || !(await isTenantActive(user.tenant_id))) return res.status(401).json({ status: "error", error: "Account is inactive" });
+    const token = generateToken(user);
+    return res.status(200).json({ status: "ok", token, refreshToken: rotatedToken.refreshToken, user: { id: user.id, email: user.email, role: user.role, tenantId: user.tenant_id } });
+  } catch (error) {
+    req.log.error({ error: error.message }, "Refresh token request failed");
+    return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
+  }
+});
+
+app.post("/api/auth/logout", async (req, res) => {
+  const { error, value } = refreshSchema.validate(req.body);
+  if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
+  try {
+    await revokeRefreshToken(value.refreshToken);
+    return res.sendStatus(204);
+  } catch (error) {
+    req.log.error({ error: error.message }, "Logout request failed");
+    return res.sendStatus(204);
   }
 });
 
 app.get("/api/auth/me", requireAuth, async (req, res) => {
   try {
     const user = await getUserById(req.user.id);
-    if (!user || user.status !== "active") {
-      return res.status(401).json({ status: "error", error: "Invalid or expired token" });
-    }
-
-    return res.status(200).json({
-      status: "ok",
-      user: {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-        tenantId: user.tenant_id,
-      },
-    });
+    if (!user || user.status !== "active") return res.status(401).json({ status: "error", error: "Invalid or expired token" });
+    return res.status(200).json({ status: "ok", user: { id: user.id, email: user.email, role: user.role, tenantId: user.tenant_id } });
   } catch {
     return res.status(401).json({ status: "error", error: "Invalid or expired token" });
   }
 });
 
-// ── Business Brain API (AUTH REQUIRED) ──────────────────────
 app.get("/api/business-brain", requireAuth, async (req, res) => {
   try {
     const brain = await getBusinessBrain(req.user.tenantId);
@@ -291,15 +284,12 @@ app.put("/api/business-brain", requireAuth, requireRole("owner", "admin"), async
     const brain = await getBusinessBrain(req.user.tenantId);
     return res.status(200).json({ status: "ok", data: brain });
   } catch (error) {
-    if (error.message.includes("Invalid") || error.message.includes("must be")) {
-      return res.status(400).json({ status: "error", error: error.message });
-    }
+    if (error.message.includes("Invalid") || error.message.includes("must be")) return res.status(400).json({ status: "error", error: error.message });
     req.log.error({ error: error.message, tenantId: req.user.tenantId }, "Failed to update Business Brain");
     return res.status(500).json({ status: "error", error: "Failed to update Business Brain" });
   }
 });
 
-// Gemini test is intentionally development-only to prevent production API-key abuse.
 const geminiTestSchema = Joi.object({ message: Joi.string().trim().min(1).max(4000).required() });
 if (!IS_PRODUCTION) {
   app.post("/api/test/gemini", async (req, res, next) => {
@@ -329,7 +319,15 @@ async function startServer() {
 
   const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
 
-  function shutdown(signal) {
+  if (isQueueConfigured()) {
+    startWorker(async (message) => processWhatsAppMessage(message, logger));
+    logger.info("WhatsApp queue worker started");
+  }
+
+  let shuttingDown = false;
+  async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info(`Received ${signal}, shutting down gracefully`);
     server.close(async (error) => {
       if (error) {
@@ -337,19 +335,20 @@ async function startServer() {
         process.exit(1);
       }
       try {
+        await closeQueue();
         await closeDatabaseConnection();
         logger.info("Nova-AI server closed successfully");
         process.exit(0);
       } catch (shutdownError) {
-        logger.error({ error: shutdownError.message }, "Database shutdown error");
+        logger.error({ error: shutdownError.message }, "Graceful shutdown error");
         process.exit(1);
       }
     });
     setTimeout(() => { logger.error("Forced shutdown after 10 seconds"); process.exit(1); }, 10_000).unref();
   }
 
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
 startServer().catch((error) => {
