@@ -5,7 +5,6 @@ import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import Joi from "joi";
-import { v4 as uuidv4 } from "uuid";
 
 import { checkDatabaseConnection, closeDatabaseConnection } from "./config/database.js";
 import { logger, createHttpLogger } from "./config/logger.js";
