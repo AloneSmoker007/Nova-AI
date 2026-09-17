@@ -274,20 +274,23 @@ async function processInboxMessage(inboxId, tenantId, log = logger) {
 }
 
 async function dispatchPendingInboxMessages() {
-  if (!isQueueConfigured()) {
-    return;
-  }
-
   try {
     await recoverExpiredLeases();
     const pending = await findUndispatchedMessages(50);
 
     for (const row of pending) {
       try {
-        await enqueueWhatsAppMessage({ inboxId: row.id, tenantId: row.tenant_id });
-        await markQueueDispatched(row.id, row.tenant_id);
+        if (isQueueConfigured()) {
+          await enqueueWhatsAppMessage({ inboxId: row.id, tenantId: row.tenant_id });
+          await markQueueDispatched(row.id, row.tenant_id);
+        } else {
+          await processInboxMessage(row.id, row.tenant_id, logger);
+        }
       } catch (error) {
-        logger.error({ error: error.message, inboxId: row.id, tenantId: row.tenant_id }, "Failed to dispatch durable inbox message");
+        logger.error(
+          { error: error.message, inboxId: row.id, tenantId: row.tenant_id },
+          "Failed to recover durable inbox message",
+        );
       }
     }
   } catch (error) {
