@@ -11,14 +11,30 @@ import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
 import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
-import { claimMessage, markMessageCompleted, markMessageFailed } from "./services/idempotency.service.js";
+import { markMessageCompleted, markMessageFailed } from "./services/idempotency.service.js";
 import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
 import { loginUser, getUserById, generateToken } from "./services/auth.service.js";
 import { issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from "./services/refresh-token.service.js";
-import { enqueueWhatsAppMessage, isQueueConfigured, startWorker, closeQueue } from "./services/queue.service.js";
+import {
+  enqueueWhatsAppMessage,
+  isQueueConfigured,
+  startWorker,
+  closeQueue,
+} from "./services/queue.service.js";
+import {
+  ingestWebhookMessage,
+  getInboxMessage,
+  claimInboxMessage,
+  markQueueDispatched,
+  markRetry,
+  saveGeneratedResponse,
+  markCompleted,
+  findUndispatchedMessages,
+  recoverExpiredLeases,
+} from "./services/webhook-inbox.service.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 
@@ -77,7 +93,11 @@ app.get("/ready", async (req, res) => {
   try {
     const database = await checkDatabaseConnection();
     if (!database.configured) {
-      return res.status(IS_PRODUCTION ? 503 : 200).json({ status: IS_PRODUCTION ? "not_ready" : "ready", service: "Nova-AI", database: "not_configured" });
+      return res.status(IS_PRODUCTION ? 503 : 200).json({
+        status: IS_PRODUCTION ? "not_ready" : "ready",
+        service: "Nova-AI",
+        database: "not_configured",
+      });
     }
     if (!database.connected) return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "disconnected" });
     return res.status(200).json({ status: "ready", service: "Nova-AI", database: "connected" });
@@ -99,27 +119,32 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-app.post("/webhook", webhookLimiter, async (req, res) => {
+app.post("/webhook", webhookLimiter, async (req, res, next) => {
   if (!verifyMetaSignature(req)) {
     req.log.warn("Rejected WhatsApp webhook: invalid signature");
     return res.sendStatus(403);
   }
-  const messages = extractWebhookMessages(req.body);
-  res.sendStatus(200);
-  if (messages.length === 0) return;
 
-  setImmediate(() => {
-    void Promise.all(messages.map(async (message) => {
-      try {
-        if (isQueueConfigured()) {
-          await enqueueWhatsAppMessage(message);
-        } else {
-          await processWhatsAppMessage(message, logger);
-        }
-      } catch (error) {
-        logger.error({ error: error.message, messageId: message.id }, "Failed to dispatch WhatsApp message");
+  const messages = extractWebhookMessages(req.body);
+  if (messages.length === 0) return res.sendStatus(200);
+
+  try {
+    for (const message of messages) {
+      const tenant = await resolveTenantByPhoneNumberId(message.phoneNumberId);
+      if (!tenant) {
+        req.log.warn({ messageId: message.id, phoneNumberId: message.phoneNumberId }, "Ignoring WhatsApp message: no active tenant mapping");
+        continue;
       }
-    }));
+      await ingestWebhookMessage({ message, tenant });
+    }
+  } catch (error) {
+    req.log.error({ error: error.message }, "Failed to durably ingest WhatsApp webhook");
+    return next(error);
+  }
+
+  res.sendStatus(200);
+  setImmediate(() => {
+    void dispatchPendingInboxMessages();
   });
 });
 
@@ -139,77 +164,152 @@ function extractWebhookMessages(body) {
   const phoneNumberId = value?.metadata?.phone_number_id;
   if (!Array.isArray(messages) || messages.length === 0) return [];
   if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return [];
-  return messages.filter((message) => message?.text?.body && message?.from && message?.id).map((message) => ({ ...message, phoneNumberId }));
+  return messages
+    .filter((message) => message?.text?.body && message?.from && message?.id)
+    .map((message) => ({ ...message, phoneNumberId }));
 }
 
-async function processWhatsAppMessage(message, log = logger) {
-  const messageId = message.id;
-  const tenant = await resolveTenantByPhoneNumberId(message.phoneNumberId);
-  if (!tenant) {
-    log.warn({ messageId, phoneNumberId: message.phoneNumberId }, "Ignoring WhatsApp message: no active tenant mapping");
+async function processInboxMessage(inboxId, tenantId, log = logger) {
+  const inbox = await getInboxMessage(inboxId, tenantId);
+  if (!inbox) return;
+
+  const claim = await claimInboxMessage(inboxId, tenantId);
+  if (!claim.claimed) {
+    if (claim.reason !== "processing") {
+      log.info({ inboxId, tenantId, reason: claim.reason }, "Skipping durable inbox message");
+    }
     return;
   }
 
-  const claim = await claimMessage(messageId, tenant.tenantId);
-  if (!claim.claimed) {
-    log.info({ messageId, tenantId: tenant.tenantId, reason: claim.reason }, "Ignoring duplicate WhatsApp message");
-    return;
-  }
+  const leaseToken = claim.leaseToken;
+  const message = claim.message;
 
   try {
-    const incomingMessage = message.text.body;
-    const senderNumber = message.from;
-    log.info({ messageId, tenantId: tenant.tenantId, whatsappNumberId: tenant.whatsappNumberId }, "Processing tenant WhatsApp message");
-
-    if (!tenant.accessTokenEncrypted) throw new Error("Tenant WhatsApp credentials are not configured");
-    const accessToken = decryptSecret(tenant.accessTokenEncrypted);
+    const tenant = await resolveTenantByPhoneNumberId(message.phone_number_id);
+    if (
+      !tenant ||
+      tenant.tenantId !== message.tenant_id ||
+      tenant.whatsappNumberId !== message.whatsapp_number_id
+    ) {
+      throw new Error("Stored webhook tenant mapping is no longer valid");
+    }
 
     const persistedInbound = await persistInboundMessage({
-      tenantId: tenant.tenantId,
-      whatsappNumberId: tenant.whatsappNumberId,
-      waId: senderNumber,
-      profileName: message.profileName,
-      whatsappMessageId: messageId,
-      messageType: "text",
-      body: incomingMessage,
-      receivedAt: new Date(),
+      tenantId: message.tenant_id,
+      whatsappNumberId: message.whatsapp_number_id,
+      waId: message.wa_id,
+      profileName: message.profile_name,
+      whatsappMessageId: message.whatsapp_message_id,
+      messageType: message.message_type,
+      body: message.body,
+      receivedAt: message.received_at,
     });
 
-    if (persistedInbound.duplicate) {
-      await markMessageCompleted(messageId, tenant.tenantId);
-      log.info({ messageId, tenantId: tenant.tenantId }, "Ignoring duplicate WhatsApp message already persisted");
+    if (persistedInbound.duplicate && message.provider_message_id) {
+      await markCompleted(message.id, message.tenant_id, leaseToken, message.provider_message_id);
       return;
     }
 
-    let brain = null;
-    try {
-      brain = await getBusinessBrain(tenant.tenantId);
-    } catch (brainError) {
-      log.error({ error: brainError.message, tenantId: tenant.tenantId, messageId }, "Failed to load Business Brain, falling back to default");
+    if (!tenant.accessTokenEncrypted) {
+      throw new Error("Tenant WhatsApp credentials are not configured");
     }
 
-    const reply = await generateGeminiReply(incomingMessage, brain);
-    const sentMessage = await sendWhatsAppMessage({ to: senderNumber, message: reply, accessToken, phoneNumberId: tenant.phoneNumberId });
+    let reply = message.generated_response;
+    if (!reply) {
+      let brain = null;
+      try {
+        brain = await getBusinessBrain(message.tenant_id);
+      } catch (brainError) {
+        log.error({ error: brainError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to load Business Brain, falling back to default");
+      }
+
+      reply = await generateGeminiReply(message.body, brain);
+      reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
+    }
+
+    if (message.provider_message_id) {
+      await markCompleted(message.id, message.tenant_id, leaseToken, message.provider_message_id);
+      return;
+    }
+
+    const accessToken = decryptSecret(tenant.accessTokenEncrypted);
+    const sentMessage = await sendWhatsAppMessage({
+      to: message.wa_id,
+      message: reply,
+      accessToken,
+      phoneNumberId: tenant.phoneNumberId,
+    });
+
+    const providerMessageId = sentMessage?.messages?.[0]?.id;
+    if (!providerMessageId || typeof providerMessageId !== "string") {
+      throw new Error("WhatsApp API returned no message ID");
+    }
 
     try {
       await persistOutboundMessage({
-        tenantId: tenant.tenantId,
+        tenantId: message.tenant_id,
         conversationId: persistedInbound.conversationId,
-        whatsappMessageId: sentMessage?.messages?.[0]?.id ?? null,
+        whatsappMessageId: providerMessageId,
         messageType: "text",
         body: reply,
         sentAt: new Date(),
       });
     } catch (persistenceError) {
-      log.error({ error: persistenceError.message, messageId, tenantId: tenant.tenantId }, "Outbound WhatsApp message sent but persistence failed");
+      log.error(
+        { error: persistenceError.message, inboxId: message.id, tenantId: message.tenant_id },
+        "Outbound WhatsApp message sent but persistence failed",
+      );
     }
 
-    await markMessageCompleted(messageId, tenant.tenantId);
-    log.info({ messageId, tenantId: tenant.tenantId }, "WhatsApp reply sent");
+    await markCompleted(message.id, message.tenant_id, leaseToken, providerMessageId);
+    log.info({ inboxId: message.id, tenantId: message.tenant_id }, "WhatsApp reply sent");
   } catch (error) {
-    await markMessageFailed(messageId, tenant.tenantId, error.message);
-    log.error({ error: error.message, messageId, tenantId: tenant.tenantId }, "WhatsApp message processing failed");
+    const retryState = await markRetry(message.id, message.tenant_id, leaseToken, error);
+    if (!retryState) {
+      log.warn({ inboxId: message.id, tenantId: message.tenant_id }, "Unable to update durable inbox failure state");
+    }
+    log.error({ error: error.message, inboxId: message.id, tenantId: message.tenant_id }, "WhatsApp message processing failed");
     throw error;
+  }
+}
+
+async function dispatchPendingInboxMessages() {
+  if (!isQueueConfigured()) {
+    return;
+  }
+
+  try {
+    await recoverExpiredLeases();
+    const pending = await findUndispatchedMessages(50);
+
+    for (const row of pending) {
+      try {
+        await enqueueWhatsAppMessage({ inboxId: row.id, tenantId: row.tenant_id });
+        await markQueueDispatched(row.id, row.tenant_id);
+      } catch (error) {
+        logger.error({ error: error.message, inboxId: row.id, tenantId: row.tenant_id }, "Failed to dispatch durable inbox message");
+      }
+    }
+  } catch (error) {
+    logger.error({ error: error.message }, "Durable inbox recovery pass failed");
+  }
+}
+
+let recoveryTimer = null;
+
+function startInboxRecovery() {
+  if (recoveryTimer) return;
+  recoveryTimer = setInterval(() => {
+    void dispatchPendingInboxMessages();
+  }, 10_000);
+  recoveryTimer.unref();
+  void dispatchPendingInboxMessages();
+}
+
+async function stopInboxRecovery() {
+  if (recoveryTimer) {
+    clearInterval(recoveryTimer);
+    recoveryTimer = null;
   }
 }
 
@@ -320,15 +420,18 @@ async function startServer() {
   const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
 
   if (isQueueConfigured()) {
-    startWorker(async (message) => processWhatsAppMessage(message, logger));
+    startWorker(async (jobData) => processInboxMessage(jobData.inboxId, jobData.tenantId, logger));
     logger.info("WhatsApp queue worker started");
   }
+
+  startInboxRecovery();
 
   let shuttingDown = false;
   async function shutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info(`Received ${signal}, shutting down gracefully`);
+    await stopInboxRecovery();
     server.close(async (error) => {
       if (error) {
         logger.error({ error: error.message }, "Server shutdown error");
