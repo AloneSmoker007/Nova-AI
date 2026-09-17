@@ -56,9 +56,8 @@ function startLeaseHeartbeat(inboxId, tenantId, leaseToken) {
 
       if (result.rowCount !== 1) stop();
     } catch {
-      // A transient heartbeat failure is bounded by the current lease. If it
-      // persists, recovery will reclaim the row and the token check will stop
-      // this heartbeat from renewing a reclaimed lease.
+      // Transient heartbeat failures are bounded by the active lease; a stale or reclaimed row
+      // will fail the token/state guard and the worker will stop this heartbeat in finally.
     }
   }, LEASE_HEARTBEAT_SECONDS * 1000);
 

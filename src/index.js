@@ -93,7 +93,11 @@ app.get("/ready", async (req, res) => {
   try {
     const database = await checkDatabaseConnection();
     if (!database.configured) {
-      return res.status(IS_PRODUCTION ? 503 : 200).json({ status: IS_PRODUCTION ? "not_ready" : "ready", service: "Nova-AI", database: "not_configured" });
+      return res.status(IS_PRODUCTION ? 503 : 200).json({
+        status: IS_PRODUCTION ? "not_ready" : "ready",
+        service: "Nova-AI",
+        database: "not_configured",
+      });
     }
     if (!database.connected) return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "disconnected" });
     return res.status(200).json({ status: "ready", service: "Nova-AI", database: "connected" });
@@ -165,20 +169,19 @@ function extractWebhookMessages(body) {
     .map((message) => ({ ...message, phoneNumberId }));
 }
 
-async function processInboxMessage(inboxId, log = logger) {
-  const inbox = await getInboxMessage(inboxId);
+async function processInboxMessage(inboxId, tenantId, log = logger) {
+  const inbox = await getInboxMessage(inboxId, tenantId);
   if (!inbox) return;
 
-  const claim = await claimInboxMessage(inboxId);
+  const claim = await claimInboxMessage(inboxId, tenantId);
   if (!claim.claimed) {
     if (claim.reason !== "processing") {
-      log.info({ inboxId, reason: claim.reason }, "Skipping durable inbox message");
+      log.info({ inboxId, tenantId, reason: claim.reason }, "Skipping durable inbox message");
     }
     return;
   }
 
-  const leaseToken = claim.leaseToken;
-  const message = claim.message;
+  const { leaseToken, stopHeartbeat, message } = claim;
 
   try {
     const tenant = await resolveTenantByPhoneNumberId(message.phone_number_id);
@@ -247,7 +250,12 @@ async function processInboxMessage(inboxId, log = logger) {
       throw new Error("WhatsApp API returned no message ID");
     }
 
-    await recordProviderMessageId(message.id, message.tenant_id, leaseToken, providerMessageId);
+    await recordProviderMessageId(
+      message.id,
+      message.tenant_id,
+      leaseToken,
+      providerMessageId,
+    );
 
     await persistOutboundMessage({
       tenantId: message.tenant_id,
@@ -267,6 +275,10 @@ async function processInboxMessage(inboxId, log = logger) {
     }
     log.error({ error: error.message, inboxId: message.id, tenantId: message.tenant_id }, "WhatsApp message processing failed");
     throw error;
+  } finally {
+    if (typeof stopHeartbeat === "function") {
+      stopHeartbeat();
+    }
   }
 }
 
@@ -281,7 +293,7 @@ async function dispatchPendingInboxMessages() {
           await enqueueWhatsAppMessage({ inboxId: row.id });
           await markQueueDispatched(row.id, row.tenant_id);
         } else {
-          await processInboxMessage(row.id, logger);
+          await processInboxMessage(row.id, row.tenant_id, logger);
         }
       } catch (error) {
         logger.error(
@@ -386,7 +398,7 @@ app.put("/api/business-brain", requireAuth, requireRole("owner", "admin"), async
   } catch (error) {
     if (error.message.includes("Invalid") || error.message.includes("must be")) return res.status(400).json({ status: "error", error: error.message });
     req.log.error({ error: error.message, tenantId: req.user.tenantId }, "Failed to update Business Brain");
-    return res.status(500).json({ status: "error", error: "Failed to update Business Brain" });
+    return res.status(500).json({ status: "error", error: "Failed to fetch Business Brain" });
   }
 });
 
@@ -420,7 +432,7 @@ async function startServer() {
   const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
 
   if (isQueueConfigured()) {
-    startWorker(async (jobData) => processInboxMessage(jobData.inboxId, logger));
+    startWorker(async (jobData) => processInboxMessage(jobData.inboxId, jobData.tenantId, logger));
     logger.info("WhatsApp queue worker started");
   }
 
