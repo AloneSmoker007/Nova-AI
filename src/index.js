@@ -50,7 +50,6 @@ app.disable("x-powered-by");
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(compression());
-app.use(httpLogger);
 
 const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
 app.use(globalLimiter);
@@ -140,10 +139,6 @@ function extractWebhookMessages(body) {
   if (!Array.isArray(messages) || messages.length === 0) return [];
   if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return [];
   return messages.filter((message) => message?.text?.body && message?.from && message?.id).map((message) => ({ ...message, phoneNumberId }));
-}
-
-async function processWhatsAppMessages(messages, log) {
-  for (const message of messages) await processWhatsAppMessage(message, log);
 }
 
 async function processWhatsAppMessage(message, log = logger) {
