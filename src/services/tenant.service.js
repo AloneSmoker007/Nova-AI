@@ -61,3 +61,45 @@ export async function resolveTenantByPhoneNumberId(phoneNumberId) {
     phoneNumber: row.phone_number,
   };
 }
+
+export async function isTenantActive(tenantId) {
+  if (!isDatabaseConfigured() || !dbPool) {
+    return false;
+  }
+
+  if (!tenantId || typeof tenantId !== "string") {
+    return false;
+  }
+
+  try {
+    const result = await dbPool.query(
+      `SELECT status FROM tenants WHERE id = $1 LIMIT 1`,
+      [tenantId],
+    );
+
+    return result.rows[0]?.status === "active";
+  } catch {
+    return false;
+  }
+}
+
+export async function isUserActive(userId) {
+  if (!isDatabaseConfigured() || !dbPool) {
+    return false;
+  }
+
+  if (!userId || typeof userId !== "string") {
+    return false;
+  }
+
+  try {
+    const result = await dbPool.query(
+      `SELECT status FROM users WHERE id = $1 LIMIT 1`,
+      [userId],
+    );
+
+    return result.rows[0]?.status === "active";
+  } catch {
+    return false;
+  }
+}
