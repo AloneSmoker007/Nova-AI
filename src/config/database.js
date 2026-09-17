@@ -1,13 +1,37 @@
 import pg from "pg";
+import fs from "node:fs";
+import { logger } from "./logger.js";
 
 const { Pool } = pg;
 
 const isProduction = process.env.NODE_ENV === "production";
 
+function readSslCa() {
+  const caPath = process.env.DATABASE_SSL_CA;
+  if (!caPath) return null;
+
+  try {
+    const contents = fs.readFileSync(caPath, "utf8");
+    return contents;
+  } catch (error) {
+    logger.warn({ error: error.message, caPath }, "Failed to read DATABASE_SSL_CA");
+    return null;
+  }
+}
+
 function getPoolConfig() {
   if (!process.env.DATABASE_URL) {
     return null;
   }
+
+  const sslCa = readSslCa();
+  const sslConfig = isProduction
+    ? sslCa
+      ? { ca: sslCa, rejectUnauthorized: true }
+      : { rejectUnauthorized: true }
+    : sslCa
+      ? { ca: sslCa }
+      : undefined;
 
   return {
     connectionString: process.env.DATABASE_URL,
@@ -17,7 +41,7 @@ function getPoolConfig() {
       process.env.DB_CONNECTION_TIMEOUT_MS || 5_000,
     ),
     allowExitOnIdle: false,
-    ...(isProduction ? { ssl: { rejectUnauthorized: false } } : {}),
+    ...(sslConfig ? { ssl: sslConfig } : {}),
   };
 }
 
@@ -27,10 +51,7 @@ export const dbPool = poolConfig ? new Pool(poolConfig) : null;
 
 if (dbPool) {
   dbPool.on("error", (error) => {
-    console.error("Unexpected PostgreSQL pool error", {
-      message: error.message,
-      code: error.code,
-    });
+    logger.error({ error: error.message, code: error.code }, "Unexpected PostgreSQL pool error");
   });
 }
 
