@@ -5,11 +5,10 @@ import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import Joi from "joi";
-import pino from "pino";
-import pinoHttp from "pino-http";
 import { v4 as uuidv4 } from "uuid";
 
 import { checkDatabaseConnection, closeDatabaseConnection } from "./config/database.js";
+import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
 import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
@@ -18,7 +17,7 @@ import { resolveTenantByPhoneNumberId } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
-import { loginUser } from "./services/auth.service.js";
+import { loginUser, getUserById } from "./services/auth.service.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 
@@ -44,50 +43,18 @@ if (missingEnvVars.length > 0) {
   console.warn(message);
 }
 
-const logger = pino({
-  level: process.env.LOG_LEVEL || (IS_PRODUCTION ? "info" : "debug"),
-  redact: {
-    paths: [
-      "req.headers.authorization",
-      'req.headers["x-hub-signature-256"]',
-      "req.headers.cookie",
-      "*.token",
-      "*.apiKey",
-      "*.secret",
-      "*.accessToken",
-      "*.accessTokenEncrypted",
-      "*.password",
-      "*.password_hash",
-      "*.passwordHash",
-    ],
-    censor: "[REDACTED]",
-  },
-});
-
-const httpLogger = pinoHttp({
-  logger,
-  genReqId: (req) => {
-    const incomingId = req.headers["x-request-id"];
-    return typeof incomingId === "string" && incomingId.length <= 128 ? incomingId : uuidv4();
-  },
-  serializers: {
-    req: (req) => ({ id: req.id, method: req.method, url: req.url }),
-    res: (res) => ({ statusCode: res.statusCode }),
-  },
-});
+const httpLogger = createHttpLogger(logger);
 
 app.disable("x-powered-by");
-// Trust one reverse proxy hop (Railway/Render/Fly.io). Adjust this if the
-// deployment topology changes; an incorrect value can weaken IP rate limits.
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(compression());
 app.use(httpLogger);
-app.use(rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false }));
-app.use(express.json({
-  limit: "100kb",
-  verify: (req, res, buffer) => { req.rawBody = Buffer.from(buffer); },
-}));
+
+const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
+app.use(globalLimiter);
+
+const webhookLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -96,6 +63,11 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { status: "error", error: "Too many login attempts. Please try again later." },
 });
+
+app.use(express.json({
+  limit: "100kb",
+  verify: (req, res, buffer) => { req.rawBody = Buffer.from(buffer); },
+}));
 
 app.get("/", (req, res) => res.status(200).json({ status: "ok", service: "Nova-AI", message: "Nova-AI server is running" }));
 app.get("/health", (req, res) => res.status(200).json({ status: "ok", service: "Nova-AI", uptime: process.uptime() }));
@@ -134,6 +106,17 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+app.post("/webhook", webhookLimiter, (req, res) => {
+  if (!verifyMetaSignature(req)) {
+    req.log.warn("Rejected WhatsApp webhook: invalid signature");
+    return res.sendStatus(403);
+  }
+  const messages = extractWebhookMessages(req.body);
+  if (!messages || messages.length === 0) return res.sendStatus(200);
+  res.sendStatus(200);
+  setImmediate(() => { void processWhatsAppMessages(messages, req.log); });
+});
+
 function verifyMetaSignature(req) {
   if (!META_APP_SECRET || !req.rawBody) return false;
   const signature = req.get("x-hub-signature-256");
@@ -144,14 +127,22 @@ function verifyMetaSignature(req) {
   return receivedBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
-function extractWebhookMessage(body) {
+function extractWebhookMessages(body) {
   const value = body?.entry?.[0]?.changes?.[0]?.value;
-  const message = value?.messages?.[0];
-  const profileName = value?.contacts?.[0]?.profile?.name;
+  const messages = value?.messages;
   const phoneNumberId = value?.metadata?.phone_number_id;
-  if (!message?.text?.body || !message?.from || !message?.id) return null;
-  if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return null;
-  return { ...message, phoneNumberId, profileName };
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return [];
+
+  return messages
+    .filter((message) => message?.text?.body && message?.from && message?.id)
+    .map((message) => ({ ...message, phoneNumberId }));
+}
+
+async function processWhatsAppMessages(messages, log) {
+  for (const message of messages) {
+    await processWhatsAppMessage(message, log);
+  }
 }
 
 async function processWhatsAppMessage(message, log) {
@@ -235,17 +226,6 @@ async function processWhatsAppMessage(message, log) {
   }
 }
 
-app.post("/webhook", (req, res) => {
-  if (!verifyMetaSignature(req)) {
-    req.log.warn("Rejected WhatsApp webhook: invalid signature");
-    return res.sendStatus(403);
-  }
-  const message = extractWebhookMessage(req.body);
-  if (!message) return res.sendStatus(200);
-  res.sendStatus(200);
-  setImmediate(() => { void processWhatsAppMessage(message, req.log); });
-});
-
 // ── Auth Routes (NO JWT required) ──────────────────────────
 const loginSchema = Joi.object({
   email: Joi.string().email().max(255).required(),
@@ -270,7 +250,28 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
     if (error.message === "Invalid credentials") {
       return res.status(401).json({ status: "error", error: "Invalid credentials" });
     }
-    return next(error);
+    next(error);
+  }
+});
+
+app.get("/api/auth/me", requireAuth, async (req, res) => {
+  try {
+    const user = await getUserById(req.user.id);
+    if (!user || user.status !== "active") {
+      return res.status(401).json({ status: "error", error: "Invalid or expired token" });
+    }
+
+    return res.status(200).json({
+      status: "ok",
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        tenantId: user.tenant_id,
+      },
+    });
+  } catch {
+    return res.status(401).json({ status: "error", error: "Invalid or expired token" });
   }
 });
 
