@@ -121,16 +121,20 @@ export async function loginUser(email, password) {
   };
 }
 
-export async function getUserById(userId) {
+export async function getUserById(userId, tenantId) {
   if (!isDatabaseConfigured() || !dbPool) {
+    return null;
+  }
+
+  if (!userId || typeof userId !== "string" || !tenantId || typeof tenantId !== "string") {
     return null;
   }
 
   const result = await dbPool.query(
     `SELECT id, tenant_id, email, role, status
      FROM users
-     WHERE id = $1`,
-    [userId],
+     WHERE id = $1 AND tenant_id = $2`,
+    [userId, tenantId],
   );
 
   return result.rows[0] || null;
