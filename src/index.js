@@ -169,15 +169,26 @@ function extractWebhookMessages(body) {
     .map((message) => ({ ...message, phoneNumberId }));
 }
 
-async function processInboxMessage(inboxId, log = logger) {
+async function resolveEffectiveTenantId(inboxId, tenantId) {
+  if (tenantId && typeof tenantId === "string" && tenantId.trim() !== "") {
+    return tenantId.trim();
+  }
+
   const inbox = await getInboxMessage(inboxId);
+  return inbox?.tenant_id ?? null;
+}
+
+async function processInboxMessage(inboxId, tenantId, log = logger) {
+  const resolvedTenantId = await resolveEffectiveTenantId(inboxId, tenantId);
+  if (!resolvedTenantId) return;
+
+  const inbox = await getInboxMessage(inboxId, resolvedTenantId);
   if (!inbox) return;
 
-  const tenantId = inbox.tenant_id;
-  const claim = await claimInboxMessage(inboxId, tenantId);
+  const claim = await claimInboxMessage(inboxId, resolvedTenantId);
   if (!claim.claimed) {
     if (claim.reason !== "processing") {
-      log.info({ inboxId, tenantId, reason: claim.reason }, "Skipping durable inbox message");
+      log.info({ inboxId, tenantId: resolvedTenantId, reason: claim.reason }, "Skipping durable inbox message");
     }
     return;
   }
@@ -294,7 +305,7 @@ async function dispatchPendingInboxMessages() {
           await enqueueWhatsAppMessage({ inboxId: row.id });
           await markQueueDispatched(row.id, row.tenant_id);
         } else {
-          await processInboxMessage(row.id, logger);
+          await processInboxMessage(row.id, row.tenant_id, logger);
         }
       } catch (error) {
         logger.error(
@@ -433,7 +444,11 @@ async function startServer() {
   const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
 
   if (isQueueConfigured()) {
-    startWorker(async (jobData) => processInboxMessage(jobData.inboxId, logger));
+    startWorker(async (jobData) => {
+      const inboxId = jobData?.inboxId;
+      const tenantId = await resolveEffectiveTenantId(inboxId, jobData?.tenantId);
+      return processInboxMessage(inboxId, tenantId, logger);
+    });
     logger.info("WhatsApp queue worker started");
   }
 
