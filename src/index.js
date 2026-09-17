@@ -205,12 +205,7 @@ async function processInboxMessage(inboxId, tenantId, log = logger) {
       receivedAt: message.received_at,
     });
 
-    if (persistedInbound.duplicate && message.provider_message_id) {
-      await markCompleted(message.id, message.tenant_id, leaseToken, message.provider_message_id);
-      return;
-    }
-
-    if (!tenant.accessTokenEncrypted) {
+    if (!tenant.accessTokenEncrypted && !message.provider_message_id) {
       throw new Error("Tenant WhatsApp credentials are not configured");
     }
 
@@ -220,7 +215,10 @@ async function processInboxMessage(inboxId, tenantId, log = logger) {
       try {
         brain = await getBusinessBrain(message.tenant_id);
       } catch (brainError) {
-        log.error({ error: brainError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to load Business Brain, falling back to default");
+        log.error(
+          { error: brainError.message, tenantId: message.tenant_id, inboxId: message.id },
+          "Failed to load Business Brain, falling back to default",
+        );
       }
 
       reply = await generateGeminiReply(message.body, brain);
@@ -228,6 +226,14 @@ async function processInboxMessage(inboxId, tenantId, log = logger) {
     }
 
     if (message.provider_message_id) {
+      await persistOutboundMessage({
+        tenantId: message.tenant_id,
+        conversationId: persistedInbound.conversationId,
+        whatsappMessageId: message.provider_message_id,
+        messageType: "text",
+        body: reply,
+        sentAt: new Date(),
+      });
       await markCompleted(message.id, message.tenant_id, leaseToken, message.provider_message_id);
       return;
     }
@@ -252,21 +258,14 @@ async function processInboxMessage(inboxId, tenantId, log = logger) {
       providerMessageId,
     );
 
-    try {
-      await persistOutboundMessage({
-        tenantId: message.tenant_id,
-        conversationId: persistedInbound.conversationId,
-        whatsappMessageId: providerMessageId,
-        messageType: "text",
-        body: reply,
-        sentAt: new Date(),
-      });
-    } catch (persistenceError) {
-      log.error(
-        { error: persistenceError.message, inboxId: message.id, tenantId: message.tenant_id },
-        "Outbound WhatsApp message sent but persistence failed",
-      );
-    }
+    await persistOutboundMessage({
+      tenantId: message.tenant_id,
+      conversationId: persistedInbound.conversationId,
+      whatsappMessageId: providerMessageId,
+      messageType: "text",
+      body: reply,
+      sentAt: new Date(),
+    });
 
     await markCompleted(message.id, message.tenant_id, leaseToken, providerMessageId);
     log.info({ inboxId: message.id, tenantId: message.tenant_id }, "WhatsApp reply sent");
