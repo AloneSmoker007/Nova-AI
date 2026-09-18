@@ -190,37 +190,32 @@ export async function claimInboxMessage(inboxId, tenantId) {
   return { claimed: false, reason: "processing" };
 }
 
-export async function markQueueDispatched(inboxId, tenantId) {
+export async function reserveQueueDispatch(inboxId, tenantId) {
   assertDatabase();
 
   const result = await dbPool.query(
-    "UPDATE webhook_messages SET " +
-      "state = CASE WHEN state = 'RECEIVED' THEN 'QUEUED' ELSE state END, " +
-      "queue_dispatched_at = NOW(), updated_at = NOW() " +
-      "WHERE id = $1 AND tenant_id = $2 " +
-      "AND state IN ('RECEIVED', 'QUEUED', 'RETRY_WAIT') " +
+    "UPDATE webhook_messages SET queue_dispatched_at = NOW(), updated_at = NOW() " +
+      "WHERE id = $1 AND tenant_id = $2 AND state IN ('RECEIVED', 'RETRY_WAIT') " +
+      "AND available_at <= NOW() AND attempts < $3 " +
+      "AND (queue_dispatched_at IS NULL OR queue_dispatched_at < NOW() - INTERVAL '30 seconds') " +
       "RETURNING id",
-    [inboxId, tenantId],
+    [inboxId, tenantId, MAX_ATTEMPTS],
   );
 
   return result.rowCount === 1;
 }
 
-export async function markRetry(inboxId, tenantId, leaseToken, error) {
+export async function markQueueDispatched(inboxId, tenantId) {
   assertDatabase();
 
   const result = await dbPool.query(
-    "UPDATE webhook_messages SET " +
-      "state = CASE WHEN attempts >= $5 THEN 'DEAD_LETTER' ELSE 'RETRY_WAIT' END, " +
-      "available_at = CASE WHEN attempts >= $5 THEN available_at " +
-      "ELSE NOW() + (LEAST(300, POWER(2, GREATEST(attempts - 1, 0)) * 2) * INTERVAL '1 second') END, " +
-      "lease_until = NULL, lease_token = NULL, last_error = $4, updated_at = NOW() " +
-      "WHERE id = $1 AND tenant_id = $2 AND state = 'PROCESSING' " +
-      "AND lease_token = $3::uuid RETURNING state",
-    [inboxId, tenantId, leaseToken, normalizeError(error), MAX_ATTEMPTS],
+    "UPDATE webhook_messages SET state = 'QUEUED', queue_dispatched_at = NOW(), updated_at = NOW() " +
+      "WHERE id = $1 AND tenant_id = $2 AND state IN ('RECEIVED', 'RETRY_WAIT') " +
+      "RETURNING id",
+    [inboxId, tenantId],
   );
 
-  return result.rowCount === 1 ? result.rows[0].state : null;
+  return result.rowCount === 1;
 }
 
 export async function saveGeneratedResponse(inboxId, tenantId, leaseToken, response) {
