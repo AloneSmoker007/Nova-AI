@@ -158,3 +158,4 @@ Never run destructive production database operations casually. Back up productio
 ## Project status
 
 Nova-AI is being developed incrementally toward a production WhatsApp AI SaaS platform. Tasks 1–13 are implemented on `main`; subsequent product capabilities should preserve the existing tenant-isolation and security model.
+
