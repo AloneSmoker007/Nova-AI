@@ -3,6 +3,18 @@
 -- Tenant-scoped long-term customer preferences and bounded AI signals.
 -- ============================================================
 
+-- PostgreSQL composite foreign keys require a matching unique key on
+-- the referenced tenant/id pair. These indexes also strengthen the
+-- database-level tenant-isolation invariant for the new tables.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_contacts_tenant_id_id
+  ON contacts (tenant_id, id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_tenant_id_id
+  ON conversations (tenant_id, id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_tenant_id_id
+  ON messages (tenant_id, id);
+
 CREATE TABLE IF NOT EXISTS contact_ai_memory (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
