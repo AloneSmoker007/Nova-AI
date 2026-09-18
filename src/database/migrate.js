@@ -31,7 +31,33 @@ async function getMigrationFiles() {
     .sort(compareMigrationFilenames);
 }
 
+export function validateMigrationFiles(migrationFiles) {
+  const filenames = new Set();
+  const numbers = new Map();
+
+  for (const filename of migrationFiles) {
+    if (filenames.has(filename)) {
+      throw new Error(`Duplicate migration filename detected: ${filename}`);
+    }
+    filenames.add(filename);
+
+    const match = /^([0-9]+)_/.exec(filename);
+    if (!match) continue;
+
+    const number = Number(match[1]);
+    const existing = numbers.get(number);
+    if (existing) {
+      throw new Error(
+        `Duplicate migration number detected: ${number} in ${existing} and ${filename}`,
+      );
+    }
+    numbers.set(number, filename);
+  }
+}
+
 export function validateMigrationOrder(migrationFiles, appliedFilenames) {
+  validateMigrationFiles(migrationFiles);
+
   const applied = new Set(appliedFilenames);
   const pending = migrationFiles.filter((filename) => !applied.has(filename));
   if (pending.length === 0) return;
