@@ -58,6 +58,69 @@ export async function analyzeCustomerMessage(text, businessBrain = null) {
   return analyzeMessage(text, businessBrain);
 }
 
+export function extractCustomerPreferencesFromText(text) {
+  const value = normalizeText(text, 2000);
+  if (!value) return [];
+
+  const lower = value.toLowerCase();
+  const candidates = [];
+
+  const namePatterns = [
+    /(?:my\s+name\s+is|i\s+am|call\s+me|naam\s+hai|mera\s+naam|aapka\s+naam|name\s+is)\s+([a-zA-Z\u0600-\u06FF][a-zA-Z0-9\s\-\.'\u0600-\u06FF]{1,40})/i,
+    /(?:i\s+am\s+called|known\s+as|mujhe\s+\w+\s+kehte|mujhe\s+\w+\s+kaha\s+jata|main\s+\w+\s+hoon)/i,
+  ];
+
+  for (const pattern of namePatterns) {
+    const match = value.match(pattern);
+    if (match && match[1]) {
+      const name = normalizeText(match[1].replace(/^(is|my|name|mera|naam|call|me)/i, ""), 80);
+      if (name) {
+        candidates.push({ key: "name", value: name, confidence: 0.8 });
+      }
+    }
+  }
+
+  const languageLower = lower.includes("urdu") || lower.includes("اردو") ? "urdu"
+    : lower.includes("roman urdu") || /\b(?:aap|kaise|hai|hain|nahi|ni|kya)\b/.test(lower) ? "roman-urdu"
+    : lower.includes("english") ? "english"
+    : null;
+
+  if (languageLower) {
+    candidates.push({ key: "preferred_language", value: languageLower, confidence: 0.75 });
+  }
+
+  const budgetMatch = value.match(/(?:budget|qeemat|kitna|price|kam\s+price|my\s+budget|budget\s+is)\s*[:=-]?\s*([a-zA-Z0-9\s\.,\u0600-\u06FF]{1,40})/i);
+  if (budgetMatch && budgetMatch[1]) {
+    const budgetText = normalizeText(budgetMatch[1].replace(/(?:rs|rupees|pkr|usd|eur|pakistani|rupee|rs\.)/gi, ""), 80);
+    if (budgetText) candidates.push({ key: "budget", value: budgetText, confidence: 0.7 });
+  }
+
+  const interestMatch = value.match(/(?:interested\s+in|want|wants|need|needs|chahiye|mujhe|looking\s+for|service|product)\s*[:=-]?\s*([a-zA-Z0-9\s\-\.,\u0600-\u06FF]{1,80})/i);
+  if (interestMatch && interestMatch[1]) {
+    const interestText = normalizeText(interestMatch[1], 80);
+    if (interestText && !/^(my|i|mujhe|need|want|wants|chahiye)/i.test(interestText)) {
+      candidates.push({ key: "service_interest", value: interestText, confidence: 0.65 });
+    }
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const normalizedKey = candidate.key.toLowerCase();
+    const normalizedValue = normalizeText(candidate.value, MAX_MEMORY_VALUE).toLowerCase();
+    const dedupeKey = `${normalizedKey}:${normalizedValue}`;
+    if (!dedupeKey || seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    deduped.push({
+      key: normalizedKey,
+      value: normalizeText(candidate.value, MAX_MEMORY_VALUE),
+      confidence: Number(candidate.confidence) > 0 ? Math.min(Number(candidate.confidence), 1) : 0.7,
+    });
+  }
+
+  return deduped;
+}
+
 export async function getCustomerMemory(tenantId, contactId) {
   assertDatabase();
   if (!validId(tenantId) || !validId(contactId)) throw new Error("Invalid tenant or contact ID");
@@ -75,7 +138,7 @@ export async function getCustomerMemory(tenantId, contactId) {
 export async function rememberCustomerPreference(tenantId, contactId, key, value, confidence = 0.7) {
   assertDatabase();
   if (!validId(tenantId) || !validId(contactId)) throw new Error("Invalid tenant or contact ID");
-  const memoryKey = normalizeText(key, MAX_MEMORY_KEY);
+  const memoryKey = normalizeText(key, MAX_MEMORY_KEY).toLowerCase();
   const memoryValue = normalizeText(value, MAX_MEMORY_VALUE);
   const score = Number(confidence);
   if (!memoryKey || !memoryValue || !Number.isFinite(score) || score < 0 || score > 1) {
@@ -93,6 +156,22 @@ export async function rememberCustomerPreference(tenantId, contactId, key, value
     [tenantId, contactId, memoryKey, memoryValue, score],
   );
   return result.rows[0];
+}
+
+export async function syncCustomerMemoryFromMessage({ tenantId, contactId, messageText }) {
+  if (!validId(tenantId) || !validId(contactId)) {
+    throw new Error("Invalid tenant or contact ID");
+  }
+  const safeText = normalizeText(messageText, 2000);
+  if (!safeText) return [];
+
+  const candidates = extractCustomerPreferencesFromText(safeText);
+  const saved = [];
+  for (const candidate of candidates) {
+    const row = await rememberCustomerPreference(tenantId, contactId, candidate.key, candidate.value, candidate.confidence);
+    if (row) saved.push(row);
+  }
+  return saved;
 }
 
 export async function recordAiSignal(tenantId, conversationId, messageId, signal) {
