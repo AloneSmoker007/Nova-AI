@@ -224,3 +224,84 @@ export async function persistOutboundMessage({
     client.release();
   }
 }
+
+export async function persistDeletedInboundMessage({
+  tenantId,
+  whatsappNumberId,
+  waId,
+  profileName,
+  whatsappMessageId,
+  deletedAt = new Date(),
+}) {
+  assertDatabase();
+
+  if (!tenantId || !whatsappNumberId || !waId || !whatsappMessageId) {
+    throw new Error("Missing required deleted message identifiers");
+  }
+
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const contactResult = await client.query(
+      `INSERT INTO contacts (tenant_id, wa_id, display_name)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, wa_id)
+       DO UPDATE SET
+         display_name = COALESCE(EXCLUDED.display_name, contacts.display_name),
+         updated_at = NOW()
+       RETURNING id`,
+      [tenantId, waId, normalizeProfileName(profileName)],
+    );
+    const contactId = contactResult.rows[0]?.id;
+    if (!contactId) throw new Error("Failed to create or resolve contact");
+
+    const conversationResult = await client.query(
+      `INSERT INTO conversations (tenant_id, whatsapp_number_id, contact_id, status, last_message_at)
+       VALUES ($1, $2, $3, 'active', $4)
+       ON CONFLICT (whatsapp_number_id, contact_id)
+       DO UPDATE SET last_message_at = GREATEST(conversations.last_message_at, EXCLUDED.last_message_at), updated_at = NOW()
+       RETURNING id`,
+      [tenantId, whatsappNumberId, contactId, deletedAt],
+    );
+    const conversationId = conversationResult.rows[0]?.id;
+    if (!conversationId) throw new Error("Failed to create or resolve conversation");
+
+    const existing = await client.query(
+      `UPDATE messages
+       SET status = 'deleted', deleted_at = $4, deletion_reason = 'whatsapp_user_deleted'
+       WHERE tenant_id = $1 AND whatsapp_message_id = $2 AND conversation_id = $3
+       RETURNING id`,
+      [tenantId, whatsappMessageId, conversationId, deletedAt],
+    );
+
+    if (existing.rowCount === 1) {
+      await client.query("COMMIT");
+      return { foundExisting: true, conversationId, messageId: existing.rows[0].id };
+    }
+
+    const created = await client.query(
+      `INSERT INTO messages (
+         tenant_id, conversation_id, whatsapp_message_id, direction, message_type,
+         "text", status, deleted_at, deletion_reason
+       ) VALUES ($1, $2, $3, 'inbound', 'unsupported', '[Message deleted on WhatsApp]', 'deleted', $4, 'whatsapp_user_deleted')
+       ON CONFLICT (tenant_id, whatsapp_message_id)
+       DO UPDATE SET status = 'deleted', deleted_at = EXCLUDED.deleted_at, deletion_reason = EXCLUDED.deletion_reason
+       RETURNING id`,
+      [tenantId, conversationId, whatsappMessageId, deletedAt],
+    );
+
+    await client.query(
+      `UPDATE conversations SET last_message_at = GREATEST(last_message_at, $2), updated_at = NOW()
+       WHERE tenant_id = $1 AND id = $3`,
+      [tenantId, deletedAt, conversationId],
+    );
+    await client.query("COMMIT");
+    return { foundExisting: false, conversationId, messageId: created.rows[0]?.id ?? null };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
