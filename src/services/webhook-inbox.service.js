@@ -190,12 +190,30 @@ export async function claimInboxMessage(inboxId, tenantId) {
   return { claimed: false, reason: "processing" };
 }
 
+export async function markRetry(inboxId, tenantId, leaseToken, error) {
+  assertDatabase();
+
+  const normalizedError = normalizeError(error);
+  const result = await dbPool.query(
+    "UPDATE webhook_messages SET " +
+      "state = CASE WHEN attempts >= $4 THEN 'DEAD_LETTER' ELSE 'RETRY_WAIT' END, " +
+      "available_at = CASE WHEN attempts >= $4 THEN available_at " +
+      "ELSE NOW() + (LEAST(300, POWER(2, GREATEST(attempts - 1, 0)) * 2) * INTERVAL '1 second') END, " +
+      "lease_until = NULL, lease_token = NULL, last_error = $3, updated_at = NOW() " +
+      "WHERE id = $1 AND tenant_id = $2 AND state = 'PROCESSING' " +
+      "AND lease_token = $5::uuid RETURNING id, state, available_at",
+    [inboxId, tenantId, normalizedError, MAX_ATTEMPTS, leaseToken],
+  );
+
+  return result.rows[0] ?? null;
+}
+
 export async function reserveQueueDispatch(inboxId, tenantId) {
   assertDatabase();
 
   const result = await dbPool.query(
     "UPDATE webhook_messages SET queue_dispatched_at = NOW(), updated_at = NOW() " +
-      "WHERE id = $1 AND tenant_id = $2 AND state IN ('RECEIVED', 'RETRY_WAIT') " +
+      "WHERE id = $1 AND tenant_id = $2 AND state IN ('RECEIVED', 'QUEUED', 'RETRY_WAIT') " +
       "AND available_at <= NOW() AND attempts < $3 " +
       "AND (queue_dispatched_at IS NULL OR queue_dispatched_at < NOW() - INTERVAL '30 seconds') " +
       "RETURNING id",
@@ -286,7 +304,7 @@ export async function findUndispatchedMessages(limit = 50) {
   const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
   const result = await dbPool.query(
     "SELECT id, tenant_id FROM webhook_messages " +
-      "WHERE state IN ('RECEIVED', 'RETRY_WAIT') AND available_at <= NOW() " +
+      "WHERE state IN ('RECEIVED', 'QUEUED', 'RETRY_WAIT') AND available_at <= NOW() " +
       "AND (queue_dispatched_at IS NULL OR " +
       "queue_dispatched_at < NOW() - INTERVAL '30 seconds') " +
       "AND attempts < $1 ORDER BY available_at ASC LIMIT $2",
