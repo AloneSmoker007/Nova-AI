@@ -58,6 +58,7 @@ import { registerInboundUsage, getUsageSummary } from "./services/usage.service.
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
 import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotPrompt, setUserSkills } from "./services/handoff.service.js";
 import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
+import { createAppointmentType, listAppointmentTypes, setBusinessHours, getBusinessHours, listAppointments, getAppointment, bookAppointment, updateAppointmentStatus, buildCalendarLinks, buildIcs } from "./services/appointment.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -947,6 +948,85 @@ app.post("/api/automations/:workflowId/run", requireAuth, requireRole("owner", "
 
 app.get("/api/automations/health", requireAuth, requireRole("owner", "admin"), async (req, res) => {
   return res.status(200).json({ status: "ok", scheduler: "enabled" });
+});
+
+app.get("/api/appointments/types", requireAuth, async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await listAppointmentTypes(req.user.tenantId) }); }
+  catch (error) { return next(error); }
+});
+
+app.post("/api/appointments/types", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const data = await createAppointmentType({
+      tenantId: req.user.tenantId, name: req.body?.name, description: req.body?.description,
+      durationMinutes: req.body?.durationMinutes, bufferMinutes: req.body?.bufferMinutes, timezone: req.body?.timezone,
+    });
+    return res.status(201).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.get("/api/appointments/hours", requireAuth, async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await getBusinessHours(req.user.tenantId) }); }
+  catch (error) { return next(error); }
+});
+
+app.put("/api/appointments/hours", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await setBusinessHours(req.user.tenantId, req.body?.hours) }); }
+  catch (error) { if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message }); return next(error); }
+});
+
+app.get("/api/appointments", requireAuth, async (req, res, next) => {
+  try {
+    return res.status(200).json({ status: "ok", data: await listAppointments(req.user.tenantId, {
+      from: req.query.from, to: req.query.to, status: req.query.status, contactId: req.query.contactId,
+    }) });
+  } catch (error) { return next(error); }
+});
+
+app.post("/api/appointments", requireAuth, async (req, res, next) => {
+  try {
+    const data = await bookAppointment({
+      tenantId: req.user.tenantId, appointmentTypeId: req.body?.appointmentTypeId, startsAt: req.body?.startsAt,
+      customerName: req.body?.customerName, customerPhone: req.body?.customerPhone, customerEmail: req.body?.customerEmail,
+      contactId: req.body?.contactId, conversationId: req.body?.conversationId, notes: req.body?.notes,
+      createdBy: req.user.id, timezone: req.body?.timezone,
+    });
+    return res.status(201).json({ status: "ok", data, calendar: buildCalendarLinks(data) });
+  } catch (error) {
+    if (error.message.includes("already booked") || error.message.includes("outside business hours") || error.message.includes("not found") || error.message.startsWith("Invalid") || error.message.includes("future")) {
+      return res.status(409).json({ status: "error", error: error.message });
+    }
+    return next(error);
+  }
+});
+
+app.get("/api/appointments/:appointmentId", requireAuth, async (req, res, next) => {
+  try {
+    const data = await getAppointment(req.user.tenantId, req.params.appointmentId);
+    if (!data) return res.status(404).json({ status: "error", error: "Appointment not found" });
+    return res.status(200).json({ status: "ok", data, calendar: buildCalendarLinks(data) });
+  } catch (error) { return next(error); }
+});
+
+app.patch("/api/appointments/:appointmentId/status", requireAuth, async (req, res, next) => {
+  try {
+    const data = await updateAppointmentStatus(req.user.tenantId, req.params.appointmentId, req.body?.status);
+    if (!data) return res.status(404).json({ status: "error", error: "Appointment not found" });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) { if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message }); return next(error); }
+});
+
+app.get("/api/appointments/:appointmentId/ics", requireAuth, async (req, res, next) => {
+  try {
+    const data = await getAppointment(req.user.tenantId, req.params.appointmentId);
+    if (!data) return res.status(404).json({ status: "error", error: "Appointment not found" });
+    res.set("Content-Type", "text/calendar; charset=utf-8");
+    res.set("Content-Disposition", 'attachment; filename="nova-appointment.ics"');
+    return res.status(200).send(buildIcs(data));
+  } catch (error) { return next(error); }
 });
 
 app.get("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next) => {
