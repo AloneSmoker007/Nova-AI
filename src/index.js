@@ -301,7 +301,14 @@ async function processInboxMessage(inboxId, log = logger) {
       });
     }
 
-    const handoffState = await getHandoffState(message.tenant_id, persistedInbound.conversationId);\n    if (handoffState?.ai_paused) {\n      await markCompleted(message.id, message.tenant_id, leaseToken, null);\n      log.info({ inboxId: message.id, tenantId: message.tenant_id, conversationId: persistedInbound.conversationId }, "AI paused; message left for human agent");\n      return;\n    }\n\n    if (!tenant.accessTokenEncrypted && !message.provider_message_id) {
+    const handoffState = await getHandoffState(message.tenant_id, persistedInbound.conversationId);
+    if (handoffState?.ai_paused) {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.info({ inboxId: message.id, tenantId: message.tenant_id, conversationId: persistedInbound.conversationId }, "AI paused; message left for human agent");
+      return;
+    }
+
+    if (!tenant.accessTokenEncrypted && !message.provider_message_id) {
       throw new Error("Tenant WhatsApp credentials are not configured");
     }
 
@@ -332,7 +339,9 @@ async function processInboxMessage(inboxId, log = logger) {
         }
       }
       const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
-      const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\n\n") } : { customInstructions: advancedContext };
+      const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("
+
+") } : { customInstructions: advancedContext };
       reply = await generateGeminiReply(message.body, aiBrain);
       reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
     }
@@ -852,7 +861,9 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
     const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
     const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
       ...(brain || {}),
-      customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\n\n"),
+      customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("
+
+"),
     });
     const saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
     return res.status(201).json({ status: "ok", data: saved });
@@ -997,10 +1008,3 @@ async function startServer() {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
 }
-
-startServer().catch((error) => {
-  logger.fatal({ error: error.message }, "Nova-AI failed to start");
-  process.exit(1);
-});
-
-export default app;
