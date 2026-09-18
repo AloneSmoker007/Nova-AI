@@ -92,8 +92,6 @@ export function registerTask16Routes(app) {
         provider: body?.provider,
         providerPaymentId: body?.providerPaymentId,
         status: body?.status,
-        amountMinor: body?.amountMinor,
-        currency: body?.currency,
         signatureValid: true,
       });
 
