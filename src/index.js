@@ -10,7 +10,10 @@ import { checkDatabaseConnection, closeDatabaseConnection, isDatabaseConfigured 
 import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
-import { sendWhatsAppMessage } from "./services/whatsapp.service.js";
+import {
+  isAmbiguousWhatsAppSendError,
+  sendWhatsAppMessage,
+} from "./services/whatsapp.service.js";
 import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
@@ -36,6 +39,18 @@ import {
   findUndispatchedMessages,
   recoverExpiredLeases,
 } from "./services/webhook-inbox.service.js";
+import {
+  claimDelivery,
+  deliveryStatusToMessageStatus,
+  findRecoverableDeliveries,
+  getDelivery,
+  markDeliveryFailed,
+  markDeliverySent,
+  markDeliveryStatus,
+  markDeliveryUnknown,
+  prepareDelivery,
+  syncDeliveryToMessage,
+} from "./services/whatsapp-delivery.service.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 
@@ -126,20 +141,58 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
     return res.sendStatus(403);
   }
 
-  const messages = extractWebhookMessages(req.body);
-  if (messages.length === 0) return res.sendStatus(200);
+  const { messages, statuses } = extractWebhookEvents(req.body);
+  if (messages.length === 0 && statuses.length === 0) return res.sendStatus(200);
 
   try {
+    for (const status of statuses) {
+      const tenant = await resolveTenantByPhoneNumberId(status.phoneNumberId);
+      if (!tenant) {
+        req.log.warn(
+          { providerMessageId: status.id, phoneNumberId: status.phoneNumberId },
+          "Ignoring WhatsApp status: no active tenant mapping",
+        );
+        continue;
+      }
+
+      const delivery = await markDeliveryStatus({
+        tenantId: tenant.tenantId,
+        phoneNumberId: status.phoneNumberId,
+        providerMessageId: status.id,
+        callbackData: status.callbackData,
+        status: status.status,
+        timestamp: status.timestamp,
+        recipientId: status.recipientId,
+        errors: status.errors,
+      });
+
+      if (delivery) {
+        await syncDeliveryToMessage(delivery.id, tenant.tenantId);
+        req.log.info(
+          {
+            deliveryId: delivery.id,
+            providerMessageId: status.id,
+            status: deliveryStatusToMessageStatus(delivery.state),
+            tenantId: tenant.tenantId,
+          },
+          "WhatsApp delivery status reconciled",
+        );
+      }
+    }
+
     for (const message of messages) {
       const tenant = await resolveTenantByPhoneNumberId(message.phoneNumberId);
       if (!tenant) {
-        req.log.warn({ messageId: message.id, phoneNumberId: message.phoneNumberId }, "Ignoring WhatsApp message: no active tenant mapping");
+        req.log.warn(
+          { messageId: message.id, phoneNumberId: message.phoneNumberId },
+          "Ignoring WhatsApp message: no active tenant mapping",
+        );
         continue;
       }
       await ingestWebhookMessage({ message, tenant });
     }
   } catch (error) {
-    req.log.error({ error: error.message }, "Failed to durably ingest WhatsApp webhook");
+    req.log.error({ error: error.message }, "Failed to durably process WhatsApp webhook");
     return next(error);
   }
 
@@ -159,35 +212,43 @@ function verifyMetaSignature(req) {
   return receivedBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
-function extractWebhookMessages(body) {
+function extractWebhookEvents(body) {
   const entries = Array.isArray(body?.entry) ? body.entry : [];
-  const extracted = [];
+  const messages = [];
+  const statuses = [];
 
   for (const entry of entries) {
     const changes = Array.isArray(entry?.changes) ? entry.changes : [];
 
     for (const change of changes) {
       const value = change?.value;
-      const messages = value?.messages;
       const phoneNumberId = value?.metadata?.phone_number_id;
 
-      if (
-        !Array.isArray(messages) ||
-        messages.length === 0 ||
-        typeof phoneNumberId !== "string" ||
-        !/^\d{5,30}$/.test(phoneNumberId)
-      ) {
+      if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) {
         continue;
       }
 
-      for (const message of messages) {
-        if (!message?.text?.body || !message?.from || !message?.id) continue;
-        extracted.push({ ...message, phoneNumberId });
+      if (Array.isArray(value?.messages)) {
+        for (const message of value.messages) {
+          if (!message?.text?.body || !message?.from || !message?.id) continue;
+          messages.push({ ...message, phoneNumberId });
+        }
+      }
+
+      if (Array.isArray(value?.statuses)) {
+        for (const status of value.statuses) {
+          if (!status?.id || !status?.status) continue;
+          statuses.push({
+            ...status,
+            phoneNumberId,
+            callbackData: status.biz_opaque_callback_data,
+          });
+        }
       }
     }
   }
 
-  return extracted;
+  return { messages, statuses };
 }
 
 async function processInboxMessage(inboxId, log = logger) {
@@ -259,37 +320,121 @@ async function processInboxMessage(inboxId, log = logger) {
       return;
     }
 
-    const accessToken = decryptSecret(tenant.accessTokenEncrypted);
-    const sentMessage = await sendWhatsAppMessage({
-      to: message.wa_id,
-      message: reply,
-      accessToken,
-      phoneNumberId: tenant.phoneNumberId,
+    const delivery = await prepareDelivery({
+      tenantId: message.tenant_id,
+      inboxMessageId: message.id,
+      conversationId: persistedInbound.conversationId,
+      recipientWaId: message.wa_id,
+      body: reply,
     });
 
-    const providerMessageId = sentMessage?.messages?.[0]?.id;
-    if (!providerMessageId || typeof providerMessageId !== "string") {
-      throw new Error("WhatsApp API returned no message ID");
+    const deliveryClaim = await claimDelivery(delivery.id, message.tenant_id);
+
+    if (!deliveryClaim.claimed) {
+      const currentDelivery = await getDelivery(delivery.id, message.tenant_id);
+
+      if (
+        currentDelivery?.provider_message_id &&
+        ["SENT", "DELIVERED", "READ", "FAILED"].includes(currentDelivery.state)
+      ) {
+        await persistOutboundMessage({
+          tenantId: message.tenant_id,
+          conversationId: persistedInbound.conversationId,
+          whatsappMessageId: currentDelivery.provider_message_id,
+          messageType: "text",
+          body: reply,
+          sentAt: currentDelivery.last_attempt_at || new Date(),
+          deliveryId: currentDelivery.id,
+        });
+      }
+
+      await markCompleted(
+        message.id,
+        message.tenant_id,
+        leaseToken,
+        currentDelivery?.provider_message_id || null,
+      );
+      log.info(
+        { inboxId: message.id, deliveryId: delivery.id, reason: deliveryClaim.reason },
+        "Durable delivery already owned by delivery subsystem",
+      );
+      return;
     }
 
-    await recordProviderMessageId(
-      message.id,
-      message.tenant_id,
-      leaseToken,
-      providerMessageId,
-    );
+    const accessToken = decryptSecret(tenant.accessTokenEncrypted);
 
-    await persistOutboundMessage({
-      tenantId: message.tenant_id,
-      conversationId: persistedInbound.conversationId,
-      whatsappMessageId: providerMessageId,
-      messageType: "text",
-      body: reply,
-      sentAt: new Date(),
-    });
+    try {
+      const sentMessage = await sendWhatsAppMessage({
+        to: deliveryClaim.delivery.recipient_wa_id,
+        message: deliveryClaim.delivery.body,
+        accessToken,
+        phoneNumberId: tenant.phoneNumberId,
+        callbackData: deliveryClaim.delivery.delivery_key,
+      });
 
-    await markCompleted(message.id, message.tenant_id, leaseToken, providerMessageId);
-    log.info({ inboxId: message.id, tenantId: message.tenant_id }, "WhatsApp reply sent");
+      const providerMessageId = sentMessage?.messages?.[0]?.id;
+      if (!providerMessageId || typeof providerMessageId !== "string") {
+        throw new Error("WhatsApp API returned no message ID");
+      }
+
+      const completedDelivery = await markDeliverySent(
+        delivery.id,
+        message.tenant_id,
+        deliveryClaim.leaseToken,
+        providerMessageId,
+      );
+
+      await recordProviderMessageId(
+        message.id,
+        message.tenant_id,
+        leaseToken,
+        providerMessageId,
+      );
+
+      await persistOutboundMessage({
+        tenantId: message.tenant_id,
+        conversationId: persistedInbound.conversationId,
+        whatsappMessageId: providerMessageId,
+        messageType: "text",
+        body: reply,
+        sentAt: new Date(),
+        deliveryId: completedDelivery.id,
+      });
+
+      await markCompleted(message.id, message.tenant_id, leaseToken, providerMessageId);
+      log.info(
+        { inboxId: message.id, tenantId: message.tenant_id, deliveryId: delivery.id },
+        "WhatsApp reply accepted by provider",
+      );
+    } catch (sendError) {
+      if (isAmbiguousWhatsAppSendError(sendError)) {
+        await markDeliveryUnknown(
+          delivery.id,
+          message.tenant_id,
+          deliveryClaim.leaseToken,
+          sendError,
+        );
+        await markCompleted(message.id, message.tenant_id, leaseToken, null);
+        log.warn(
+          { inboxId: message.id, tenantId: message.tenant_id, deliveryId: delivery.id },
+          "WhatsApp send outcome is ambiguous; delivery recovery owns retry",
+        );
+        return;
+      }
+
+      await markDeliveryFailed(
+        delivery.id,
+        message.tenant_id,
+        deliveryClaim.leaseToken,
+        sendError,
+      );
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.warn(
+        { inboxId: message.id, tenantId: message.tenant_id, deliveryId: delivery.id },
+        "WhatsApp delivery failed definitively",
+      );
+      return;
+    }
   } catch (error) {
     const retryState = await markRetry(message.id, message.tenant_id, leaseToken, error);
     if (!retryState) {
@@ -304,12 +449,110 @@ async function processInboxMessage(inboxId, log = logger) {
   }
 }
 
+async function recoverPendingDeliveries() {
+  try {
+    const pending = await findRecoverableDeliveries(50);
+
+    for (const row of pending) {
+      try {
+        const delivery = await getDelivery(row.id, row.tenant_id);
+        if (!delivery) continue;
+
+        const claim = await claimDelivery(delivery.id, delivery.tenant_id);
+        if (!claim.claimed) continue;
+
+        const inbox = await getInboxMessage(delivery.inbox_message_id, delivery.tenant_id);
+        if (!inbox) {
+          await markDeliveryFailed(
+            delivery.id,
+            delivery.tenant_id,
+            claim.leaseToken,
+            new Error("Durable inbox record for delivery no longer exists"),
+          );
+          continue;
+        }
+
+        const tenant = await resolveTenantByPhoneNumberId(inbox.phone_number_id);
+        if (!tenant || tenant.tenantId !== delivery.tenant_id) {
+          await markDeliveryFailed(
+            delivery.id,
+            delivery.tenant_id,
+            claim.leaseToken,
+            new Error("Stored WhatsApp delivery tenant mapping is no longer valid"),
+          );
+          continue;
+        }
+
+        const accessToken = decryptSecret(tenant.accessTokenEncrypted);
+
+        try {
+          const sentMessage = await sendWhatsAppMessage({
+            to: delivery.recipient_wa_id,
+            message: delivery.body,
+            accessToken,
+            phoneNumberId: tenant.phoneNumberId,
+            callbackData: delivery.delivery_key,
+          });
+
+          const providerMessageId = sentMessage?.messages?.[0]?.id;
+          if (!providerMessageId || typeof providerMessageId !== "string") {
+            throw new Error("WhatsApp API returned no message ID");
+          }
+
+          const completedDelivery = await markDeliverySent(
+            delivery.id,
+            delivery.tenant_id,
+            claim.leaseToken,
+            providerMessageId,
+          );
+
+          await persistOutboundMessage({
+            tenantId: delivery.tenant_id,
+            conversationId: delivery.conversation_id,
+            whatsappMessageId: providerMessageId,
+            messageType: "text",
+            body: delivery.body,
+            sentAt: new Date(),
+            deliveryId: completedDelivery.id,
+          });
+
+          await syncDeliveryToMessage(completedDelivery.id, delivery.tenant_id);
+        } catch (sendError) {
+          if (isAmbiguousWhatsAppSendError(sendError)) {
+            await markDeliveryUnknown(
+              delivery.id,
+              delivery.tenant_id,
+              claim.leaseToken,
+              sendError,
+            );
+          } else {
+            await markDeliveryFailed(
+              delivery.id,
+              delivery.tenant_id,
+              claim.leaseToken,
+              sendError,
+            );
+          }
+        }
+      } catch (error) {
+        logger.error(
+          { error: error.message, deliveryId: row.id, tenantId: row.tenant_id },
+          "Failed to recover WhatsApp delivery",
+        );
+      }
+    }
+  } catch (error) {
+    logger.error({ error: error.message }, "WhatsApp delivery recovery pass failed");
+  }
+}
+
 async function dispatchPendingInboxMessages() {
   if (recoveryPassRunning) return;
   recoveryPassRunning = true;
 
   try {
     await recoverExpiredLeases();
+    await recoverPendingDeliveries();
     const pending = await findUndispatchedMessages(50);
 
     for (const row of pending) {
