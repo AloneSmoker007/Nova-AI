@@ -119,13 +119,25 @@ export async function updatePaymentStatus(tenantId, id, status) {
   const current = await dbPool.query("SELECT status FROM payments WHERE tenant_id=$1 AND id=$2", [t, paymentId]);
   if (!current.rows[0]) return null;
   validateTransition(current.rows[0].status, status);
+
+  // Re-check the transition atomically so concurrent requests cannot both
+  // validate against the same stale status and then apply conflicting updates.
+  const allowedPrevious = [...STATUSES]
+    .filter((candidate) => candidate === current.rows[0].status || TRANSITIONS.get(candidate)?.has(status))
+    .filter((candidate) => candidate === current.rows[0].status);
   const paidAt = status === "paid" ? "COALESCE(paid_at,NOW())" : "paid_at";
   const r = await dbPool.query(
     `UPDATE payments SET status=$3, paid_at=${paidAt}, updated_at=NOW()
-     WHERE tenant_id=$1 AND id=$2 RETURNING *`,
-    [t, paymentId, status],
+     WHERE tenant_id=$1 AND id=$2 AND status=ANY($4::text[]) RETURNING *`,
+    [t, paymentId, status, allowedPrevious],
   );
-  return r.rows[0] || null;
+  if (!r.rows[0]) {
+    const latest = await dbPool.query("SELECT status FROM payments WHERE tenant_id=$1 AND id=$2", [t, paymentId]);
+    if (!latest.rows[0]) return null;
+    validateTransition(latest.rows[0].status, status);
+    return null;
+  }
+  return r.rows[0];
 }
 
 export function verifyPaymentWebhook(rawBody, signature, secret) {
