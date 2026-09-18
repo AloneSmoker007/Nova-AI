@@ -3,6 +3,7 @@ import { dbPool, isDatabaseConfigured } from "../config/database.js";
 const MAX_STEPS = 50;
 const MAX_DELAY_SECONDS = 30 * 24 * 60 * 60;
 const MAX_WEBHOOK_BODY = 16_384;
+const MAX_WEBHOOK_BODY_DEPTH = 10;
 const MAX_RETRIES = 5;
 
 function assertDb() {
@@ -12,16 +13,74 @@ function uuid(v) { return typeof v === "string" && /^[0-9a-f-]{36}$/i.test(v.tri
 function tenant(v) { if (!uuid(v)) throw new Error("Invalid tenant ID"); return v.trim(); }
 function text(v, max) { if (typeof v !== "string" || !v.trim() || v.length > max) throw new Error("Invalid text value"); return v.trim(); }
 
+function validateWebhookJsonValue(value, seen, depth) {
+  if (value === null) return;
+  if (value === undefined || ["function", "symbol", "bigint"].includes(typeof value)) {
+    throw new Error("Webhook body contains a non-JSON-safe value");
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Webhook body contains a non-finite number");
+    return;
+  }
+  if (typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value !== "object") throw new Error("Webhook body contains an invalid value");
+  if (depth > MAX_WEBHOOK_BODY_DEPTH) throw new Error("Webhook body nesting is too deep");
+  if (seen.has(value)) throw new Error("Webhook body contains a circular reference");
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    if (value.length > MAX_WEBHOOK_BODY) throw new Error("Webhook body is too large");
+    for (let i = 0; i < value.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(value, i)) throw new Error("Webhook body contains a sparse array");
+      validateWebhookJsonValue(value[i], seen, depth + 1);
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key === "symbol") throw new Error("Webhook body contains a symbol key");
+      if (key === "length") continue;
+      if (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length) {
+        throw new Error("Webhook body contains an invalid array property");
+      }
+    }
+  } else {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error("Webhook body contains a non-plain object");
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key === "symbol") throw new Error("Webhook body contains a symbol key");
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+        throw new Error("Webhook body contains a non-JSON-safe property");
+      }
+      validateWebhookJsonValue(descriptor.value, seen, depth + 1);
+    }
+  }
+
+  seen.delete(value);
+}
+
+function normalizeWebhookBody(value) {
+  validateWebhookJsonValue(value, new WeakSet(), 0);
+  let serialized;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new Error("Invalid webhook body");
+  }
+  if (typeof serialized !== "string" || Buffer.byteLength(serialized, "utf8") > MAX_WEBHOOK_BODY) {
+    throw new Error("Webhook body is too large");
+  }
+  return value;
+}
+
 export function normalizeWorkflowDefinition(definition) {
   if (!definition || typeof definition !== "object" || Array.isArray(definition)) throw new Error("Invalid workflow definition");
   const steps = Array.isArray(definition.steps) ? definition.steps : [];
   if (steps.length > MAX_STEPS) throw new Error("Workflow has too many steps");
   return {
     version: 1,
-    steps: steps.map((step, i) => normalizeStep(step, i)),
+    steps: steps.map((step, i) => normalizeStep(step, i, steps.length)),
   };
 }
-function normalizeStep(step, index) {
+function normalizeStep(step, index, stepCount) {
   if (!step || typeof step !== "object" || Array.isArray(step)) throw new Error("Invalid workflow step");
   const action = text(step.action, 40).toLowerCase();
   if (!["send_message","add_tag","webhook","wait","condition"].includes(action)) throw new Error("Unsupported workflow action");
@@ -36,7 +95,14 @@ function normalizeStep(step, index) {
     const field = text(step.field, 100);
     const operator = text(step.operator, 30).toLowerCase();
     if (!["equals","not_equals","contains","exists"].includes(operator)) throw new Error("Invalid condition operator");
-    return { action, field, operator, value: step.value ?? null, if_true: Number.isInteger(step.if_true) ? step.if_true : index + 1, if_false: Number.isInteger(step.if_false) ? step.if_false : index + 1 };
+    const target = (name) => {
+      if (!Object.prototype.hasOwnProperty.call(step, name)) return index + 1;
+      if (!Number.isInteger(step[name]) || step[name] < 0 || step[name] > stepCount) {
+        throw new Error(`Invalid workflow condition ${name} target`);
+      }
+      return step[name];
+    };
+    return { action, field, operator, value: step.value ?? null, if_true: target("if_true"), if_false: target("if_false") };
   }
   const url = text(step.url, 2048);
   let parsed;
@@ -44,7 +110,9 @@ function normalizeStep(step, index) {
   if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new Error("Webhook must use HTTPS without embedded credentials");
   const allowed = String(process.env.AUTOMATION_WEBHOOK_ALLOWLIST || "").split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
   if (!allowed.includes(parsed.hostname.toLowerCase())) throw new Error("Webhook host is not allowlisted");
-  return { action, url, method: String(step.method || "POST").toUpperCase() === "POST" ? "POST" : "PUT", body: step.body && typeof step.body === "object" ? step.body : {} };
+  const body = Object.prototype.hasOwnProperty.call(step, "body") ? step.body : {};
+  if (body === null || typeof body !== "object") throw new Error("Invalid webhook body");
+  return { action, url, method: String(step.method || "POST").toUpperCase() === "POST" ? "POST" : "PUT", body: normalizeWebhookBody(body) };
 }
 
 export async function createWorkflow({ tenantId, createdBy, name, description = null, triggerType = "manual", triggerConfig = {}, definition = {} }) {
@@ -81,7 +149,8 @@ export async function startWorkflowRun({tenantId,workflowId,conversationId=null,
 export async function triggerWorkflows({tenantId,triggerType,conversationId=null,contactId=null,context={}}) {
   assertDb(); const t=tenant(tenantId);
   const r=await dbPool.query(`SELECT id FROM automation_workflows WHERE tenant_id=$1 AND status='active' AND trigger_type=$2`,[t,triggerType]);
-  const runs=[]; for(const row of r.rows) { const key = context?.message?.id ? `${triggerType}:${context.message.id}` : null; const run = await startWorkflowRun({tenantId:t,workflowId:row.id,conversationId,contactId,context,triggerKey:key}); if(run) runs.push(run); } return runs;
+  const key = context?.message?.id ? `${triggerType}:${context.message.id}` : null;
+  const runs=[]; for(const row of r.rows) { const run = await startWorkflowRun({tenantId:t,workflowId:row.id,conversationId,contactId,context,triggerKey:key}); if(run) runs.push(run); } return runs;
 }
 function getPath(obj,path){ return path.split(".").reduce((v,k)=>v && typeof v==="object"?v[k]:undefined,obj); }
 function condition(step,ctx){ const v=getPath(ctx,step.field); if(step.operator==="exists") return v!==undefined&&v!==null; if(step.operator==="equals") return v===step.value; if(step.operator==="not_equals") return v!==step.value; return typeof v==="string"&&v.toLowerCase().includes(String(step.value??"").toLowerCase()); }
