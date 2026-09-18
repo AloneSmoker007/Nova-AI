@@ -99,6 +99,13 @@ export async function persistInboundMessage({
       return { duplicate: true, conversationId, contactId, messageId: null };
     }
 
+    await client.query(
+      `UPDATE conversations
+       SET unread_count = unread_count + 1, updated_at = NOW()
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, conversationId],
+    );
+
     await client.query("COMMIT");
 
     return {
@@ -122,6 +129,7 @@ export async function persistOutboundMessage({
   messageType = "text",
   body,
   sentAt = new Date(),
+  deliveryId = null,
 }) {
   assertDatabase();
 
@@ -142,6 +150,25 @@ export async function persistOutboundMessage({
   try {
     await client.query("BEGIN");
 
+    let messageStatus = "sent";
+
+    if (deliveryId) {
+      const deliveryResult = await client.query(
+        `
+          SELECT state
+          FROM whatsapp_deliveries
+          WHERE id = $1 AND tenant_id = $2
+          LIMIT 1
+        `,
+        [deliveryId, tenantId],
+      );
+
+      const deliveryState = deliveryResult.rows[0]?.state;
+      if (deliveryState === "delivered") messageStatus = "delivered";
+      if (deliveryState === "read") messageStatus = "read";
+      if (deliveryState === "failed") messageStatus = "failed";
+    }
+
     const result = await client.query(
       `
         INSERT INTO messages (
@@ -154,12 +181,20 @@ export async function persistOutboundMessage({
           status,
           created_at
         )
-        VALUES ($1, $2, $3, 'outbound', $4, $5, 'sent', $6)
+        VALUES ($1, $2, $3, 'outbound', $4, $5, $6, $7)
         ON CONFLICT (tenant_id, whatsapp_message_id)
         DO NOTHING
         RETURNING id
       `,
-      [tenantId, conversationId, whatsappMessageId, messageType, body.slice(0, 4096), sentAt],
+      [
+        tenantId,
+        conversationId,
+        whatsappMessageId,
+        messageType,
+        body.slice(0, 4096),
+        messageStatus,
+        sentAt,
+      ],
     );
 
     if (result.rowCount === 0) {
