@@ -51,7 +51,7 @@ function metadata(value) {
   if (json.length > 8000) throw new Error("Metadata is too large");
   return value;
 }
-function validateTransition(current, next) {
+function eventId(value) {\n  const v = text(value, 200);\n  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(v)) throw new Error("Invalid payment event ID");\n  return v;\n}\n\nfunction validateTransition(current, next) {
   if (!STATUSES.has(next)) throw new Error("Invalid payment status");
   if (current === next) return;
   if (!TRANSITIONS.get(current)?.has(next)) throw new Error("Invalid payment status transition");
@@ -157,23 +157,39 @@ export function verifyPaymentWebhook(rawBody, signature, secret) {
   return received.length === expectedBuffer.length && crypto.timingSafeEqual(received, expectedBuffer);
 }
 
-export async function applyPaymentWebhook({ tenantId, provider: providerName, providerPaymentId, status, signatureValid }) {
+export async function applyPaymentWebhook({ tenantId, provider: providerName, providerPaymentId, status, eventId: webhookEventId, signatureValid }) {
   if (!signatureValid) throw new Error("Invalid payment webhook signature");
   const t = tenant(tenantId);
   const p = provider(providerName);
   const externalId = text(providerPaymentId, 200);
+  const normalizedEventId = eventId(webhookEventId);
   if (!STATUSES.has(status)) throw new Error("Invalid payment status");
 
   const client = await dbPool.connect();
   try {
     await client.query("BEGIN");
 
+    const event = await client.query(
+      "INSERT INTO payment_webhook_events (tenant_id, provider, event_id, provider_payment_id, status) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tenant_id, provider, event_id) DO NOTHING RETURNING id",
+      [t, p, normalizedEventId, externalId, status],
+    );
+
+    if (event.rowCount === 0) {
+      await client.query("COMMIT");
+      return { duplicate: true };
+    }
+
     const current = await client.query(
       "SELECT status FROM payments WHERE tenant_id=$1 AND provider=$2 AND provider_payment_id=$3 FOR UPDATE",
       [t, p, externalId],
     );
+
     if (!current.rows[0]) {
-      await client.query("ROLLBACK");
+      await client.query(
+        "DELETE FROM payment_webhook_events WHERE tenant_id=$1 AND provider=$2 AND event_id=$3",
+        [t, p, normalizedEventId],
+      );
+      await client.query("COMMIT");
       return null;
     }
 
@@ -187,6 +203,11 @@ export async function applyPaymentWebhook({ tenantId, provider: providerName, pr
        WHERE tenant_id=$1 AND provider=$2 AND provider_payment_id=$3
        RETURNING *`,
       [t, p, externalId, status],
+    );
+
+    await client.query(
+      "UPDATE payment_webhook_events SET processed_at=NOW() WHERE tenant_id=$1 AND provider=$2 AND event_id=$3",
+      [t, p, normalizedEventId],
     );
 
     await client.query("COMMIT");
