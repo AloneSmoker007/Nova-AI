@@ -6,7 +6,7 @@ import compression from "compression";
 import rateLimit from "express-rate-limit";
 import Joi from "joi";
 
-import { checkDatabaseConnection, closeDatabaseConnection, isDatabaseConfigured } from "./config/database.js";
+import { checkDatabaseConnection, closeDatabaseConnection, isDatabaseConfigured, dbPool } from "./config/database.js";
 import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
