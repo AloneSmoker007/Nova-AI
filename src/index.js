@@ -18,7 +18,7 @@ import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage, persistDeletedInboundMessage } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
-import { analyzeCustomerMessage, buildAdvancedAiContext, getCustomerMemory, rememberCustomerPreference, recordAiSignal } from "./services/advanced-ai.service.js";
+import { analyzeCustomerMessage, buildAdvancedAiContext, getCustomerMemory, rememberCustomerPreference, recordAiSignal, syncCustomerMemoryFromMessage } from "./services/advanced-ai.service.js";
 import { loginUser, getUserById, generateToken } from "./services/auth.service.js";
 import { issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from "./services/refresh-token.service.js";
 import {
@@ -357,6 +357,28 @@ async function processInboxMessage(inboxId, log = logger) {
         whatsappMessageId: message.whatsapp_message_id,
         occurredAt: message.received_at,
       });
+    }
+
+    // Memory persistence intentionally runs on every processing attempt, including
+    // duplicate webhook deliveries. If a previous attempt stored the message but
+    // failed before saving memory, the durable inbox retry repairs the missing memory.
+    if (persistedInbound.contactId) {
+      const savedMemories = await syncCustomerMemoryFromMessage({
+        tenantId: message.tenant_id,
+        contactId: persistedInbound.contactId,
+        messageText: message.body,
+      });
+      if (savedMemories.length > 0) {
+        log.info(
+          {
+            inboxId: message.id,
+            tenantId: message.tenant_id,
+            contactId: persistedInbound.contactId,
+            memoryKeys: savedMemories.map((item) => item.memory_key),
+          },
+          "Customer AI memory synchronized from inbound message",
+        );
+      }
     }
 
     const handoffState = await getHandoffState(message.tenant_id, persistedInbound.conversationId);
