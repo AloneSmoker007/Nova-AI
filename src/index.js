@@ -6,7 +6,7 @@ import compression from "compression";
 import rateLimit from "express-rate-limit";
 import Joi from "joi";
 
-import { checkDatabaseConnection, closeDatabaseConnection, isDatabaseConfigured } from "./config/database.js";
+import { checkDatabaseConnection, closeDatabaseConnection, isDatabaseConfigured, dbPool } from "./config/database.js";
 import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
@@ -57,6 +57,7 @@ import { requireRole } from "./middleware/require-role.js";
 import { registerInboundUsage, getUsageSummary } from "./services/usage.service.js";
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
 import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotPrompt, setUserSkills } from "./services/handoff.service.js";
+import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -193,7 +194,12 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
         );
         continue;
       }
-      await ingestWebhookMessage({ message, tenant });
+      const inboxMessage = await ingestWebhookMessage({ message, tenant });
+      await triggerWorkflows({
+        tenantId: tenant.tenantId,
+        triggerType: "message_received",
+        context: { message: { id: message.id, from: message.from, body: message.text?.body || "" }, inboxId: inboxMessage.id },
+      });
     }
   } catch (error) {
     req.log.error({ error: error.message }, "Failed to durably process WhatsApp webhook");
@@ -498,18 +504,29 @@ async function recoverPendingDeliveries() {
         const claim = await claimDelivery(delivery.id, delivery.tenant_id);
         if (!claim.claimed) continue;
 
-        const inbox = await getInboxMessage(delivery.inbox_message_id, delivery.tenant_id);
-        if (!inbox) {
-          await markDeliveryFailed(
-            delivery.id,
-            delivery.tenant_id,
-            claim.leaseToken,
-            new Error("Durable inbox record for delivery no longer exists"),
+        const inbox = delivery.inbox_message_id
+          ? await getInboxMessage(delivery.inbox_message_id, delivery.tenant_id)
+          : null;
+
+        let phoneNumberId = inbox?.phone_number_id;
+        if (!phoneNumberId && delivery.automation_run_id) {
+          const automation = await dbPool.query(
+            `SELECT wn.phone_number_id
+             FROM automation_runs ar
+             JOIN conversations c ON c.tenant_id = ar.tenant_id AND c.id = ar.conversation_id
+             JOIN whatsapp_numbers wn ON wn.tenant_id = c.tenant_id AND wn.id = c.whatsapp_number_id
+             WHERE ar.tenant_id = $1 AND ar.id = $2 LIMIT 1`,
+            [delivery.tenant_id, delivery.automation_run_id],
           );
+          phoneNumberId = automation.rows[0]?.phone_number_id;
+        }
+
+        if (!phoneNumberId) {
+          await markDeliveryFailed(delivery.id, delivery.tenant_id, claim.leaseToken, new Error("Unable to resolve WhatsApp number for delivery"));
           continue;
         }
 
-        const tenant = await resolveTenantByPhoneNumberId(inbox.phone_number_id);
+        const tenant = await resolveTenantByPhoneNumberId(phoneNumberId);
         if (!tenant || tenant.tenantId !== delivery.tenant_id) {
           await markDeliveryFailed(
             delivery.id,
@@ -590,6 +607,8 @@ async function dispatchPendingInboxMessages() {
   try {
     await recoverExpiredLeases();
     await recoverPendingDeliveries();
+    await scheduleInactivityTriggers(100);
+    await processDueWorkflowRuns(20);
     const pending = await findUndispatchedMessages(50);
 
     for (const row of pending) {
@@ -877,6 +896,57 @@ app.put("/api/users/me/skills", requireAuth, async (req, res, next) => {
     if (error.message.includes("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
     return next(error);
   }
+});
+
+app.get("/api/automations", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await listWorkflows(req.user.tenantId) }); }
+  catch (error) { return next(error); }
+});
+
+app.post("/api/automations", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const data = await createWorkflow({
+      tenantId: req.user.tenantId,
+      createdBy: req.user.id,
+      name: req.body?.name,
+      description: req.body?.description,
+      triggerType: req.body?.triggerType,
+      triggerConfig: req.body?.triggerConfig,
+      definition: req.body?.definition,
+    });
+    return res.status(201).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid") || error.message.includes("Unsupported") || error.message.includes("Workflow")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.patch("/api/automations/:workflowId/status", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await setWorkflowStatus(req.user.tenantId, req.params.workflowId, req.body?.status) }); }
+  catch (error) {
+    if (error.message.startsWith("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.post("/api/automations/:workflowId/run", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const data = await startWorkflowRun({
+      tenantId: req.user.tenantId,
+      workflowId: req.params.workflowId,
+      conversationId: req.body?.conversationId,
+      contactId: req.body?.contactId,
+      context: req.body?.context || {},
+    });
+    return res.status(202).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.get("/api/automations/health", requireAuth, requireRole("owner", "admin"), async (req, res) => {
+  return res.status(200).json({ status: "ok", scheduler: "enabled" });
 });
 
 app.get("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next) => {
