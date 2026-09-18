@@ -116,18 +116,38 @@ export async function getPayment(tenantId, id) {
 export async function updatePaymentStatus(tenantId, id, status) {
   const t = tenant(tenantId);
   const paymentId = text(id, 64);
-  const current = await dbPool.query("SELECT status FROM payments WHERE tenant_id=$1 AND id=$2", [t, paymentId]);
-  if (!current.rows[0]) return null;
-  validateTransition(current.rows[0].status, status);
-  const paidAt = status === "paid" ? "COALESCE(paid_at,NOW())" : "paid_at";
-  const r = await dbPool.query(
-    `UPDATE payments SET status=$3, paid_at=${paidAt}, updated_at=NOW()
-     WHERE tenant_id=$1 AND id=$2 RETURNING *`,
-    [t, paymentId, status],
-  );
-  return r.rows[0] || null;
-}
+  if (!STATUSES.has(status)) throw new Error("Invalid payment status");
 
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const current = await client.query(
+      "SELECT status FROM payments WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+      [t, paymentId],
+    );
+    if (!current.rows[0]) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    validateTransition(current.rows[0].status, status);
+    const paidAt = status === "paid" ? "COALESCE(paid_at,NOW())" : "paid_at";
+    const updated = await client.query(
+      `UPDATE payments SET status=$3, paid_at=${paidAt}, updated_at=NOW()
+       WHERE tenant_id=$1 AND id=$2 RETURNING *`,
+      [t, paymentId, status],
+    );
+
+    await client.query("COMMIT");
+    return updated.rows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 export function verifyPaymentWebhook(rawBody, signature, secret) {
   if (!Buffer.isBuffer(rawBody) || !rawBody.length || typeof signature !== "string" || !secret) return false;
   if (!/^[a-f0-9]{64}$/i.test(signature)) return false;
@@ -144,21 +164,37 @@ export async function applyPaymentWebhook({ tenantId, provider: providerName, pr
   const externalId = text(providerPaymentId, 200);
   if (!STATUSES.has(status)) throw new Error("Invalid payment status");
 
-  const current = await dbPool.query(
-    "SELECT status FROM payments WHERE tenant_id=$1 AND provider=$2 AND provider_payment_id=$3",
-    [t, p, externalId],
-  );
-  if (!current.rows[0]) return null;
-  validateTransition(current.rows[0].status, status);
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
 
-  const r = await dbPool.query(
-    `UPDATE payments SET
-       status=$4,
-       paid_at=CASE WHEN $4='paid' THEN COALESCE(paid_at,NOW()) ELSE paid_at END,
-       updated_at=NOW()
-     WHERE tenant_id=$1 AND provider=$2 AND provider_payment_id=$3
-     RETURNING *`,
-    [t,p,externalId,status],
-  );
-  return r.rows[0] || null;
+    const current = await client.query(
+      "SELECT status FROM payments WHERE tenant_id=$1 AND provider=$2 AND provider_payment_id=$3 FOR UPDATE",
+      [t, p, externalId],
+    );
+    if (!current.rows[0]) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    validateTransition(current.rows[0].status, status);
+
+    const updated = await client.query(
+      `UPDATE payments SET
+         status=$4,
+         paid_at=CASE WHEN $4='paid' THEN COALESCE(paid_at,NOW()) ELSE paid_at END,
+         updated_at=NOW()
+       WHERE tenant_id=$1 AND provider=$2 AND provider_payment_id=$3
+       RETURNING *`,
+      [t, p, externalId, status],
+    );
+
+    await client.query("COMMIT");
+    return updated.rows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }

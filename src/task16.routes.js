@@ -79,19 +79,29 @@ export function registerTask16Routes(app) {
     }
   });
 
-  app.post("/api/payments/webhook/:tenantId", express.raw({ type: "application/json", limit: "64kb" }), async (req, res, next) => {
+  app.post("/api/payments/webhook/:tenantId", async (req, res, next) => {
     try {
       const signature = req.get("x-nova-payment-signature");
-      if (!PAYMENT_WEBHOOK_SECRET || !verifyPaymentWebhook(req.body, signature, PAYMENT_WEBHOOK_SECRET)) {
+      const rawBody = req.rawBody;
+      if (
+        !PAYMENT_WEBHOOK_SECRET ||
+        !Buffer.isBuffer(rawBody) ||
+        rawBody.length > 64 * 1024 ||
+        !verifyPaymentWebhook(rawBody, signature, PAYMENT_WEBHOOK_SECRET)
+      ) {
         return res.sendStatus(403);
       }
 
-      const body = JSON.parse(req.body.toString("utf8"));
+      const body = req.body;
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return res.status(400).json({ status: "error", error: "Invalid payment webhook" });
+      }
+
       const data = await applyPaymentWebhook({
         tenantId: req.params.tenantId,
-        provider: body?.provider,
-        providerPaymentId: body?.providerPaymentId,
-        status: body?.status,
+        provider: body.provider,
+        providerPaymentId: body.providerPaymentId,
+        status: body.status,
         signatureValid: true,
       });
 
