@@ -199,7 +199,6 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
   res.sendStatus(200);
   setImmediate(() => {
     void dispatchPendingInboxMessages();
-    void recoverPendingDeliveries();
   });
 });
 
