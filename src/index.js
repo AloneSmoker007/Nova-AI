@@ -757,7 +757,7 @@ app.put("/api/conversations/:conversationId/tags", requireAuth, async (req, res,
   }
 });
 
-app.get("/api/business-brain", requireAuth, async (req, res, next) => {
+app.get("/api/business-brain", requireAuth, async (req, res) => {
   try {
     const brain = await getBusinessBrain(req.user.tenantId);
     return res.status(200).json({ status: "ok", data: brain || {} });
