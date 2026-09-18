@@ -56,6 +56,7 @@ import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 import { registerInboundUsage, getUsageSummary } from "./services/usage.service.js";
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
+import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotPrompt, setUserSkills } from "./services/handoff.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -300,6 +301,13 @@ async function processInboxMessage(inboxId, log = logger) {
       });
     }
 
+    const handoffState = await getHandoffState(message.tenant_id, persistedInbound.conversationId);
+    if (handoffState?.ai_paused) {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.info({ inboxId: message.id, tenantId: message.tenant_id, conversationId: persistedInbound.conversationId }, "AI paused; message left for human agent");
+      return;
+    }
+
     if (!tenant.accessTokenEncrypted && !message.provider_message_id) {
       throw new Error("Tenant WhatsApp credentials are not configured");
     }
@@ -331,7 +339,7 @@ async function processInboxMessage(inboxId, log = logger) {
         }
       }
       const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
-      const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\n\n") } : { customInstructions: advancedContext };
+      const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") } : { customInstructions: advancedContext };
       reply = await generateGeminiReply(message.body, aiBrain);
       reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
     }
@@ -770,6 +778,103 @@ app.put("/api/conversations/:conversationId/tags", requireAuth, async (req, res,
     if (error.message.startsWith("Invalid") || error.message.includes("not found")) {
       return res.status(400).json({ status: "error", error: error.message });
     }
+    return next(error);
+  }
+});
+
+app.get("/api/conversations/:conversationId/handoff", requireAuth, async (req, res, next) => {
+  try {
+    const data = await getHandoffState(req.user.tenantId, req.params.conversationId);
+    if (!data) return res.status(404).json({ status: "error", error: "Conversation not found" });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/conversations/:conversationId/handoff", requireAuth, async (req, res, next) => {
+  try {
+    const data = await handoffConversation(req.user.tenantId, req.params.conversationId, req.user.id, req.body?.reason, req.body?.skill);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.includes("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.post("/api/conversations/:conversationId/pause-ai", requireAuth, async (req, res, next) => {
+  try {
+    const data = await pauseAi(req.user.tenantId, req.params.conversationId, req.user.id, req.body?.reason);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.includes("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.post("/api/conversations/:conversationId/resume-ai", requireAuth, async (req, res, next) => {
+  try {
+    const data = await resumeAi(req.user.tenantId, req.params.conversationId, req.user.id);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.includes("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.post("/api/conversations/:conversationId/assign-round-robin", requireAuth, async (req, res, next) => {
+  try {
+    const data = await assignConversationRoundRobin(req.user.tenantId, req.params.conversationId, req.body?.skill);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.includes("Invalid") || error.message.includes("not found") || error.message.includes("No active")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.get("/api/conversations/:conversationId/handoff-summary", requireAuth, async (req, res, next) => {
+  try {
+    const data = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
+    if (!data) return res.status(404).json({ status: "error", error: "Summary not found" });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/conversations/:conversationId/copilot/drafts", requireAuth, async (req, res, next) => {
+  try {
+    const data = await listCopilotDrafts(req.user.tenantId, req.params.conversationId, req.query.limit);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async (req, res, next) => {
+  try {
+    const messages = await getConversationMessages(req.user.tenantId, req.params.conversationId, { limit: 12, offset: 0 });
+    const summary = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
+    const brain = await getBusinessBrain(req.user.tenantId);
+    const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
+    const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
+      ...(brain || {}),
+      customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\\n\\n"),
+    });
+    const saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
+    return res.status(201).json({ status: "ok", data: saved });
+  } catch (error) {
+    if (error.message.includes("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.put("/api/users/me/skills", requireAuth, async (req, res, next) => {
+  try {
+    const data = await setUserSkills(req.user.tenantId, req.user.id, req.body?.skills);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.includes("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
     return next(error);
   }
 });
