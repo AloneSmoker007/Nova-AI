@@ -861,9 +861,7 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
     const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
     const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
       ...(brain || {}),
-      customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("
-
-"),
+      customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\\n\\n"),
     });
     const saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
     return res.status(201).json({ status: "ok", data: saved });
@@ -998,13 +996,3 @@ async function startServer() {
         logger.info("Nova-AI server closed successfully");
         process.exit(0);
       } catch (shutdownError) {
-        logger.error({ error: shutdownError.message }, "Graceful shutdown error");
-        process.exit(1);
-      }
-    });
-    setTimeout(() => { logger.error("Forced shutdown after 10 seconds"); process.exit(1); }, 10_000).unref();
-  }
-
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-}
