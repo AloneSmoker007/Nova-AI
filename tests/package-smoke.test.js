@@ -30,3 +30,20 @@ test("migration order accepts only-newer pending migrations", () => {
     ),
   );
 });
+
+
+import { compareMigrationFilenames } from "../src/database/migrate.js";
+
+test("migration filenames are ordered by numeric prefix", () => {
+  assert.deepEqual(
+    ["009_old.sql", "010_next.sql", "011_latest.sql"].sort(compareMigrationFilenames),
+    ["009_old.sql", "010_next.sql", "011_latest.sql"],
+  );
+});
+
+test("migration ordering handles multi-digit prefixes correctly", () => {
+  assert.deepEqual(
+    ["020_deleted.sql", "003_base.sql", "011_ai.sql"].sort(compareMigrationFilenames),
+    ["003_base.sql", "011_ai.sql", "020_deleted.sql"],
+  );
+});

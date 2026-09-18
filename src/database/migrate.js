@@ -8,6 +8,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const migrationsDirectory = path.resolve(__dirname, "../../database");
 
+function migrationNumber(filename) {
+  const match = /^([0-9]+)_/.exec(filename);
+  return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+}
+
+export function compareMigrationFilenames(a, b) {
+  const numberDiff = migrationNumber(a) - migrationNumber(b);
+  return numberDiff !== 0 ? numberDiff : a.localeCompare(b);
+}
+
 // One transaction-level advisory lock prevents multiple Nova-AI
 // instances from applying migrations concurrently during startup.
 const MIGRATION_ADVISORY_LOCK_ID = 7_421_991;
@@ -18,7 +28,7 @@ async function getMigrationFiles() {
   return entries
     .filter((entry) => entry.isFile() && /^\d+_.+\.sql$/.test(entry.name))
     .map((entry) => entry.name)
-    .sort();
+    .sort(compareMigrationFilenames);
 }
 
 export function validateMigrationOrder(migrationFiles, appliedFilenames) {
@@ -28,12 +38,14 @@ export function validateMigrationOrder(migrationFiles, appliedFilenames) {
 
   const highestApplied = [...applied]
     .filter((filename) => /^\d+_.+\.sql$/.test(filename))
-    .sort()
+    .sort(compareMigrationFilenames)
     .at(-1);
 
   if (!highestApplied) return;
 
-  const outOfOrder = pending.filter((filename) => filename < highestApplied);
+  const outOfOrder = pending.filter(
+    (filename) => compareMigrationFilenames(filename, highestApplied) < 0,
+  );
   if (outOfOrder.length > 0) {
     throw new Error(
       `Out-of-order database migrations detected: ${outOfOrder.join(", ")}. Add new migrations with a higher numeric prefix than the latest applied migration.`,
