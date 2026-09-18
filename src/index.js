@@ -53,6 +53,7 @@ import {
 } from "./services/whatsapp-delivery.service.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
+import { registerInboundUsage, getUsageSummary } from "./services/usage.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -286,6 +287,16 @@ async function processInboxMessage(inboxId, log = logger) {
       body: message.body,
       receivedAt: message.received_at,
     });
+
+    if (!persistedInbound.duplicate) {
+      await registerInboundUsage({
+        tenantId: message.tenant_id,
+        conversationId: persistedInbound.conversationId,
+        messageId: persistedInbound.messageId,
+        whatsappMessageId: message.whatsapp_message_id,
+        occurredAt: message.received_at,
+      });
+    }
 
     if (!tenant.accessTokenEncrypted && !message.provider_message_id) {
       throw new Error("Tenant WhatsApp credentials are not configured");
@@ -658,6 +669,16 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
     return res.status(200).json({ status: "ok", user: { id: user.id, email: user.email, role: user.role, tenantId: user.tenant_id } });
   } catch {
     return res.status(401).json({ status: "error", error: "Invalid or expired token" });
+  }
+});
+
+app.get("/api/usage", requireAuth, async (req, res) => {
+  try {
+    const summary = await getUsageSummary(req.user.tenantId);
+    return res.status(200).json({ status: "ok", data: summary });
+  } catch (error) {
+    req.log.error({ error: error.message, tenantId: req.user.tenantId }, "Failed to fetch usage summary");
+    return res.status(500).json({ status: "error", error: "Failed to fetch usage summary" });
   }
 });
 
