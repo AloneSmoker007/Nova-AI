@@ -23,3 +23,13 @@ test("OCR upload policy is restricted to supported document types and size", () 
   assert.equal(ocr.ALLOWED.has("text/html"), false);
   assert.equal(ocr.MAX_IMAGE_BYTES, 5 * 1024 * 1024);
 });
+
+test("OCR validates file signatures instead of trusting MIME type alone", () => {
+  assert.equal(ocr.hasValidMagicBytes(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), "image/jpeg"), true);
+  assert.equal(ocr.hasValidMagicBytes(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), "image/png"), true);
+  assert.equal(ocr.hasValidMagicBytes(Buffer.from("RIFFxxxxWEBP"), "image/webp"), true);
+  assert.equal(ocr.hasValidMagicBytes(Buffer.from("%PDF-1.7"), "application/pdf"), true);
+
+  assert.equal(ocr.hasValidMagicBytes(Buffer.from("<html>"), "image/jpeg"), false);
+  assert.equal(ocr.hasValidMagicBytes(Buffer.from("%PDF-1.7"), "image/png"), false);
+});
