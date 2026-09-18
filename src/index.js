@@ -169,23 +169,12 @@ function extractWebhookMessages(body) {
     .map((message) => ({ ...message, phoneNumberId }));
 }
 
-async function resolveEffectiveTenantId(inboxId, tenantId) {
-  if (tenantId && typeof tenantId === "string" && tenantId.trim() !== "") {
-    return tenantId.trim();
-  }
-
+async function processInboxMessage(inboxId, log = logger) {
   const inbox = await getInboxMessage(inboxId);
-  return inbox?.tenant_id ?? null;
-}
-
-async function processInboxMessage(inboxId, tenantId, log = logger) {
-  const resolvedTenantId = await resolveEffectiveTenantId(inboxId, tenantId);
-  if (!resolvedTenantId) return;
-
-  const inbox = await getInboxMessage(inboxId, resolvedTenantId);
   if (!inbox) return;
 
-  const claim = await claimInboxMessage(inboxId, resolvedTenantId);
+  const tenantId = inbox.tenant_id;
+  const claim = await claimInboxMessage(inboxId, tenantId);
   if (!claim.claimed) {
     if (claim.reason !== "processing") {
       log.info({ inboxId, tenantId: resolvedTenantId, reason: claim.reason }, "Skipping durable inbox message");
@@ -305,7 +294,7 @@ async function dispatchPendingInboxMessages() {
           await enqueueWhatsAppMessage({ inboxId: row.id });
           await markQueueDispatched(row.id, row.tenant_id);
         } else {
-          await processInboxMessage(row.id, row.tenant_id, logger);
+          await processInboxMessage(row.id, logger);
         }
       } catch (error) {
         logger.error(
@@ -446,8 +435,7 @@ async function startServer() {
   if (isQueueConfigured()) {
     startWorker(async (jobData) => {
       const inboxId = jobData?.inboxId;
-      const tenantId = await resolveEffectiveTenantId(inboxId, jobData?.tenantId);
-      return processInboxMessage(inboxId, tenantId, logger);
+      return processInboxMessage(inboxId, logger);
     });
     logger.info("WhatsApp queue worker started");
   }
