@@ -52,3 +52,30 @@ export async function listBackups(tenantId, limit = 20) {
   const result = await dbPool.query("SELECT id,filename,size_bytes,sha256,status,started_at,completed_at,error_message,drive_file_id FROM tenant_backups WHERE tenant_id=$1 ORDER BY started_at DESC LIMIT $2", [tenantId, safeLimit]);
   return result.rows;
 }
+export function startBackupScheduler() {
+  const intervalMs = Number(process.env.BACKUP_INTERVAL_MS || 24 * 60 * 60 * 1000);
+  const run = async () => {
+    if (!dbPool) return;
+    const tenants = await dbPool.query(
+      "SELECT c.tenant_id FROM tenant_google_drive_connections c JOIN tenants t ON t.id=c.tenant_id WHERE t.status='active'",
+    );
+    for (const row of tenants.rows) {
+      const lock = await dbPool.query("SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked", ["nova-backup:" + row.tenant_id]);
+      if (!lock.rows[0]?.locked) continue;
+      try {
+        const due = await dbPool.query(
+          "SELECT 1 FROM tenant_backups WHERE tenant_id=$1 AND status='COMPLETED' AND started_at > NOW() - ($2::bigint * INTERVAL '1 millisecond') LIMIT 1",
+          [row.tenant_id, intervalMs],
+        );
+        if (due.rowCount === 0) await createTenantBackup(row.tenant_id);
+      } catch (error) {
+        console.error("Nova backup scheduler failed for tenant", row.tenant_id, error.message);
+      } finally {
+        await dbPool.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", ["nova-backup:" + row.tenant_id]).catch(() => undefined);
+      }
+    }
+  };
+  const timer = setInterval(() => void run(), intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
