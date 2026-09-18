@@ -21,6 +21,26 @@ async function getMigrationFiles() {
     .sort();
 }
 
+export function validateMigrationOrder(migrationFiles, appliedFilenames) {
+  const applied = new Set(appliedFilenames);
+  const pending = migrationFiles.filter((filename) => !applied.has(filename));
+  if (pending.length === 0) return;
+
+  const highestApplied = [...applied]
+    .filter((filename) => /^\d+_.+\.sql$/.test(filename))
+    .sort()
+    .at(-1);
+
+  if (!highestApplied) return;
+
+  const outOfOrder = pending.filter((filename) => filename < highestApplied);
+  if (outOfOrder.length > 0) {
+    throw new Error(
+      `Out-of-order database migrations detected: ${outOfOrder.join(", ")}. Add new migrations with a higher numeric prefix than the latest applied migration.`,
+    );
+  }
+}
+
 export async function runMigrations() {
   if (!isDatabaseConfigured() || !dbPool) {
     return { configured: false, applied: [] };
@@ -49,6 +69,8 @@ export async function runMigrations() {
       "SELECT filename FROM schema_migrations ORDER BY filename",
     );
     const applied = new Set(appliedResult.rows.map((row) => row.filename));
+    validateMigrationOrder(migrationFiles, applied);
+
     const newlyApplied = [];
 
     for (const filename of migrationFiles) {
