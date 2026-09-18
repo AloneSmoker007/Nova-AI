@@ -146,7 +146,7 @@ export async function processDueWorkflowRuns(limit=20) {
         const step=steps[idx];
         if(step.action==="wait") {
           await dbPool.query(
-            "UPDATE automation_runs SET status='waiting',current_step=$3,next_run_at=NOW()+($4*INTERVAL '1 second'),context=$4::jsonb,updated_at=NOW() WHERE tenant_id=$1 AND id=$2",
+            "UPDATE automation_runs SET status='waiting',current_step=$3,next_run_at=NOW()+($5*INTERVAL '1 second'),context=$4::jsonb,updated_at=NOW() WHERE tenant_id=$1 AND id=$2",
             [run.tenant_id,run.id,idx+1,JSON.stringify(ctx),step.seconds],
           );
           break;
