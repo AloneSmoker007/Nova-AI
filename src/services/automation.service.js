@@ -121,8 +121,9 @@ export async function processDueWorkflowRuns(limit=20) {
   try {
     const r=await claimClient.query(`WITH picked AS (
       SELECT id FROM automation_runs
-      WHERE status IN ('queued','waiting')
-        AND (next_run_at IS NULL OR next_run_at<=NOW())
+      WHERE (status IN ('queued','waiting')
+        AND (next_run_at IS NULL OR next_run_at<=NOW()))
+        OR (status='running' AND updated_at < NOW() - INTERVAL '2 minutes')
       ORDER BY next_run_at NULLS FIRST,created_at
       FOR UPDATE SKIP LOCKED LIMIT $1)
       UPDATE automation_runs r
