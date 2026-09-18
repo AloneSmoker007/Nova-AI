@@ -18,6 +18,7 @@ import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.
 import { decryptSecret } from "./services/secrets.service.js";
 import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
+import { analyzeCustomerMessage, buildAdvancedAiContext, getCustomerMemory, rememberCustomerPreference, recordAiSignal } from "./services/advanced-ai.service.js";
 import { loginUser, getUserById, generateToken } from "./services/auth.service.js";
 import { issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from "./services/refresh-token.service.js";
 import {
@@ -315,7 +316,23 @@ async function processInboxMessage(inboxId, log = logger) {
         );
       }
 
-      reply = await generateGeminiReply(message.body, brain);
+      const signal = await analyzeCustomerMessage(message.body, brain);
+      try {
+        await recordAiSignal(message.tenant_id, persistedInbound.conversationId, persistedInbound.messageId, signal);
+      } catch (signalError) {
+        log.warn({ error: signalError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to persist AI signal");
+      }
+      let memories = [];
+      if (persistedInbound.contactId) {
+        try {
+          memories = await getCustomerMemory(message.tenant_id, persistedInbound.contactId);
+        } catch (memoryError) {
+          log.warn({ error: memoryError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to load customer AI memory");
+        }
+      }
+      const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
+      const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\n\n") } : { customInstructions: advancedContext };
+      reply = await generateGeminiReply(message.body, aiBrain);
       reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
     }
 
@@ -753,6 +770,43 @@ app.put("/api/conversations/:conversationId/tags", requireAuth, async (req, res,
     if (error.message.startsWith("Invalid") || error.message.includes("not found")) {
       return res.status(400).json({ status: "error", error: error.message });
     }
+    return next(error);
+  }
+});
+
+app.get("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next) => {
+  try {
+    const data = await getCustomerMemory(req.user.tenantId, req.params.contactId);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next) => {
+  try {
+    const data = await rememberCustomerPreference(
+      req.user.tenantId,
+      req.params.contactId,
+      req.body?.key,
+      req.body?.value,
+      req.body?.confidence,
+    );
+    return res.status(201).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.post("/api/ai/analyze", requireAuth, async (req, res, next) => {
+  try {
+    const message = req.body?.message;
+    if (typeof message !== "string" || !message.trim() || message.length > 4000) {
+      return res.status(400).json({ status: "error", error: "Invalid message" });
+    }
+    return res.status(200).json({ status: "ok", data: await analyzeCustomerMessage(message) });
+  } catch (error) {
     return next(error);
   }
 });
