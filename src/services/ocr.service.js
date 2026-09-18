@@ -15,6 +15,27 @@ function getClient() {
   return client;
 }
 
+function hasValidMagicBytes(buffer, mimeType) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;
+
+  if (mimeType === "image/jpeg") {
+    return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+  if (mimeType === "image/png") {
+    return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (mimeType === "image/webp") {
+    return buffer.length >= 12 &&
+      buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+      buffer.subarray(8, 12).toString("ascii") === "WEBP";
+  }
+  if (mimeType === "application/pdf") {
+    return buffer.subarray(0, 5).toString("ascii") === "%PDF-";
+  }
+
+  return false;
+}
+
 function tenant(value) {
   if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
     throw new Error("Invalid tenant");
@@ -26,6 +47,7 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
   const t = tenant(tenantId);
   if (!Buffer.isBuffer(buffer) || buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) throw new Error("Invalid document size");
   if (!ALLOWED.has(mimeType)) throw new Error("Unsupported document type");
+  if (!hasValidMagicBytes(buffer, mimeType)) throw new Error("Document content does not match MIME type");
   if (typeof filename !== "string" || !filename.trim() || filename.length > 255) throw new Error("Invalid filename");
 
   const ai = getClient();
@@ -63,4 +85,4 @@ export async function getOcrDocument(tenantId, id) {
   return r.rows[0] || null;
 }
 
-export { MAX_IMAGE_BYTES, ALLOWED };
+export { MAX_IMAGE_BYTES, ALLOWED, hasValidMagicBytes };
