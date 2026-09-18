@@ -3,7 +3,8 @@ ALTER TABLE whatsapp_deliveries
   ALTER COLUMN inbox_message_id DROP NOT NULL;
 
 ALTER TABLE whatsapp_deliveries
-  ADD COLUMN IF NOT EXISTS automation_run_id UUID;
+  ADD COLUMN IF NOT EXISTS automation_run_id UUID,
+  ADD COLUMN IF NOT EXISTS automation_step INTEGER;
 
 ALTER TABLE whatsapp_deliveries
   ADD CONSTRAINT fk_whatsapp_deliveries_automation_run
@@ -19,8 +20,12 @@ ALTER TABLE whatsapp_deliveries
     (inbox_message_id IS NULL AND automation_run_id IS NOT NULL)
   );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_deliveries_tenant_automation_run
-  ON whatsapp_deliveries (tenant_id, automation_run_id)
+ALTER TABLE whatsapp_deliveries
+  ADD CONSTRAINT chk_whatsapp_deliveries_automation_step
+  CHECK (automation_run_id IS NULL OR (automation_step IS NOT NULL AND automation_step >= 0));
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_deliveries_tenant_automation_step
+  ON whatsapp_deliveries (tenant_id, automation_run_id, automation_step)
   WHERE automation_run_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_automation_runs_due
