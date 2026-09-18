@@ -99,6 +99,13 @@ export async function persistInboundMessage({
       return { duplicate: true, conversationId, contactId, messageId: null };
     }
 
+    await client.query(
+      `UPDATE conversations
+       SET unread_count = unread_count + 1, updated_at = NOW()
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, conversationId],
+    );
+
     await client.query("COMMIT");
 
     return {
