@@ -52,6 +52,8 @@ export async function createWorkflow({ tenantId, createdBy, name, description = 
   if (!uuid(createdBy)) throw new Error("Invalid creator ID");
   const n=text(name,120);
   if (!["manual","message_received","conversation_created","inactivity"].includes(triggerType)) throw new Error("Invalid trigger type");
+  if (!triggerConfig || typeof triggerConfig !== "object" || Array.isArray(triggerConfig)) throw new Error("Invalid trigger configuration");
+  if (triggerType === "inactivity") { const after = Number(triggerConfig.afterSeconds); if (!Number.isInteger(after) || after < 60 || after > MAX_DELAY_SECONDS) throw new Error("Invalid inactivity delay"); }
   const def=normalizeWorkflowDefinition(definition);
   const r=await dbPool.query(`INSERT INTO automation_workflows
     (tenant_id,name,description,trigger_type,trigger_config,definition,created_by)
