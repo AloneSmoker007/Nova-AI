@@ -10,6 +10,9 @@ ALTER TABLE conversations
   ADD CONSTRAINT conversations_status_check
   CHECK (status IN ('active', 'paused', 'human', 'archived'));
 
+ALTER TABLE users
+  ADD CONSTRAINT uq_users_tenant_id UNIQUE (tenant_id, id);
+
 ALTER TABLE conversations
   ADD COLUMN IF NOT EXISTS assigned_user_id UUID,
   ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0 CHECK (priority BETWEEN 0 AND 5),
