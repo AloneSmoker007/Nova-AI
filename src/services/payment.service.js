@@ -5,6 +5,13 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const PROVIDER = /^[a-z0-9_-]{2,40}$/i;
 const CURRENCY = /^[A-Z]{3}$/;
 const STATUSES = new Set(["pending", "paid", "failed", "refunded", "cancelled"]);
+const TRANSITIONS = new Map([
+  ["pending", new Set(["paid", "failed", "cancelled"])],
+  ["paid", new Set(["refunded"])],
+  ["failed", new Set(["pending"])],
+  ["cancelled", new Set(["pending"])],
+  ["refunded", new Set()],
+]);
 
 function tenant(value) {
   if (typeof value !== "string" || !UUID.test(value)) throw new Error("Invalid tenant");
@@ -44,6 +51,11 @@ function metadata(value) {
   if (json.length > 8000) throw new Error("Metadata is too large");
   return value;
 }
+function validateTransition(current, next) {
+  if (!STATUSES.has(next)) throw new Error("Invalid payment status");
+  if (current === next) return;
+  if (!TRANSITIONS.get(current)?.has(next)) throw new Error("Invalid payment status transition");
+}
 
 export async function createPayment({
   tenantId, provider: providerName, providerPaymentId, amountMinor, currency: currencyCode,
@@ -67,8 +79,6 @@ export async function createPayment({
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      ON CONFLICT (tenant_id,provider,provider_payment_id)
      DO UPDATE SET
-       amount_minor=EXCLUDED.amount_minor,
-       currency=EXCLUDED.currency,
        customer_name=EXCLUDED.customer_name,
        customer_phone=EXCLUDED.customer_phone,
        description=EXCLUDED.description,
@@ -106,7 +116,9 @@ export async function getPayment(tenantId, id) {
 export async function updatePaymentStatus(tenantId, id, status) {
   const t = tenant(tenantId);
   const paymentId = text(id, 64);
-  if (!STATUSES.has(status)) throw new Error("Invalid payment status");
+  const current = await dbPool.query("SELECT status FROM payments WHERE tenant_id=$1 AND id=$2", [t, paymentId]);
+  if (!current.rows[0]) return null;
+  validateTransition(current.rows[0].status, status);
   const paidAt = status === "paid" ? "COALESCE(paid_at,NOW())" : "paid_at";
   const r = await dbPool.query(
     `UPDATE payments SET status=$3, paid_at=${paidAt}, updated_at=NOW()
@@ -125,32 +137,28 @@ export function verifyPaymentWebhook(rawBody, signature, secret) {
   return received.length === expectedBuffer.length && crypto.timingSafeEqual(received, expectedBuffer);
 }
 
-export async function applyPaymentWebhook({ tenantId, provider: providerName, providerPaymentId, status, amountMinor, currency: currencyCode, signatureValid }) {
+export async function applyPaymentWebhook({ tenantId, provider: providerName, providerPaymentId, status, signatureValid }) {
   if (!signatureValid) throw new Error("Invalid payment webhook signature");
   const t = tenant(tenantId);
   const p = provider(providerName);
   const externalId = text(providerPaymentId, 200);
   if (!STATUSES.has(status)) throw new Error("Invalid payment status");
-  const params = [t,p,externalId,status];
-  let amountClause = "";
-  if (amountMinor !== undefined) {
-    params.push(amount(amountMinor));
-    amountClause = `, amount_minor=$${params.length}`;
-  }
-  if (currencyCode !== undefined) {
-    params.push(currency(currencyCode));
-    params.length;
-  }
+
+  const current = await dbPool.query(
+    "SELECT status FROM payments WHERE tenant_id=$1 AND provider=$2 AND provider_payment_id=$3",
+    [t, p, externalId],
+  );
+  if (!current.rows[0]) return null;
+  validateTransition(current.rows[0].status, status);
+
   const r = await dbPool.query(
     `UPDATE payments SET
-       status=$4
-       ${amountClause}
-       ${currencyCode !== undefined ? `, currency=$${params.length}` : ""}
+       status=$4,
        paid_at=CASE WHEN $4='paid' THEN COALESCE(paid_at,NOW()) ELSE paid_at END,
        updated_at=NOW()
      WHERE tenant_id=$1 AND provider=$2 AND provider_payment_id=$3
      RETURNING *`,
-    params,
+    [t,p,externalId,status],
   );
   return r.rows[0] || null;
 }
