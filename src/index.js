@@ -57,7 +57,7 @@ import { requireRole } from "./middleware/require-role.js";
 import { registerInboundUsage, getUsageSummary } from "./services/usage.service.js";
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
 import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotPrompt, setUserSkills } from "./services/handoff.service.js";
-import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns } from "./services/automation.service.js";
+import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -607,6 +607,7 @@ async function dispatchPendingInboxMessages() {
   try {
     await recoverExpiredLeases();
     await recoverPendingDeliveries();
+    await scheduleInactivityTriggers(100);
     await processDueWorkflowRuns(20);
     const pending = await findUndispatchedMessages(50);
 
