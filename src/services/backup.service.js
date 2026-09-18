@@ -75,6 +75,7 @@ export function startBackupScheduler() {
       }
     }
   };
+  void run();
   const timer = setInterval(() => void run(), intervalMs);
   timer.unref();
   return () => clearInterval(timer);
