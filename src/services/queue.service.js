@@ -3,7 +3,7 @@ import IORedis from "ioredis";
 import { logger } from "../config/logger.js";
 
 const QUEUE_NAME = "whatsapp-messages";
-const MAX_ATTEMPTS = 5;
+const MAX_ATTEMPTS = 1;
 const BACKOFF_MS = 2000;
 
 let connection = null;
