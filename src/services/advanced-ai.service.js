@@ -66,17 +66,15 @@ export function extractCustomerPreferencesFromText(text) {
   const candidates = [];
 
   const namePatterns = [
-    /(?:my\s+name\s+is|i\s+am|call\s+me|naam\s+hai|mera\s+naam|aapka\s+naam|name\s+is)\s+([a-zA-Z\u0600-\u06FF][a-zA-Z0-9\s\-.'\u0600-\u06FF]{1,40})/i,
-    /(?:i\s+am\s+called|known\s+as|mujhe\s+\w+\s+kehte|mujhe\s+\w+\s+kaha\s+jata|main\s+\w+\s+hoon)/i,
+    /(?:my\s+name\s+is|call\s+me|naam\s+hai|mera\s+naam|name\s+is)\s+([a-zA-Z\u0600-\u06FF][a-zA-Z0-9\u0600-\u06FF .\-']{1,39}?)(?=\s*(?:[.!?,;:]|$))/i,
+    /(?:i\s+am\s+called|known\s+as)\s+([a-zA-Z\u0600-\u06FF][a-zA-Z0-9\u0600-\u06FF .\-']{1,39}?)(?=\s*(?:[.!?,;:]|$))/i,
   ];
 
   for (const pattern of namePatterns) {
     const match = value.match(pattern);
     if (match && match[1]) {
-      const name = normalizeText(match[1].replace(/^(is|my|name|mera|naam|call|me)/i, ""), 80);
-      if (name) {
-        candidates.push({ key: "name", value: name, confidence: 0.8 });
-      }
+      const name = normalizeText(match[1], 80);
+      if (name) candidates.push({ key: "name", value: name, confidence: 0.8 });
     }
   }
 
@@ -89,16 +87,16 @@ export function extractCustomerPreferencesFromText(text) {
     candidates.push({ key: "preferred_language", value: languageLower, confidence: 0.75 });
   }
 
-  const budgetMatch = value.match(/(?:budget|qeemat|kitna|price|kam\s+price|my\s+budget|budget\s+is)\s*[:=-]?\s*([a-zA-Z0-9\s.,\u0600-\u06FF]{1,40})/i);
+  const budgetMatch = value.match(/(?:budget|qeemat|kitna|price|kam\s+price|my\s+budget|budget\s+is)\s*[:=-]?\s*([a-zA-Z0-9\u0600-\u06FF]+(?:[\s.,]+[a-zA-Z0-9\u0600-\u06FF]+){0,5}?)(?=\s*(?:[.!?;]|$))/i);
   if (budgetMatch && budgetMatch[1]) {
-    const budgetText = normalizeText(budgetMatch[1].replace(/(?:rs|rupees|pkr|usd|eur|pakistani|rupee|rs.)/gi, ""), 80);
+    const budgetText = normalizeText(budgetMatch[1].replace(/\b(?:rs|rupees|pkr|usd|eur|pakistani|rupee)\.?\b/gi, ""), 80);
     if (budgetText) candidates.push({ key: "budget", value: budgetText, confidence: 0.7 });
   }
 
-  const interestMatch = value.match(/(?:interested\s+in|want|wants|need|needs|chahiye|mujhe|looking\s+for|service|product)\s*[:=-]?\s*([a-zA-Z0-9\s\-.,\u0600-\u06FF]{1,80})/i);
+  const interestMatch = value.match(/(?:interested\s+in|want|wants|need|needs|chahiye|mujhe|looking\s+for|service|product)\s*[:=-]?\s*([a-zA-Z0-9\u0600-\u06FF]+(?:[\s.,\-]+[a-zA-Z0-9\u0600-\u06FF]+){0,10}?)(?=\s*(?:[.!?;]|$))/i);
   if (interestMatch && interestMatch[1]) {
     const interestText = normalizeText(interestMatch[1], 80);
-    if (interestText && !/^(my|i|mujhe|need|want|wants|chahiye)/i.test(interestText)) {
+    if (interestText && !/^(my|i|mujhe|need|want|wants|chahiye)$/i.test(interestText)) {
       candidates.push({ key: "service_interest", value: interestText, confidence: 0.65 });
     }
   }
