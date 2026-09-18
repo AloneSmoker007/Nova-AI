@@ -177,7 +177,7 @@ async function processInboxMessage(inboxId, log = logger) {
   const claim = await claimInboxMessage(inboxId, tenantId);
   if (!claim.claimed) {
     if (claim.reason !== "processing") {
-      log.info({ inboxId, tenantId: resolvedTenantId, reason: claim.reason }, "Skipping durable inbox message");
+      log.info({ inboxId, tenantId, reason: claim.reason }, "Skipping durable inbox message");
     }
     return;
   }
