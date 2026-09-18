@@ -343,7 +343,7 @@ export async function markDeliveryStatus({
   const statusAt = normalizeStatusTimestamp(timestamp) ?? new Date();
   const errorDetails = normalizeErrorDetails(errors);
   const callbackKey =
-    typeof callbackData === "string" && callbackData.trim()
+    typeof callbackData === "string" && validateUuid(callbackData)
       ? callbackData.trim()
       : null;
 
