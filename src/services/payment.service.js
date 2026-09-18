@@ -51,7 +51,17 @@ function metadata(value) {
   if (json.length > 8000) throw new Error("Metadata is too large");
   return value;
 }
-function eventId(value) {\n  const v = text(value, 200);\n  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(v)) throw new Error("Invalid payment event ID");\n  return v;\n}\n\nfunction validateTransition(current, next) {
+function eventId(value) {
+  const v = text(value, 200);
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(v)) throw new Error("Invalid payment event ID");
+  return v;
+}
+
+export function validatePaymentWebhookEventId(value) {
+  return eventId(value);
+}
+
+function validateTransition(current, next) {
   if (!STATUSES.has(next)) throw new Error("Invalid payment status");
   if (current === next) return;
   if (!TRANSITIONS.get(current)?.has(next)) throw new Error("Invalid payment status transition");

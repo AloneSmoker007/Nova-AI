@@ -39,7 +39,8 @@ export function registerTask16Routes(app) {
   app.get("/api/payments/:paymentId", requireAuth, async (req, res, next) => {
     try {
       const data = await getPayment(req.user.tenantId, req.params.paymentId);
-      if (data?.duplicate) return res.status(200).json({ status: "ok", duplicate: true });\n      if (!data) return res.status(404).json({ status: "error", error: "Payment not found" });
+      if (data?.duplicate) return res.status(200).json({ status: "ok", duplicate: true });
+      if (!data) return res.status(404).json({ status: "error", error: "Payment not found" });
       return res.status(200).json({ status: "ok", data });
     } catch (error) {
       if (bad(error)) return res.status(400).json({ status: "error", error: error.message });
@@ -97,11 +98,14 @@ export function registerTask16Routes(app) {
         return res.status(400).json({ status: "error", error: "Invalid payment webhook" });
       }
 
-      if (body.tenantId !== req.params.tenantId) return res.status(400).json({ status: "error", error: "Invalid payment webhook" });\n\n      const data = await applyPaymentWebhook({
+      if (body.tenantId !== req.params.tenantId) return res.status(400).json({ status: "error", error: "Invalid payment webhook" });
+
+      const data = await applyPaymentWebhook({
         tenantId: req.params.tenantId,
         provider: body.provider,
         providerPaymentId: body.providerPaymentId,
         status: body.status,
+        eventId: body.eventId,
         signatureValid: true,
       });
 

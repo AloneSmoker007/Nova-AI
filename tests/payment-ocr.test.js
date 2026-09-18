@@ -33,3 +33,10 @@ test("OCR validates file signatures instead of trusting MIME type alone", () => 
   assert.equal(ocr.hasValidMagicBytes(Buffer.from("<html>"), "image/jpeg"), false);
   assert.equal(ocr.hasValidMagicBytes(Buffer.from("%PDF-1.7"), "image/png"), false);
 });
+
+
+test("payment webhook event IDs require a stable provider-safe identifier", () => {
+  assert.equal(payment.validatePaymentWebhookEventId("evt_123:abc"), "evt_123:abc");
+  assert.throws(() => payment.validatePaymentWebhookEventId(""), /Invalid payment event ID/);
+  assert.throws(() => payment.validatePaymentWebhookEventId("bad id"), /Invalid payment event ID/);
+});
