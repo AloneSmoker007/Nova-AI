@@ -31,7 +31,7 @@ export async function claimMessage(messageId, tenantId) {
   const insertResult = await dbPool.query(
     `INSERT INTO processed_messages (message_id, tenant_id, status, attempts)
      VALUES ($1, $2, 'processing', 1)
-     ON CONFLICT (message_id) DO NOTHING`,
+     ON CONFLICT (tenant_id, message_id) DO NOTHING`,
     [id, tid],
   );
 
