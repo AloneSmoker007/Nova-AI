@@ -3,7 +3,7 @@ import IORedis from "ioredis";
 import { logger } from "../config/logger.js";
 
 const QUEUE_NAME = "whatsapp-messages";
-const MAX_ATTEMPTS = 5;
+const MAX_ATTEMPTS = 1;
 const BACKOFF_MS = 2000;
 
 let connection = null;
@@ -11,23 +11,19 @@ let messageQueue = null;
 let messageWorker = null;
 
 export function getConnection() {
-  if (connection) {
-    return connection;
-  }
+  if (connection) return connection;
 
   const url = process.env.REDIS_URL;
-  if (!url) {
-    return null;
-  }
+  if (!url) return null;
 
   connection = new IORedis(url, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
   });
 
-  connection.on("error", (err) =>
-    logger.error({ error: err.message }, "Redis connection error")
-  );
+  connection.on("error", (err) => {
+    logger.error({ error: err.message }, "Redis connection error");
+  });
 
   return connection;
 }
@@ -36,11 +32,20 @@ export function isQueueConfigured() {
   return Boolean(process.env.REDIS_URL);
 }
 
-export async function enqueueWhatsAppMessage(payload) {
+function validateInboxId(inboxId) {
+  return typeof inboxId === "string" && inboxId.trim() !== "";
+}
+
+export async function enqueueWhatsAppMessage({ inboxId }) {
   if (!isQueueConfigured()) {
     throw new Error("Queue is not configured (REDIS_URL missing)");
   }
 
+  if (!validateInboxId(inboxId)) {
+    throw new Error("Invalid durable inbox job");
+  }
+
+  const normalizedInboxId = inboxId.trim();
   if (!messageQueue) {
     messageQueue = new Queue(QUEUE_NAME, {
       connection: getConnection(),
@@ -49,14 +54,14 @@ export async function enqueueWhatsAppMessage(payload) {
 
   await messageQueue.add(
     "process",
-    payload,
+    { inboxId: normalizedInboxId },
     {
       attempts: MAX_ATTEMPTS,
       backoff: { type: "exponential", delay: BACKOFF_MS },
       removeOnComplete: { age: 3600, count: 1000 },
       removeOnFail: { age: 86400, count: 5000 },
-      jobId: payload.messageId,
-    }
+      jobId: normalizedInboxId,
+    },
   );
 }
 
@@ -66,9 +71,7 @@ export function startWorker(processor) {
     return null;
   }
 
-  if (messageWorker) {
-    return messageWorker;
-  }
+  if (messageWorker) return messageWorker;
 
   messageWorker = new Worker(
     QUEUE_NAME,
@@ -80,29 +83,27 @@ export function startWorker(processor) {
         max: Number(process.env.QUEUE_RATE_MAX || 20),
         duration: 1000,
       },
-    }
+    },
   );
 
-  messageWorker.on("completed", (job) =>
+  messageWorker.on("completed", (job) => {
     logger.info(
-      { jobId: job.id, messageId: job.data?.messageId },
-      "Queue job completed"
-    )
-  );
+      { jobId: job.id, inboxId: job.data?.inboxId },
+      "Queue job completed",
+    );
+  });
 
-  messageWorker.on(
-    "failed",
-    (job, err) =>
-      logger.error(
-        {
-          jobId: job?.id,
-          messageId: job?.data?.messageId,
-          attempts: job?.attemptsMade,
-          error: err?.message,
-        },
-        "Queue job failed"
-      )
-  );
+  messageWorker.on("failed", (job, err) => {
+    logger.error(
+      {
+        jobId: job?.id,
+        inboxId: job?.data?.inboxId,
+        attempts: job?.attemptsMade,
+        error: err?.message,
+      },
+      "Queue job failed",
+    );
+  });
 
   return messageWorker;
 }
