@@ -445,3 +445,32 @@ export function deliveryStatusToMessageStatus(state) {
       return null;
   }
 }
+
+export async function syncDeliveryToMessage(deliveryId, tenantId) {
+  assertDatabase();
+
+  if (!validateUuid(deliveryId) || !validateTenantId(tenantId)) return null;
+
+  const result = await dbPool.query(
+    `
+      UPDATE messages m
+      SET status = CASE d.state
+        WHEN 'READ' THEN 'read'
+        WHEN 'DELIVERED' THEN 'delivered'
+        WHEN 'FAILED' THEN 'failed'
+        WHEN 'SENT' THEN 'sent'
+        ELSE m.status
+      END
+      FROM whatsapp_deliveries d
+      WHERE d.id = $1
+        AND d.tenant_id = $2
+        AND m.tenant_id = d.tenant_id
+        AND m.whatsapp_message_id = d.provider_message_id
+        AND d.state IN ('SENT', 'DELIVERED', 'READ', 'FAILED')
+      RETURNING m.id, m.status
+    `,
+    [deliveryId.trim(), tenantId.trim()],
+  );
+
+  return result.rows[0] ?? null;
+}
