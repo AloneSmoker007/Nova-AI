@@ -99,7 +99,7 @@ export function extractCustomerPreferencesFromText(text) {
     if (budgetText) candidates.push({ key: "budget", value: budgetText, confidence: 0.7 });
   }
 
-  const interestMatch = value.match(/(?:interested\s+in|want|wants|need|needs|chahiye|mujhe|looking\s+for|service|product)\s*[:=-]?\s*([a-zA-Z0-9\u0600-\u06FF]+(?:[\s.,\-]+[a-zA-Z0-9\u0600-\u06FF]+){0,10}?)(?=\s*(?:[.!?;]|$))/i);
+  const interestMatch = value.match(/(?:interested\s+in|want|wants|need|needs|chahiye|mujhe|looking\s+for|service|product)\s*[:=-]?\s*([a-zA-Z0-9\u0600-\u06FF]+(?:[\s.,-]+[a-zA-Z0-9\u0600-\u06FF]+){0,10}?)(?=\s*(?:[.!?;]|$))/i);
   if (interestMatch && interestMatch[1]) {
     const interestText = normalizeText(interestMatch[1], 80);
     if (interestText && !/^(my|i|mujhe|need|want|wants|chahiye)$/i.test(interestText)) {
