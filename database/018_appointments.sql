@@ -78,3 +78,16 @@ CREATE TRIGGER appointments_no_overlap
 BEFORE INSERT OR UPDATE OF starts_at, ends_at, status
 ON appointments
 FOR EACH ROW EXECUTE FUNCTION prevent_appointment_overlap();
+
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+ALTER TABLE appointments
+  DROP CONSTRAINT IF EXISTS appointments_no_overlap_exclusion;
+
+ALTER TABLE appointments
+  ADD CONSTRAINT appointments_no_overlap_exclusion
+  EXCLUDE USING gist (
+    tenant_id WITH =,
+    tstzrange(starts_at, ends_at, '[)') WITH &&
+  )
+  WHERE (status IN ('pending','confirmed'));
