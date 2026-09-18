@@ -16,7 +16,7 @@ import {
 } from "./services/whatsapp.service.js";
 import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
-import { persistInboundMessage, persistOutboundMessage } from "./services/message-persistence.service.js";
+import { persistInboundMessage, persistOutboundMessage, persistDeletedInboundMessage } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
 import { analyzeCustomerMessage, buildAdvancedAiContext, getCustomerMemory, rememberCustomerPreference, recordAiSignal } from "./services/advanced-ai.service.js";
 import { loginUser, getUserById, generateToken } from "./services/auth.service.js";
@@ -147,8 +147,8 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
     return res.sendStatus(403);
   }
 
-  const { messages, statuses } = extractWebhookEvents(req.body);
-  if (messages.length === 0 && statuses.length === 0) return res.sendStatus(200);
+  const { messages, deletedMessages, statuses } = extractWebhookEvents(req.body);
+  if (messages.length === 0 && deletedMessages.length === 0 && statuses.length === 0) return res.sendStatus(200);
 
   try {
     for (const status of statuses) {
@@ -184,6 +184,36 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
           "WhatsApp delivery status reconciled",
         );
       }
+    }
+
+    for (const deletedMessage of deletedMessages) {
+      const tenant = await resolveTenantByPhoneNumberId(deletedMessage.phoneNumberId);
+      if (!tenant) {
+        req.log.warn(
+          { messageId: deletedMessage.id, phoneNumberId: deletedMessage.phoneNumberId },
+          "Ignoring WhatsApp deletion: no active tenant mapping",
+        );
+        continue;
+      }
+
+      const preserved = await persistDeletedInboundMessage({
+        tenantId: tenant.tenantId,
+        whatsappNumberId: tenant.whatsappNumberId,
+        waId: deletedMessage.from,
+        profileName: deletedMessage.profileName,
+        whatsappMessageId: deletedMessage.id,
+        deletedAt: deletedMessage.timestamp,
+      });
+
+      req.log.info(
+        {
+          tenantId: tenant.tenantId,
+          conversationId: preserved.conversationId,
+          messageId: preserved.messageId,
+          whatsappMessageId: deletedMessage.id,
+        },
+        "WhatsApp message deletion preserved as durable history",
+      );
     }
 
     for (const message of messages) {
@@ -227,6 +257,7 @@ function extractWebhookEvents(body) {
   const entries = Array.isArray(body?.entry) ? body.entry : [];
   const messages = [];
   const statuses = [];
+  const deletedMessages = [];
 
   for (const entry of entries) {
     const changes = Array.isArray(entry?.changes) ? entry.changes : [];
@@ -241,7 +272,27 @@ function extractWebhookEvents(body) {
 
       if (Array.isArray(value?.messages)) {
         for (const message of value.messages) {
-          if (!message?.text?.body || !message?.from || !message?.id) continue;
+          if (!message?.from || !message?.id) continue;
+
+          if (
+            message.type === "unsupported" &&
+            Array.isArray(message.errors) &&
+            message.errors.some((item) => item?.code === 131051)
+          ) {
+            const timestamp = message.timestamp ? new Date(Number(message.timestamp) * 1000) : new Date();
+            if (!Number.isNaN(timestamp.getTime())) {
+              deletedMessages.push({
+                id: message.id,
+                from: message.from,
+                profileName: value?.contacts?.[0]?.profile?.name,
+                phoneNumberId,
+                timestamp,
+              });
+            }
+            continue;
+          }
+
+          if (!message?.text?.body) continue;
           messages.push({ ...message, phoneNumberId });
         }
       }
@@ -259,7 +310,7 @@ function extractWebhookEvents(body) {
     }
   }
 
-  return { messages, statuses };
+  return { messages, deletedMessages, statuses };
 }
 
 async function processInboxMessage(inboxId, log = logger) {
