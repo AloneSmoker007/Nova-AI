@@ -41,7 +41,9 @@ function normalizeStep(step, index) {
   const url = text(step.url, 2048);
   let parsed;
   try { parsed = new URL(url); } catch { throw new Error("Invalid webhook URL"); }
-  if (!["https:"].includes(parsed.protocol)) throw new Error("Webhook must use HTTPS");
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) throw new Error("Webhook must use HTTPS without embedded credentials");
+  const allowed = String(process.env.AUTOMATION_WEBHOOK_ALLOWLIST || "").split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
+  if (!allowed.includes(parsed.hostname.toLowerCase())) throw new Error("Webhook host is not allowlisted");
   return { action, url, method: String(step.method || "POST").toUpperCase() === "POST" ? "POST" : "PUT", body: step.body && typeof step.body === "object" ? step.body : {} };
 }
 
