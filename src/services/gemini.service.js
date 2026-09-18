@@ -105,6 +105,34 @@ function buildSystemInstruction(brain) {
   if (brain.aiTone) parts.push("", `Tone: ${brain.aiTone}`);
   if (brain.aiLanguage) parts.push(`Language preference: ${brain.aiLanguage}`);
 
+  if (brain.persona && typeof brain.persona === "object" && Object.keys(brain.persona).length > 0) {
+    parts.push("", "## AI PERSONA");
+    for (const [key, value] of Object.entries(brain.persona).slice(0, 20)) {
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        parts.push(`  ${key}: ${String(value).slice(0, 500)}`);
+      }
+    }
+  }
+
+  if (brain.salesGuardrails && typeof brain.salesGuardrails === "object" && Object.keys(brain.salesGuardrails).length > 0) {
+    parts.push("", "## SALES GUARDRAILS");
+    parts.push("Treat these as hard business limits. Never exceed them or invent exceptions.");
+    for (const [key, value] of Object.entries(brain.salesGuardrails).slice(0, 20)) {
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        parts.push(`  ${key}: ${String(value).slice(0, 500)}`);
+      }
+    }
+  }
+
+  if (brain.languageConfig && typeof brain.languageConfig === "object" && Object.keys(brain.languageConfig).length > 0) {
+    parts.push("", "## LANGUAGE CONFIGURATION");
+    for (const [key, value] of Object.entries(brain.languageConfig).slice(0, 20)) {
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        parts.push(`  ${key}: ${String(value).slice(0, 500)}`);
+      }
+    }
+  }
+
   if (brain.customInstructions) {
     parts.push("", "## ADDITIONAL INSTRUCTIONS FROM BUSINESS OWNER", brain.customInstructions);
   }
