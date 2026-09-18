@@ -339,9 +339,7 @@ async function processInboxMessage(inboxId, log = logger) {
         }
       }
       const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
-      const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("
-
-") } : { customInstructions: advancedContext };
+      const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") } : { customInstructions: advancedContext };
       reply = await generateGeminiReply(message.body, aiBrain);
       reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
     }
