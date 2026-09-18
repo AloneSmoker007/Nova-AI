@@ -4,7 +4,6 @@ import { dbPool, isDatabaseConfigured } from "../config/database.js";
 
 const LEASE_SECONDS = 120;
 const LEASE_HEARTBEAT_SECONDS = 30;
-const MAX_HEARTBEAT_SECONDS = 30 * 60;
 const MAX_ATTEMPTS = 5;
 const MAX_ERROR_LENGTH = 1000;
 
@@ -28,40 +27,45 @@ function normalizeError(error) {
 }
 
 function startLeaseHeartbeat(inboxId, tenantId, leaseToken) {
-  let elapsedSeconds = 0;
   let stopped = false;
+  let timer = null;
 
   const stop = () => {
     if (stopped) return;
     stopped = true;
-    clearInterval(timer);
+    if (timer) clearTimeout(timer);
   };
 
-  const timer = setInterval(async () => {
+  const schedule = () => {
     if (stopped) return;
-    elapsedSeconds += LEASE_HEARTBEAT_SECONDS;
-    if (elapsedSeconds > MAX_HEARTBEAT_SECONDS) {
-      stop();
-      return;
-    }
+    timer = setTimeout(async () => {
+      if (stopped) return;
 
-    try {
-      const result = await dbPool.query(
-        "UPDATE webhook_messages SET lease_until = NOW() + ($4 * INTERVAL '1 second'), updated_at = NOW() " +
-          "WHERE id = $1 AND tenant_id = $2 AND state = 'PROCESSING' " +
-          "AND lease_token = $3::uuid AND lease_until >= NOW() " +
-          "RETURNING id",
-        [inboxId, tenantId, leaseToken, LEASE_SECONDS],
-      );
+      try {
+        const result = await dbPool.query(
+          "UPDATE webhook_messages SET lease_until = NOW() + ($4 * INTERVAL '1 second'), updated_at = NOW() " +
+            "WHERE id = $1 AND tenant_id = $2 AND state = 'PROCESSING' " +
+            "AND lease_token = $3::uuid AND lease_until >= NOW() " +
+            "RETURNING id",
+          [inboxId, tenantId, leaseToken, LEASE_SECONDS],
+        );
 
-      if (result.rowCount !== 1) stop();
-    } catch {
-      // Transient heartbeat failures are bounded by the active lease; a stale or reclaimed row
-      // will fail the token/state guard and the worker will stop this heartbeat in finally.
-    }
-  }, LEASE_HEARTBEAT_SECONDS * 1000);
+        if (result.rowCount !== 1) {
+          stop();
+          return;
+        }
+      } catch {
+        // Keep the current lease as the safety boundary. A later heartbeat can recover
+        // from a transient database error without overlapping heartbeat queries.
+      }
 
-  timer.unref();
+      schedule();
+    }, LEASE_HEARTBEAT_SECONDS * 1000);
+
+    timer.unref();
+  };
+
+  schedule();
   return stop;
 }
 
