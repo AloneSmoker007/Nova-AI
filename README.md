@@ -158,3 +158,23 @@ Never run destructive production database operations casually. Back up productio
 ## Project status
 
 Nova-AI is being developed incrementally toward a production WhatsApp AI SaaS platform. Tasks 1–13 are implemented on `main`; subsequent product capabilities should preserve the existing tenant-isolation and security model.
+
+
+## Client-owned backups
+
+Nova-AI can store each tenant's encrypted backup in that tenant's own Google Drive. The application never uses one shared Drive for all clients.
+
+Production configuration:
+- GOOGLE_CLIENT_ID
+- GOOGLE_CLIENT_SECRET
+- GOOGLE_DRIVE_REDIRECT_URI
+- GOOGLE_OAUTH_STATE_SECRET (at least 32 characters)
+- BACKUP_ENCRYPTION_KEY (32-byte base64 or 64-character hex)
+- BACKUP_MAX_BYTES (optional; default 50 MiB)
+- BACKUP_INTERVAL_MS (optional; default 24 hours)
+
+Google OAuth uses the restricted `drive.file` scope. Refresh tokens are encrypted at rest with the existing credential encryption key. Backup archives are gzip-compressed and AES-256-GCM encrypted before upload.
+
+A backup is tenant-scoped and contains only database tables that expose a `tenant_id`. Backup files include a SHA-256 integrity hash. The scheduler uses a PostgreSQL advisory lock so multiple Nova instances do not intentionally create the same scheduled backup concurrently.
+
+For production recovery, do not delete the source database merely because a Drive backup exists. Restore procedures must be tested against a staging database before destructive recovery.
