@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "description": "Production-grade WhatsApp AI SaaS Platform",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/bootstrap.js",
   "private": true,
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
+    "start": "node src/bootstrap.js",
+    "dev": "nodemon src/bootstrap.js",
     "lint": "eslint src",
     "format": "prettier --write src",
     "test": "node --test tests"
