@@ -68,18 +68,18 @@ export async function setWorkflowStatus(tenantId, workflowId, status) {
   const r=await dbPool.query("UPDATE automation_workflows SET status=$3, version=version+1 WHERE tenant_id=$1 AND id=$2 RETURNING *",[tenant(tenantId),workflowId,status]);
   if(!r.rows[0]) throw new Error("Workflow not found"); return r.rows[0];
 }
-export async function startWorkflowRun({tenantId,workflowId,conversationId=null,contactId=null,context={}}) {
+export async function startWorkflowRun({tenantId,workflowId,conversationId=null,contactId=null,context={},triggerKey=null}) {
   assertDb(); const t=tenant(tenantId);
   if(!uuid(workflowId)) throw new Error("Invalid workflow ID");
-  const r=await dbPool.query(`INSERT INTO automation_runs(tenant_id,workflow_id,conversation_id,contact_id,status,context,next_run_at)
+  const r=await dbPool.query(`INSERT INTO automation_runs(tenant_id,workflow_id,conversation_id,contact_id,status,context,next_run_at,trigger_key)
     SELECT $1,w.id,$3,$4,'queued',$5,NOW() FROM automation_workflows w
-    WHERE w.tenant_id=$1 AND w.id=$2 AND w.status='active' RETURNING *`,[t,workflowId,conversationId,contactId,context]);
+    WHERE w.tenant_id=$1 AND w.id=$2 AND w.status='active' RETURNING *`,[t,workflowId,conversationId,contactId,context,triggerKey]);
   if(!r.rows[0]) throw new Error("Active workflow not found"); return r.rows[0];
 }
 export async function triggerWorkflows({tenantId,triggerType,conversationId=null,contactId=null,context={}}) {
   assertDb(); const t=tenant(tenantId);
   const r=await dbPool.query(`SELECT id FROM automation_workflows WHERE tenant_id=$1 AND status='active' AND trigger_type=$2`,[t,triggerType]);
-  const runs=[]; for(const row of r.rows) runs.push(await startWorkflowRun({tenantId:t,workflowId:row.id,conversationId,contactId,context})); return runs;
+  const runs=[]; for(const row of r.rows) { const key = context?.message?.id ? `${triggerType}:${context.message.id}` : null; const run = await startWorkflowRun({tenantId:t,workflowId:row.id,conversationId,contactId,context,triggerKey:key}); if(run) runs.push(run); } return runs;
 }
 function getPath(obj,path){ return path.split(".").reduce((v,k)=>v && typeof v==="object"?v[k]:undefined,obj); }
 function condition(step,ctx){ const v=getPath(ctx,step.field); if(step.operator==="exists") return v!==undefined&&v!==null; if(step.operator==="equals") return v===step.value; if(step.operator==="not_equals") return v!==step.value; return typeof v==="string"&&v.toLowerCase().includes(String(step.value??"").toLowerCase()); }
