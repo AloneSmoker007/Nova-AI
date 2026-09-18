@@ -2,9 +2,11 @@
 -- Migration 008: Durable Webhook Inbox
 -- ============================================================
 
--- Migration 002 already provides the referenced UNIQUE (tenant_id, id)
--- constraint on whatsapp_numbers. Keep this migration additive and rely
--- on that existing tenant-aware key for the composite foreign key below.
+-- Ensure the composite foreign-key target exists even if an earlier
+-- migration was deployed without the tenant-aware unique key.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_numbers_tenant_id
+  ON whatsapp_numbers (tenant_id, id);
+
 CREATE TABLE webhook_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
