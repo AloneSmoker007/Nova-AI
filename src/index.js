@@ -994,3 +994,20 @@ async function startServer() {
         logger.info("Nova-AI server closed successfully");
         process.exit(0);
       } catch (shutdownError) {
+        logger.error({ error: shutdownError.message }, "Graceful shutdown error");
+        process.exit(1);
+      }
+    });
+    setTimeout(() => { logger.error("Forced shutdown after 10 seconds"); process.exit(1); }, 10_000).unref();
+  }
+
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+}
+
+startServer().catch((error) => {
+  logger.fatal({ error: error.message }, "Nova-AI failed to start");
+  process.exit(1);
+});
+
+export default app;
