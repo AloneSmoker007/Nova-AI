@@ -6,15 +6,6 @@ const DELIVERY_LEASE_SECONDS = 120;
 const DEFAULT_RETRY_WINDOW_SECONDS = 15 * 60;
 const MAX_RETRY_WINDOW_SECONDS = 24 * 60 * 60;
 const VALID_STATUS = new Set(["sent", "delivered", "read", "failed"]);
-const STATUS_RANK = {
-  PENDING: 0,
-  SENDING: 1,
-  SENT: 2,
-  DELIVERED: 3,
-  READ: 4,
-  FAILED: 5,
-};
-
 function assertDatabase() {
   if (!isDatabaseConfigured() || !dbPool) {
     throw new Error("Database is not configured");
