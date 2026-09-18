@@ -82,18 +82,19 @@ export async function triggerWorkflows({tenantId,triggerType,conversationId=null
 function getPath(obj,path){ return path.split(".").reduce((v,k)=>v && typeof v==="object"?v[k]:undefined,obj); }
 function condition(step,ctx){ const v=getPath(ctx,step.field); if(step.operator==="exists") return v!==undefined&&v!==null; if(step.operator==="equals") return v===step.value; if(step.operator==="not_equals") return v!==step.value; return typeof v==="string"&&v.toLowerCase().includes(String(step.value??"").toLowerCase()); }
 
-async function executeSendMessage(client, run, step, ctx) {
-  if(!uuid(run.conversation_id)) throw new Error("Workflow send_message requires a conversation");
-  const q=await client.query(`SELECT c.id,c.tenant_id,c.contact_id,c.whatsapp_number_id,co.wa_id,wn.phone_number_id
-    FROM conversations c JOIN contacts co ON co.tenant_id=c.tenant_id AND co.id=c.contact_id
-    JOIN whatsapp_numbers wn ON wn.tenant_id=c.tenant_id AND wn.id=c.whatsapp_number_id
+async function executeSendMessage(client, run, step, stepIndex) {
+  if (!uuid(run.conversation_id)) throw new Error("Workflow send_message requires a conversation");
+  const q=await client.query(`SELECT c.id,c.tenant_id,co.wa_id
+    FROM conversations c
+    JOIN contacts co ON co.tenant_id=c.tenant_id AND co.id=c.contact_id
     WHERE c.tenant_id=$1 AND c.id=$2 LIMIT 1`,[run.tenant_id,run.conversation_id]);
   if(!q.rows[0]) throw new Error("Workflow conversation not found");
   const row=q.rows[0];
   const d=await client.query(`INSERT INTO whatsapp_deliveries
-    (tenant_id,inbox_message_id,conversation_id,recipient_wa_id,body,automation_run_id)
-    VALUES($1,NULL,$2,$3,$4,$5) ON CONFLICT (tenant_id,automation_run_id)
-    DO NOTHING RETURNING id`,[run.tenant_id,row.id,row.wa_id,step.body,run.id]);
+    (tenant_id,inbox_message_id,conversation_id,recipient_wa_id,body,automation_run_id,automation_step)
+    VALUES($1,NULL,$2,$3,$4,$5,$6)
+    ON CONFLICT (tenant_id,automation_run_id,automation_step) DO NOTHING
+    RETURNING id`,[run.tenant_id,row.id,row.wa_id,step.body,run.id,stepIndex]);
   return d.rows[0] ? "queued" : "already_queued";
 }
 async function executeTag(client,run,step){
@@ -111,35 +112,77 @@ async function executeWebhook(step,run,ctx){
   } finally { clearTimeout(timer); }
 }
 export async function processDueWorkflowRuns(limit=20) {
-  assertDb(); const safe=Math.min(Math.max(Number(limit)||20,1),50); const client=await dbPool.connect();
+  assertDb();
+  const safe=Math.min(Math.max(Number(limit)||20,1),50);
+  const claimClient=await dbPool.connect();
+  let runs=[];
   try {
-    const claimed=await client.query(`WITH picked AS (
-      SELECT id FROM automation_runs WHERE status IN ('queued','waiting') AND (next_run_at IS NULL OR next_run_at<=NOW())
-      ORDER BY next_run_at NULLS FIRST,created_at FOR UPDATE SKIP LOCKED LIMIT $1)
-      UPDATE automation_runs r SET status='running',attempts=attempts+1,started_at=COALESCE(started_at,NOW()),updated_at=NOW()
+    const r=await claimClient.query(`WITH picked AS (
+      SELECT id FROM automation_runs
+      WHERE status IN ('queued','waiting')
+        AND (next_run_at IS NULL OR next_run_at<=NOW())
+      ORDER BY next_run_at NULLS FIRST,created_at
+      FOR UPDATE SKIP LOCKED LIMIT $1)
+      UPDATE automation_runs r
+      SET status='running',attempts=attempts+1,
+          started_at=COALESCE(started_at,NOW()),updated_at=NOW()
       FROM picked WHERE r.id=picked.id RETURNING r.*`,[safe]);
-    for(const run of claimed.rows) {
-      try {
-        const wf=(await client.query("SELECT * FROM automation_workflows WHERE tenant_id=$1 AND id=$2 AND status='active'",[run.tenant_id,run.workflow_id])).rows[0];
-        if(!wf) throw new Error("Workflow is no longer active");
-        const steps=normalizeWorkflowDefinition(wf.definition).steps;
-        let idx=run.current_step, ctx=run.context||{};
-        while(idx<steps.length) {
-          const step=steps[idx];
-          if(step.action==="wait"){ await client.query("UPDATE automation_runs SET status='waiting',current_step=$3,next_run_at=NOW()+($4*INTERVAL '1 second') WHERE tenant_id=$1 AND id=$2",[run.tenant_id,run.id,idx+1,step.seconds]); break; }
-          if(step.action==="condition"){ idx=condition(step,ctx)?step.if_true:step.if_false; continue; }
-          if(step.action==="send_message"){ await executeSendMessage(client,run,step,ctx); idx++; continue; }
-          if(step.action==="add_tag"){ await executeTag(client,run,step); idx++; continue; }
-          if(step.action==="webhook"){ await executeWebhook(step,run,ctx); idx++; continue; }
-          idx++;
-          await client.query("UPDATE automation_runs SET current_step=$3,context=$4 WHERE tenant_id=$1 AND id=$2",[run.tenant_id,run.id,idx,ctx]);
+    runs=r.rows;
+  } finally { claimClient.release(); }
+
+  for(const run of runs) {
+    try {
+      const wf=(await dbPool.query(
+        "SELECT * FROM automation_workflows WHERE tenant_id=$1 AND id=$2 AND status='active'",
+        [run.tenant_id,run.workflow_id],
+      )).rows[0];
+      if(!wf) throw new Error("Workflow is no longer active");
+      const steps=normalizeWorkflowDefinition(wf.definition).steps;
+      let idx=run.current_step;
+      const ctx=run.context||{};
+      let executed=0;
+      while(idx<steps.length) {
+        if(++executed>MAX_STEPS) throw new Error("Workflow execution step limit exceeded");
+        const step=steps[idx];
+        if(step.action==="wait") {
+          await dbPool.query(
+            "UPDATE automation_runs SET status='waiting',current_step=$3,next_run_at=NOW()+($4*INTERVAL '1 second'),context=$4::jsonb,updated_at=NOW() WHERE tenant_id=$1 AND id=$2",
+            [run.tenant_id,run.id,idx+1,JSON.stringify(ctx),step.seconds],
+          );
+          break;
         }
-        if(idx>=steps.length) await client.query("UPDATE automation_runs SET status='completed',current_step=$3,next_run_at=NULL,completed_at=NOW(),updated_at=NOW() WHERE tenant_id=$1 AND id=$2",[run.tenant_id,run.id,idx]);
-      } catch(error) {
-        const retry=run.attempts<MAX_RETRIES;
-        await client.query(`UPDATE automation_runs SET status=$3,next_run_at=CASE WHEN $3='queued' THEN NOW()+(LEAST(300,POWER(2,GREATEST(attempts-1,0))*2)*INTERVAL '1 second') ELSE NULL END,last_error=$4,updated_at=NOW() WHERE tenant_id=$1 AND id=$2`,[run.tenant_id,run.id,retry?"queued":"failed",String(error.message).slice(0,1000)]);
+        if(step.action==="condition"){ idx=condition(step,ctx)?step.if_true:step.if_false; continue; }
+        if(step.action==="send_message"){
+          const client=await dbPool.connect();
+          try { await executeSendMessage(client,run,step,idx); } finally { client.release(); }
+        } else if(step.action==="add_tag"){
+          const client=await dbPool.connect();
+          try { await executeTag(client,run,step); } finally { client.release(); }
+        } else if(step.action==="webhook"){
+          await executeWebhook(step,run,ctx);
+        }
+        idx++;
+        await dbPool.query(
+          "UPDATE automation_runs SET current_step=$3,context=$4::jsonb,updated_at=NOW() WHERE tenant_id=$1 AND id=$2 AND status='running'",
+          [run.tenant_id,run.id,idx,JSON.stringify(ctx)],
+        );
       }
+      if(idx>=steps.length) {
+        await dbPool.query(
+          "UPDATE automation_runs SET status='completed',current_step=$3,next_run_at=NULL,completed_at=NOW(),updated_at=NOW() WHERE tenant_id=$1 AND id=$2 AND status='running'",
+          [run.tenant_id,run.id,idx],
+        );
+      }
+    } catch(error) {
+      const retry=run.attempts<MAX_RETRIES;
+      await dbPool.query(
+        `UPDATE automation_runs SET status=$3,
+          next_run_at=CASE WHEN $3='queued' THEN NOW()+(LEAST(300,POWER(2,GREATEST(attempts-1,0))*2)*INTERVAL '1 second') ELSE NULL END,
+          last_error=$4,updated_at=NOW()
+          WHERE tenant_id=$1 AND id=$2 AND status='running'`,
+        [run.tenant_id,run.id,retry?"queued":"failed",String(error.message||error).slice(0,1000)],
+      );
     }
-    return claimed.rows.length;
-  } finally { client.release(); }
+  }
+  return runs.length;
 }
