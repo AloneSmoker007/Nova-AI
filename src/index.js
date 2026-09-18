@@ -160,14 +160,34 @@ function verifyMetaSignature(req) {
 }
 
 function extractWebhookMessages(body) {
-  const value = body?.entry?.[0]?.changes?.[0]?.value;
-  const messages = value?.messages;
-  const phoneNumberId = value?.metadata?.phone_number_id;
-  if (!Array.isArray(messages) || messages.length === 0) return [];
-  if (typeof phoneNumberId !== "string" || !/^\d{5,30}$/.test(phoneNumberId)) return [];
-  return messages
-    .filter((message) => message?.text?.body && message?.from && message?.id)
-    .map((message) => ({ ...message, phoneNumberId }));
+  const entries = Array.isArray(body?.entry) ? body.entry : [];
+  const extracted = [];
+
+  for (const entry of entries) {
+    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+
+    for (const change of changes) {
+      const value = change?.value;
+      const messages = value?.messages;
+      const phoneNumberId = value?.metadata?.phone_number_id;
+
+      if (
+        !Array.isArray(messages) ||
+        messages.length === 0 ||
+        typeof phoneNumberId !== "string" ||
+        !/^\d{5,30}$/.test(phoneNumberId)
+      ) {
+        continue;
+      }
+
+      for (const message of messages) {
+        if (!message?.text?.body || !message?.from || !message?.id) continue;
+        extracted.push({ ...message, phoneNumberId });
+      }
+    }
+  }
+
+  return extracted;
 }
 
 async function processInboxMessage(inboxId, log = logger) {
@@ -285,6 +305,9 @@ async function processInboxMessage(inboxId, log = logger) {
 }
 
 async function dispatchPendingInboxMessages() {
+  if (recoveryPassRunning) return;
+  recoveryPassRunning = true;
+
   try {
     await recoverExpiredLeases();
     const pending = await findUndispatchedMessages(50);
@@ -316,10 +339,13 @@ async function dispatchPendingInboxMessages() {
     }
   } catch (error) {
     logger.error({ error: error.message }, "Durable inbox recovery pass failed");
+  } finally {
+    recoveryPassRunning = false;
   }
 }
 
 let recoveryTimer = null;
+let recoveryPassRunning = false;
 
 function startInboxRecovery() {
   if (recoveryTimer) return;
