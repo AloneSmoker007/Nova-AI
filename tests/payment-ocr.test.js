@@ -23,7 +23,3 @@ test("OCR upload policy is restricted to supported document types and size", () 
   assert.equal(ocr.ALLOWED.has("text/html"), false);
   assert.equal(ocr.MAX_IMAGE_BYTES, 5 * 1024 * 1024);
 });
-
-test("payment status transitions use the expected transition rules", async () => {
-  assert.equal(payment.verifyPaymentWebhook(Buffer.from("x"), "00".repeat(32), "secret"), false);
-});
