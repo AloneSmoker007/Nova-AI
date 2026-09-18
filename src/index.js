@@ -28,6 +28,7 @@ import {
   getInboxMessage,
   claimInboxMessage,
   markQueueDispatched,
+  reserveQueueDispatch,
   markRetry,
   saveGeneratedResponse,
   recordProviderMessageId,
@@ -291,7 +292,17 @@ async function dispatchPendingInboxMessages() {
     for (const row of pending) {
       try {
         if (isQueueConfigured()) {
-          await enqueueWhatsAppMessage({ inboxId: row.id });
+          const reserved = await reserveQueueDispatch(row.id, row.tenant_id);
+          if (!reserved) continue;
+          try {
+            await enqueueWhatsAppMessage({ inboxId: row.id });
+          } catch (error) {
+            logger.error(
+              { error: error.message, inboxId: row.id, tenantId: row.tenant_id },
+              "Failed to enqueue reserved durable inbox message",
+            );
+            continue;
+          }
           await markQueueDispatched(row.id, row.tenant_id);
         } else {
           await processInboxMessage(row.id, logger);
