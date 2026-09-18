@@ -31,3 +31,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_deliveries_tenant_automation_step
 CREATE INDEX IF NOT EXISTS idx_automation_runs_due
   ON automation_runs (status, next_run_at)
   WHERE status IN ('queued','waiting','running');
+
+ALTER TABLE automation_runs
+  ADD COLUMN IF NOT EXISTS trigger_key TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_automation_runs_trigger_key
+  ON automation_runs (tenant_id, workflow_id, trigger_key)
+  WHERE trigger_key IS NOT NULL;
