@@ -116,30 +116,38 @@ export async function getPayment(tenantId, id) {
 export async function updatePaymentStatus(tenantId, id, status) {
   const t = tenant(tenantId);
   const paymentId = text(id, 64);
-  const current = await dbPool.query("SELECT status FROM payments WHERE tenant_id=$1 AND id=$2", [t, paymentId]);
-  if (!current.rows[0]) return null;
-  validateTransition(current.rows[0].status, status);
+  if (!STATUSES.has(status)) throw new Error("Invalid payment status");
 
-  // Re-check the transition atomically so concurrent requests cannot both
-  // validate against the same stale status and then apply conflicting updates.
-  const allowedPrevious = [...STATUSES]
-    .filter((candidate) => candidate === current.rows[0].status || TRANSITIONS.get(candidate)?.has(status))
-    .filter((candidate) => candidate === current.rows[0].status);
-  const paidAt = status === "paid" ? "COALESCE(paid_at,NOW())" : "paid_at";
-  const r = await dbPool.query(
-    `UPDATE payments SET status=$3, paid_at=${paidAt}, updated_at=NOW()
-     WHERE tenant_id=$1 AND id=$2 AND status=ANY($4::text[]) RETURNING *`,
-    [t, paymentId, status, allowedPrevious],
-  );
-  if (!r.rows[0]) {
-    const latest = await dbPool.query("SELECT status FROM payments WHERE tenant_id=$1 AND id=$2", [t, paymentId]);
-    if (!latest.rows[0]) return null;
-    validateTransition(latest.rows[0].status, status);
-    return null;
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const current = await client.query(
+      "SELECT status FROM payments WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+      [t, paymentId],
+    );
+    if (!current.rows[0]) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    validateTransition(current.rows[0].status, status);
+    const paidAt = status === "paid" ? "COALESCE(paid_at,NOW())" : "paid_at";
+    const updated = await client.query(
+      `UPDATE payments SET status=$3, paid_at=${paidAt}, updated_at=NOW()
+       WHERE tenant_id=$1 AND id=$2 RETURNING *`,
+      [t, paymentId, status],
+    );
+
+    await client.query("COMMIT");
+    return updated.rows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
-  return r.rows[0];
 }
-
 export function verifyPaymentWebhook(rawBody, signature, secret) {
   if (!Buffer.isBuffer(rawBody) || !rawBody.length || typeof signature !== "string" || !secret) return false;
   if (!/^[a-f0-9]{64}$/i.test(signature)) return false;
