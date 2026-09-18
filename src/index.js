@@ -54,6 +54,7 @@ import {
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 import { registerInboundUsage, getUsageSummary } from "./services/usage.service.js";
+import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -682,7 +683,81 @@ app.get("/api/usage", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/api/business-brain", requireAuth, async (req, res) => {
+app.get("/api/conversations", requireAuth, async (req, res, next) => {
+  try {
+    const data = await listConversations(req.user.tenantId, {
+      search: req.query.search,
+      status: req.query.status,
+      tag: req.query.tag,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/api/conversations/:conversationId/messages", requireAuth, async (req, res, next) => {
+  try {
+    const data = await getConversationMessages(req.user.tenantId, req.params.conversationId, {
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.patch("/api/conversations/:conversationId", requireAuth, async (req, res, next) => {
+  try {
+    const data = await updateConversation(req.user.tenantId, req.params.conversationId, req.body || {});
+    if (!data) return res.status(404).json({ status: "error", error: "Conversation not found" });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid") || error.message.startsWith("No conversation")) {
+      return res.status(400).json({ status: "error", error: error.message });
+    }
+    return next(error);
+  }
+});
+
+app.post("/api/conversations/:conversationId/read", requireAuth, async (req, res, next) => {
+  try {
+    const data = await markConversationRead(req.user.tenantId, req.params.conversationId);
+    if (!data) return res.status(404).json({ status: "error", error: "Conversation not found" });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/conversations/:conversationId/notes", requireAuth, async (req, res, next) => {
+  try {
+    const data = await addConversationNote(req.user.tenantId, req.params.conversationId, req.user.id, req.body?.body);
+    return res.status(201).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid") || error.message.includes("not found")) {
+      return res.status(400).json({ status: "error", error: error.message });
+    }
+    return next(error);
+  }
+});
+
+app.put("/api/conversations/:conversationId/tags", requireAuth, async (req, res, next) => {
+  try {
+    const data = await setConversationTags(req.user.tenantId, req.params.conversationId, req.body?.tags);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid") || error.message.includes("not found")) {
+      return res.status(400).json({ status: "error", error: error.message });
+    }
+    return next(error);
+  }
+});
+
+app.get("/api/business-brain", requireAuth, async (req, res, next) => {
   try {
     const brain = await getBusinessBrain(req.user.tenantId);
     return res.status(200).json({ status: "ok", data: brain || {} });
