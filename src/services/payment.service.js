@@ -51,7 +51,7 @@ function metadata(value) {
   if (json.length > 8000) throw new Error("Metadata is too large");
   return value;
 }
-function validateTransition(current, next) {
+function eventId(value) {\n  const v = text(value, 200);\n  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(v)) throw new Error("Invalid payment event ID");\n  return v;\n}\n\nfunction validateTransition(current, next) {
   if (!STATUSES.has(next)) throw new Error("Invalid payment status");
   if (current === next) return;
   if (!TRANSITIONS.get(current)?.has(next)) throw new Error("Invalid payment status transition");
@@ -157,7 +157,7 @@ export function verifyPaymentWebhook(rawBody, signature, secret) {
   return received.length === expectedBuffer.length && crypto.timingSafeEqual(received, expectedBuffer);
 }
 
-export async function applyPaymentWebhook({ tenantId, provider: providerName, providerPaymentId, status, signatureValid }) {
+export async function applyPaymentWebhook({ tenantId, provider: providerName, providerPaymentId, status, eventId: webhookEventId, signatureValid }) {
   if (!signatureValid) throw new Error("Invalid payment webhook signature");
   const t = tenant(tenantId);
   const p = provider(providerName);
