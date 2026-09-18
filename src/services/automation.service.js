@@ -74,7 +74,7 @@ export async function startWorkflowRun({tenantId,workflowId,conversationId=null,
   const r=await dbPool.query(`INSERT INTO automation_runs(tenant_id,workflow_id,conversation_id,contact_id,status,context,next_run_at,trigger_key)
     SELECT $1,w.id,$3,$4,'queued',$5,NOW() FROM automation_workflows w
     WHERE w.tenant_id=$1 AND w.id=$2 AND w.status='active' ON CONFLICT (tenant_id,workflow_id,trigger_key) WHERE trigger_key IS NOT NULL DO NOTHING RETURNING *`,[t,workflowId,conversationId,contactId,context,triggerKey]);
-  if(!r.rows[0]) throw new Error("Active workflow not found"); return r.rows[0];
+  return r.rows[0] ?? null;
 }
 export async function triggerWorkflows({tenantId,triggerType,conversationId=null,contactId=null,context={}}) {
   assertDb(); const t=tenant(tenantId);
