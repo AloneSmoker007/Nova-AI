@@ -60,7 +60,7 @@ export async function registerInboundUsage({
     const windowStartedAt = windowActive
       ? new Date(previousExpiry.getTime() - WINDOW_MS)
       : eventTime;
-    const windowExpiresAt = new Date(windowStartedAt.getTime() + WINDOW_MS);
+    const windowExpiresAt = new Date(eventTime.getTime() + WINDOW_MS);
 
     let countedConversation = false;
 
