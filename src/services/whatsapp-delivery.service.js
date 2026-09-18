@@ -323,7 +323,6 @@ export async function markDeliveryStatus({
   callbackData,
   status,
   timestamp,
-  recipientId,
   errors,
 }) {
   assertDatabase();
