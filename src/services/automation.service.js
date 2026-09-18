@@ -113,6 +113,31 @@ async function executeWebhook(step,run,ctx,stepIndex){
     if(!response.ok) throw new Error(`Workflow webhook returned HTTP ${response.status}`);
   } finally { clearTimeout(timer); }
 }
+export async function scheduleInactivityTriggers(limit=100) {
+  assertDb();
+  const safe=Math.min(Math.max(Number(limit)||100,1),500);
+  const r=await dbPool.query(`SELECT w.id AS workflow_id,w.tenant_id,w.trigger_config,c.id AS conversation_id,c.contact_id,
+      FLOOR(EXTRACT(EPOCH FROM (NOW()-c.last_message_at))/GREATEST(COALESCE((w.trigger_config->>'afterSeconds')::integer,86400),1)) AS bucket
+    FROM automation_workflows w
+    JOIN conversations c ON c.tenant_id=w.tenant_id
+    WHERE w.status='active' AND w.trigger_type='inactivity'
+      AND c.status IN ('active','paused','human')
+      AND c.last_message_at IS NOT NULL
+      AND c.last_message_at <= NOW() - (GREATEST(COALESCE((w.trigger_config->>'afterSeconds')::integer,86400),1) * INTERVAL '1 second')
+    ORDER BY c.last_message_at ASC LIMIT $1`,[safe]);
+  let created=0;
+  for(const row of r.rows){
+    const key=`inactivity:${row.conversation_id}:${row.bucket}`;
+    const run=await startWorkflowRun({
+      tenantId:row.tenant_id,workflowId:row.workflow_id,
+      conversationId:row.conversation_id,contactId:row.contact_id,
+      context:{trigger:{type:"inactivity",bucket:Number(row.bucket)}},triggerKey:key,
+    });
+    if(run) created++;
+  }
+  return created;
+}
+
 export async function processDueWorkflowRuns(limit=20) {
   assertDb();
   const safe=Math.min(Math.max(Number(limit)||20,1),50);
