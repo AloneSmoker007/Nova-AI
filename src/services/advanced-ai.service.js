@@ -77,9 +77,14 @@ export async function analyzeCustomerMessage(text, businessBrain = null) {
 }
 
 const TRAILING_COPULA = /\s+(?:hai|hun|hoon|ho)\s*$/i;
+const TRAILING_KEYWORD = /\s+(?:chahiye|mujhe|need|want|wants|looking\s+for)\s*$/i;
 
 function trimTrailingCopula(name) {
   return name.replace(TRAILING_COPULA, "");
+}
+
+function trimTrailingKeyword(text) {
+  return text.replace(TRAILING_KEYWORD, "");
 }
 
 export function extractCustomerPreferencesFromText(text) {
@@ -119,7 +124,7 @@ export function extractCustomerPreferencesFromText(text) {
 
   const interestMatch = value.match(/(?:interested\s+in|want|wants|need|needs|chahiye|mujhe|looking\s+for|service|product)\s*[:=-]?\s*([a-zA-Z0-9\u0600-\u06FF]+(?:[\s.,-]+[a-zA-Z0-9\u0600-\u06FF]+){0,10}?)(?=\s*(?:[.!?;]|$))/i);
   if (interestMatch && interestMatch[1]) {
-    const interestText = normalizeText(interestMatch[1], 80);
+    const interestText = normalizeText(trimTrailingKeyword(interestMatch[1]), 80);
     if (interestText && !/^(my|i|mujhe|need|want|wants|chahiye)$/i.test(interestText)) {
       candidates.push({ key: "service_interest", value: interestText, confidence: 0.65 });
     }
