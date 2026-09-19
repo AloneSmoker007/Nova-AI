@@ -52,8 +52,13 @@ function metadata(value) {
   return value;
 }
 function eventId(value) {
-  const v = text(value, 200);
-  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(v)) throw new Error("Invalid payment event ID");
+  if (typeof value !== "string") {
+    throw new Error("Invalid payment event ID");
+  }
+  const v = value.trim();
+  if (!v || !/^[A-Za-z0-9._:-]{1,200}$/.test(v)) {
+    throw new Error("Invalid payment event ID");
+  }
   return v;
 }
 
