@@ -18,9 +18,21 @@ function normalizeText(value, max) {
 }
 
 function sanitizeMemoryValue(value) {
-  return normalizeText(String(value ?? "")
-    .replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, " ")
-    .replace(/[\\r\\n]+/g, " "), MAX_MEMORY_VALUE);
+  const raw = String(value ?? "");
+  const cleaned = raw
+    .split("")
+    .map((ch) => {
+      const code = ch.charCodeAt(0);
+      if (code <= 0x08 || code === 0x0B || code === 0x0C || (code >= 0x0E && code <= 0x1F) || code === 0x7F) {
+        return " ";
+      }
+      return ch;
+    })
+    .join("");
+  return normalizeText(
+    cleaned.replace(/[\r\n]+/g, " ").replace(/\s{2,}/g, " "),
+    MAX_MEMORY_VALUE,
+  );
 }
 
 function detectLanguage(text) {
@@ -64,6 +76,12 @@ export async function analyzeCustomerMessage(text, businessBrain = null) {
   return analyzeMessage(text, businessBrain);
 }
 
+const TRAILING_COPULA = /\s+(?:hai|hun|hoon|ho)\s*$/i;
+
+function trimTrailingCopula(name) {
+  return name.replace(TRAILING_COPULA, "");
+}
+
 export function extractCustomerPreferencesFromText(text) {
   const value = normalizeText(text, 2000);
   if (!value) return [];
@@ -79,7 +97,7 @@ export function extractCustomerPreferencesFromText(text) {
   for (const pattern of namePatterns) {
     const match = value.match(pattern);
     if (match && match[1]) {
-      const name = normalizeText(match[1], 80);
+      const name = normalizeText(trimTrailingCopula(match[1]), 80);
       if (name) candidates.push({ key: "name", value: name, confidence: 0.8 });
     }
   }
