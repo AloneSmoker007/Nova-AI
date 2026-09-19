@@ -37,7 +37,7 @@ function validateWebhookJsonValue(value, seen, depth) {
     for (const key of Reflect.ownKeys(value)) {
       if (typeof key === "symbol") throw new Error("Webhook body contains a symbol key");
       if (key === "length") continue;
-      if (!/^(0|[1-9]\\d*)$/.test(key) || Number(key) >= value.length) {
+      if (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length) {
         throw new Error("Webhook body contains an invalid array property");
       }
     }
