@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -15,6 +16,25 @@ function validTenantId(value) {
 // retried AI attempt can never collide with (or be counted as) an inbound event.
 export function aiUsageEventKey({ messageId, whatsappMessageId }) {
   return `ai_message:${whatsappMessageId || messageId}`;
+}
+
+// Every billable Gemini operation — inbound auto-reply, agent copilot draft,
+// and OCR extraction — shares the tenant's existing monthly AI limit
+// (monthly_ai_message_limit) under the existing hard_limit_enabled flag.
+// Distinct event types keep operations auditable without introducing new
+// billing plans; extending this list requires no schema migration.
+export const AI_EVENT_TYPES = ["ai_message", "copilot_draft", "ocr_document"];
+
+function isAiEventType(type) {
+  return AI_EVENT_TYPES.includes(type);
+}
+
+// Copilot and OCR operations have no provider-side message id; each call
+// reserves its own event with a collision-free random key. Inbound messages
+// keep the H1 key so durable-inbox retries stay idempotent.
+export function aiUsageEventKeyForType(type, { messageId, whatsappMessageId } = {}) {
+  if (type === "ai_message") return aiUsageEventKey({ messageId, whatsappMessageId });
+  return `${type}:${randomUUID()}`;
 }
 
 export async function registerInboundUsage({
@@ -129,7 +149,7 @@ export async function getUsageSummary(tenantId, { monthStart = null, client = nu
     `SELECT
        COALESCE((SELECT COUNT(*) FROM conversation_windows cw
          WHERE cw.tenant_id = $1 AND cw.created_at >= $2), 0)::int AS conversations,
-       COALESCE(SUM(CASE WHEN ue.event_type = 'ai_message' THEN ue.units ELSE 0 END), 0)::int AS ai_messages,
+       COALESCE(SUM(CASE WHEN ue.event_type IN ('ai_message', 'copilot_draft', 'ocr_document') THEN ue.units ELSE 0 END), 0)::int AS ai_messages,
        COALESCE(SUM(CASE WHEN ue.event_type = 'media_message' THEN ue.units ELSE 0 END), 0)::int AS media_messages
      FROM usage_events ue
      WHERE ue.tenant_id = $1 AND ue.created_at >= $2`,
@@ -192,19 +212,27 @@ export async function isUsageAllowed(tenantId, type = "conversations") {
   };
 }
 
-// Atomically checks the tenant's monthly ai_message hard limit and reserves the
-// usage event BEFORE any Gemini invocation. Concurrency safety: the tenants row
+// Atomically checks the tenant's monthly AI hard limit and reserves the usage
+// event BEFORE any Gemini invocation. Concurrency safety: the tenants row
 // is locked FOR UPDATE, so concurrent reservations for the same tenant
 // serialize and cannot all pass the check-then-insert window; the existing
 // (tenant_id, event_key) unique index keeps retries idempotent. The reservation
 // itself is the metering record — no second counting system is introduced.
-export async function reserveAiUsage({ tenantId, conversationId, messageId, whatsappMessageId } = {}) {
+// `type` selects the billable Gemini operation (see AI_EVENT_TYPES); the
+// default preserves the H1 inbound-message behavior.
+export async function reserveAiUsage({ tenantId, conversationId, messageId, whatsappMessageId, type = "ai_message" } = {}) {
+  if (!isAiEventType(type)) throw new Error("Invalid AI usage event type");
   assertDatabase();
   if (!validTenantId(tenantId)) throw new Error("Invalid tenant ID");
-  if (!validTenantId(conversationId)) throw new Error("Invalid conversation ID");
-  if (!validTenantId(whatsappMessageId || messageId)) throw new Error("Missing usage identifiers");
+  if (type === "ai_message") {
+    if (!validTenantId(conversationId)) throw new Error("Invalid conversation ID");
+    if (!validTenantId(whatsappMessageId || messageId)) throw new Error("Missing usage identifiers");
+  } else if (type === "copilot_draft") {
+    if (!validTenantId(conversationId)) throw new Error("Invalid conversation ID");
+  }
+  // ocr_document carries no conversation/message context; both stay NULL.
 
-  const eventKey = aiUsageEventKey({ messageId, whatsappMessageId });
+  const eventKey = aiUsageEventKeyForType(type, { messageId, whatsappMessageId });
   const client = await dbPool.connect();
 
   try {
@@ -248,13 +276,13 @@ export async function reserveAiUsage({ tenantId, conversationId, messageId, what
       `INSERT INTO usage_events (
          tenant_id, conversation_id, message_id, event_type, event_key, units, created_at
        )
-       VALUES ($1, $2, $3, 'ai_message', $4, 1, NOW())
+       VALUES ($1, $2, $3, $4, $5, 1, NOW())
        ON CONFLICT (tenant_id, event_key) DO NOTHING`,
-      [tenantId, conversationId, messageId || null, eventKey],
+      [tenantId, conversationId || null, messageId || null, type, eventKey],
     );
 
     await client.query("COMMIT");
-    return { allowed: true, duplicate: false, used: decision.used + 1, limit: decision.limit };
+    return { allowed: true, duplicate: false, used: decision.used + 1, limit: decision.limit, eventKey };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
@@ -263,19 +291,23 @@ export async function reserveAiUsage({ tenantId, conversationId, messageId, what
   }
 }
 
-// Releases a reservation whose AI generation failed so failed attempts do not
+// Releases a reservation whose AI operation failed so failed attempts do not
 // consume the tenant's monthly AI quota. Safe to call when no reservation
-// exists; a durable-inbox retry reserves again on its next attempt.
-export async function releaseAiUsage({ tenantId, messageId, whatsappMessageId } = {}) {
+// exists; a durable-inbox retry reserves again on its next attempt. The
+// release is restricted to the reservation's own event type so releasing one
+// operation can never delete another operation's reservation.
+export async function releaseAiUsage({ tenantId, messageId, whatsappMessageId, eventKey, type = "ai_message" } = {}) {
+  if (!isAiEventType(type)) throw new Error("Invalid AI usage event type");
   assertDatabase();
   if (!validTenantId(tenantId)) throw new Error("Invalid tenant ID");
-  if (!validTenantId(whatsappMessageId || messageId)) throw new Error("Missing usage identifiers");
 
-  const eventKey = aiUsageEventKey({ messageId, whatsappMessageId });
+  const key = eventKey || aiUsageEventKeyForType(type, { messageId, whatsappMessageId });
+  if (!validTenantId(key)) throw new Error("Missing usage identifiers");
+
   const result = await dbPool.query(
     `DELETE FROM usage_events
-     WHERE tenant_id = $1 AND event_key = $2 AND event_type = 'ai_message'`,
-    [tenantId, eventKey],
+     WHERE tenant_id = $1 AND event_key = $2 AND event_type = $3`,
+    [tenantId, key, type],
   );
   return { released: result.rowCount > 0 };
 }

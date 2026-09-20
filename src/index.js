@@ -1007,15 +1007,39 @@ app.get("/api/conversations/:conversationId/copilot/drafts", requireAuth, async 
 
 app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async (req, res, next) => {
   try {
-    const messages = await getConversationMessages(req.user.tenantId, req.params.conversationId, { limit: 12, offset: 0 });
-    const summary = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
-    const brain = await getBusinessBrain(req.user.tenantId);
-    const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
-    const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
-      ...(brain || {}),
-      customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\\n\\n"),
+    // Copilot drafts are billable Gemini operations: reserve quota from the
+    // tenant's shared monthly AI limit before any context work or provider
+    // call, mirroring the inbound AI gate.
+    const aiReservation = await reserveAiUsage({
+      tenantId: req.user.tenantId,
+      conversationId: req.params.conversationId,
+      type: "copilot_draft",
     });
-    const saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
+    if (!aiReservation.allowed) {
+      return res.status(429).json({ status: "error", error: "AI usage hard limit reached" });
+    }
+
+    let saved;
+    try {
+      const messages = await getConversationMessages(req.user.tenantId, req.params.conversationId, { limit: 12, offset: 0 });
+      const summary = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
+      const brain = await getBusinessBrain(req.user.tenantId);
+      const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
+      const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
+        ...(brain || {}),
+        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\\n\\n"),
+      });
+      saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
+    } catch (error) {
+      // Any post-reservation failure (context, provider, or persistence) must
+      // not leave a reservation behind; failed attempts consume no quota.
+      try {
+        await releaseAiUsage({ tenantId: req.user.tenantId, eventKey: aiReservation.eventKey, type: "copilot_draft" });
+      } catch {
+        // Release failure leaves a bounded orphan (one unit); nothing else to do.
+      }
+      throw error;
+    }
     return res.status(201).json({ status: "ok", data: saved });
   } catch (error) {
     if (error.message.includes("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
