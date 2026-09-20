@@ -155,6 +155,9 @@ export function registerTask16Routes(app) {
         });
         return res.status(201).json({ status: "ok", data });
       } catch (error) {
+        if (error.message.includes("AI usage hard limit")) {
+          return res.status(429).json({ status: "error", error: error.message });
+        }
         if (bad(error) || error.message.includes("document size")) {
           return res.status(400).json({ status: "error", error: error.message });
         }

@@ -13,6 +13,10 @@ const usageSource = await fs.readFile(
   path.join(sourceDirectory, "services", "usage.service.js"),
   "utf8",
 );
+const ocrSource = await fs.readFile(
+  path.join(sourceDirectory, "services", "ocr.service.js"),
+  "utf8",
+);
 
 function sliceBetween(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -194,8 +198,8 @@ test("AI usage reservation and release remain strictly tenant-scoped", () => {
     "duplicate detection must be tenant-scoped",
   );
   assert.ok(
-    release.includes("WHERE tenant_id = $1 AND event_key = $2 AND event_type = 'ai_message'"),
-    "release must be tenant-scoped and restricted to ai_message events",
+    release.includes("WHERE tenant_id = $1 AND event_key = $2 AND event_type = $3"),
+    "release must be tenant-scoped and restricted to the reservation's own event type",
   );
   assert.ok(
     reserve.includes("FROM tenants") && reserve.includes("WHERE id = $1"),
@@ -212,5 +216,92 @@ test("usage gate and fallback never log message bodies or AI content", () => {
   assert.ok(!gate.includes("message.body"), "gate logging must not include the customer message body");
   const blockedPath = sliceBetween(indexSource, "!aiReservation.allowed", "let brain = null;");
   assert.ok(!blockedPath.includes("message.body"), "blocked-path logging must not include customer content");
+});
+
+test("every billable Gemini operation shares the existing monthly AI limit", () => {
+  assert.deepEqual(
+    [...usageService.AI_EVENT_TYPES].sort(),
+    ["ai_message", "copilot_draft", "ocr_document"],
+    "copilot and OCR must be billable AI event types",
+  );
+  const reserve = usageSource.slice(
+    usageSource.indexOf("export async function reserveAiUsage"),
+    usageSource.indexOf("export async function releaseAiUsage"),
+  );
+  assert.ok(
+    reserve.includes('type = "ai_message"'),
+    "reservation type must default to the H1 inbound event so the worker needs no changes",
+  );
+  assert.ok(
+    reserve.includes("summary.usage.aiMessages") && reserve.includes("summary.limits.monthly_ai_message_limit"),
+    "every AI event type must consume the shared monthly_ai_message_limit",
+  );
+  assert.ok(
+    reserve.includes("conversationId || null"),
+    "OCR reservations must tolerate missing conversation context",
+  );
+});
+
+test("inbound AI reservations keep deterministic retry keys; other types use per-call keys", () => {
+  assert.equal(
+    usageService.aiUsageEventKeyForType("ai_message", { whatsappMessageId: "wam.id.1" }),
+    "ai_message:wam.id.1",
+    "inbound retries must derive the same key so they never double-count",
+  );
+  const key = usageService.aiUsageEventKeyForType("ocr_document");
+  assert.ok(key.startsWith("ocr_document:"), "non-inbound keys must be namespaced by event type");
+  assert.notEqual(key, usageService.aiUsageEventKeyForType("ocr_document"), "per-call keys must be unique");
+});
+
+test("copilot draft route reserves quota before any context work or Gemini call", () => {
+  const route = sliceBetween(indexSource, 'copilot/draft", requireAuth', 'app.put("/api/users/me/skills"');
+  const reserveAt = route.indexOf("reserveAiUsage({");
+  assert.ok(reserveAt > -1, "copilot route must reserve AI usage");
+  assert.ok(route.includes('type: "copilot_draft"'), "copilot reservations must use the copilot_draft event type");
+  assert.ok(
+    route.indexOf("getConversationMessages") > reserveAt && route.indexOf("getBusinessBrain") > reserveAt,
+    "context work must happen after the reservation",
+  );
+  assert.ok(route.indexOf("generateGeminiReply") > reserveAt, "Gemini must be invoked after the reservation");
+  assert.ok(route.includes("status(429)"), "blocked copilot drafts must return 429 without calling Gemini");
+  assert.ok(
+    route.indexOf("releaseAiUsage({") > route.indexOf("generateGeminiReply") &&
+      route.includes('eventKey: aiReservation.eventKey, type: "copilot_draft"'),
+    "any post-reservation copilot failure must release its own reservation",
+  );
+});
+
+test("OCR extraction reserves quota before the Gemini call and releases on failure", () => {
+  const extract = sliceBetween(
+    ocrSource,
+    "export async function extractTextFromDocument",
+    "export async function listOcrDocuments",
+  );
+  const reserveAt = extract.indexOf("reserveAiUsage({");
+  assert.ok(reserveAt > -1, "OCR must reserve AI usage");
+  assert.ok(extract.includes('type: "ocr_document"'), "OCR reservations must use the ocr_document event type");
+  const validation = extract.slice(0, reserveAt);
+  assert.ok(
+    validation.includes("MAX_IMAGE_BYTES") && validation.includes("hasValidMagicBytes"),
+    "upload validation must stay ahead of the reservation so rejected uploads consume nothing",
+  );
+  assert.ok(extract.indexOf("generateContent") > reserveAt, "Gemini must be invoked after the reservation");
+  assert.ok(
+    extract.indexOf('throw new Error("AI usage hard limit reached")') > reserveAt,
+    "blocked OCR must fail before any provider call",
+  );
+  assert.ok(
+    extract.includes("releaseAiUsage({") &&
+      extract.includes('eventKey: aiReservation.eventKey, type: "ocr_document"'),
+    "any post-reservation OCR failure must release its own reservation",
+  );
+});
+
+test("the dev-only Gemini test route stays out of production builds", () => {
+  const devSection = sliceBetween(indexSource, "if (!IS_PRODUCTION)", "app.use((req, res) => res.status(404)");
+  assert.ok(
+    devSection.includes("/api/test/gemini"),
+    "the un-gated Gemini test route must only exist behind the IS_PRODUCTION guard",
+  );
 });
 
