@@ -1311,6 +1311,24 @@ async function startServer() {
 
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
+
+  // A crash must not silently skip graceful shutdown. Both handlers log the
+  // failure and exit; after an uncaught error the process is not safe to
+  // continue, so they do not attempt recovery.
+  process.on("uncaughtException", (error) => {
+    logger.error({ error: error.message, stack: error.stack }, "Uncaught exception — shutting down");
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    const message =
+      reason?.message != null
+        ? reason.message
+        : reason instanceof Error
+          ? reason.toString()
+          : String(reason);
+    logger.error({ reason: message }, "Unhandled promise rejection — shutting down");
+    process.exit(1);
+  });
 }
 
 startServer().catch((error) => {
