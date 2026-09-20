@@ -792,7 +792,6 @@ async function dispatchPendingInboxMessages() {
     }
     } catch (error) {
       logger.error({ error: error.message }, "Durable inbox recovery pass failed");
-    } finally {
     }
   })();
 
