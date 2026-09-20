@@ -6,6 +6,47 @@ const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 const KEY_LENGTH = 32;
 
+function decodeBase64Strict(value, encoding) {
+  if (typeof value !== "string" || !value) {
+    throw new Error("Invalid encrypted secret encoding");
+  }
+
+  if (encoding === "base64url") {
+    if (!/^[A-Za-z0-9_-]*$/.test(value) || value.length % 4 === 1) {
+      throw new Error("Invalid encrypted secret encoding");
+    }
+
+    const decoded = Buffer.from(value, "base64url");
+    if (decoded.toString("base64url") !== value) {
+      throw new Error("Invalid encrypted secret encoding");
+    }
+    return decoded;
+  }
+
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+    throw new Error("Invalid encrypted secret encoding");
+  }
+
+  const unpadded = value.replace(/=+$/, "");
+  if (unpadded.length % 4 === 1) {
+    throw new Error("Invalid encrypted secret encoding");
+  }
+
+  const paddingLength = (4 - (unpadded.length % 4)) % 4;
+  const padded = unpadded + "=".repeat(paddingLength);
+  const decoded = Buffer.from(padded, "base64");
+  const canonical = decoded.toString("base64");
+
+  if (
+    unpadded !== canonical.replace(/=+$/, "") ||
+    (value.includes("=") && value !== canonical)
+  ) {
+    throw new Error("Invalid encrypted secret encoding");
+  }
+
+  return decoded;
+}
+
 function getEncryptionKey() {
   const rawKey = process.env.CREDENTIAL_ENCRYPTION_KEY?.trim();
 
@@ -19,7 +60,7 @@ function getEncryptionKey() {
     key = Buffer.from(rawKey, "hex");
   } else {
     try {
-      key = Buffer.from(rawKey, "base64");
+      key = decodeBase64Strict(rawKey, "base64");
     } catch {
       throw new Error("CREDENTIAL_ENCRYPTION_KEY must be 32-byte base64 or 64-character hex");
     }
@@ -73,9 +114,9 @@ export function decryptSecret(encryptedValue) {
   let ciphertext;
 
   try {
-    iv = Buffer.from(ivPart, "base64url");
-    authTag = Buffer.from(authTagPart, "base64url");
-    ciphertext = Buffer.from(ciphertextPart, "base64url");
+    iv = decodeBase64Strict(ivPart, "base64url");
+    authTag = decodeBase64Strict(authTagPart, "base64url");
+    ciphertext = decodeBase64Strict(ciphertextPart, "base64url");
   } catch {
     throw new Error("Invalid encrypted secret encoding");
   }
