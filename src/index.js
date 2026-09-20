@@ -757,7 +757,6 @@ async function recoverPendingDeliveries() {
 async function dispatchPendingInboxMessages() {
   if (recoveryPassPromise) return recoveryPassPromise;
 
-  recoveryPassRunning = true;
   recoveryPassPromise = (async () => {
     try {
     await recoverExpiredLeases();
@@ -794,7 +793,6 @@ async function dispatchPendingInboxMessages() {
     } catch (error) {
       logger.error({ error: error.message }, "Durable inbox recovery pass failed");
     } finally {
-      recoveryPassRunning = false;
     }
   })();
 
@@ -806,7 +804,6 @@ async function dispatchPendingInboxMessages() {
 }
 
 let recoveryTimer = null;
-let recoveryPassRunning = false;
 let recoveryPassPromise = null;
 
 function startInboxRecovery() {
