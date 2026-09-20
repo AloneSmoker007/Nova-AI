@@ -125,6 +125,27 @@ test("blocked AI attempts take the safe human-handoff fallback and are not doubl
   );
 });
 
+test("any post-reservation pre-success AI failure releases the reservation", () => {
+  const aiSection = sliceBetween(
+    indexSource,
+    "if (!aiReservation.allowed)",
+    "if (message.provider_message_id)",
+  );
+  const reservation = aiSection.indexOf("reserveAiUsage({");
+  const cleanup = aiSection.lastIndexOf("releaseAiUsage({");
+  const generation = aiSection.indexOf("generateGeminiReply(message.body");
+  const save = aiSection.indexOf("saveGeneratedResponse(");
+
+  assert.ok(reservation >= 0, "AI flow must reserve usage before provider work");
+  assert.ok(cleanup > reservation, "AI flow must release usage after a reservation failure path");
+  assert.ok(generation > reservation, "Gemini must run after reservation");
+  assert.ok(save > generation, "generated response must be durably saved after Gemini");
+  assert.ok(
+    aiSection.slice(cleanup).includes("throw aiError;"),
+    "cleanup path must rethrow so durable inbox retry semantics are preserved",
+  );
+});
+
 test("failed AI generations release the reservation so retries are not double-billed", () => {
   const guardedCall = sliceBetween(
     indexSource,
