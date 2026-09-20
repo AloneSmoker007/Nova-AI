@@ -10,6 +10,13 @@ function validTenantId(value) {
   return typeof value === "string" && value.trim() !== "";
 }
 
+// AI usage is metered once per inbound WhatsApp message. The key mirrors the
+// inbound usage contract but uses a distinct event-type prefix so a blocked or
+// retried AI attempt can never collide with (or be counted as) an inbound event.
+export function aiUsageEventKey({ messageId, whatsappMessageId }) {
+  return `ai_message:${whatsappMessageId || messageId}`;
+}
+
 export async function registerInboundUsage({
   tenantId,
   conversationId,
@@ -106,7 +113,7 @@ export async function registerInboundUsage({
   }
 }
 
-export async function getUsageSummary(tenantId, { monthStart = null } = {}) {
+export async function getUsageSummary(tenantId, { monthStart = null, client = null } = {}) {
   assertDatabase();
   if (!validTenantId(tenantId)) throw new Error("Invalid tenant ID");
 
@@ -114,7 +121,11 @@ export async function getUsageSummary(tenantId, { monthStart = null } = {}) {
   if (!monthStart) start.setUTCDate(1), start.setUTCHours(0, 0, 0, 0);
   if (Number.isNaN(start.getTime())) throw new Error("Invalid monthStart");
 
-  const result = await dbPool.query(
+  // `client` lets callers (reserveAiUsage) read usage inside their own
+  // transaction so the count and the reservation share one consistent snapshot.
+  const dbc = client || dbPool;
+
+  const result = await dbc.query(
     `SELECT
        COALESCE((SELECT COUNT(*) FROM conversation_windows cw
          WHERE cw.tenant_id = $1 AND cw.created_at >= $2), 0)::int AS conversations,
@@ -125,7 +136,7 @@ export async function getUsageSummary(tenantId, { monthStart = null } = {}) {
     [tenantId, start],
   );
 
-  const plan = await dbPool.query(
+  const plan = await dbc.query(
     `SELECT monthly_conversation_limit, monthly_ai_message_limit,
             monthly_media_limit, warning_percent, hard_limit_enabled
      FROM tenant_usage_plans WHERE tenant_id = $1`,
@@ -148,19 +159,123 @@ export async function getUsageSummary(tenantId, { monthStart = null } = {}) {
   }, limits };
 }
 
+// Single source of truth for hard-limit decisions. The read-only API
+// (isUsageAllowed) and the atomic reservation path (reserveAiUsage) must
+// evaluate limits identically.
+export function evaluateHardLimit({ hardLimitEnabled, used, limit }) {
+  const usedCount = Number.isFinite(Number(used)) ? Number(used) : 0;
+  const limitCount = Number.isFinite(Number(limit)) ? Number(limit) : 0;
+  return {
+    allowed: !hardLimitEnabled || usedCount < limitCount,
+    used: usedCount,
+    limit: limitCount,
+    percent: limitCount > 0 ? Math.round((usedCount / limitCount) * 100) : 100,
+  };
+}
+
 export async function isUsageAllowed(tenantId, type = "conversations") {
   const summary = await getUsageSummary(tenantId);
   const key = type === "ai_messages" ? "aiMessages" : type === "media_messages" ? "mediaMessages" : "conversations";
   const limitKey = type === "ai_messages"
     ? "monthly_ai_message_limit"
     : type === "media_messages" ? "monthly_media_limit" : "monthly_conversation_limit";
-  const used = summary.usage[key];
-  const limit = Number(summary.limits[limitKey]);
+  const decision = evaluateHardLimit({
+    hardLimitEnabled: summary.limits.hard_limit_enabled,
+    used: summary.usage[key],
+    limit: summary.limits[limitKey],
+  });
   return {
-    allowed: !summary.limits.hard_limit_enabled || used < limit,
-    used,
-    limit,
-    percent: limit > 0 ? Math.round((used / limit) * 100) : 100,
-    warning: limit > 0 && used >= Math.ceil(limit * (Number(summary.limits.warning_percent) / 100)),
+    ...decision,
+    warning:
+      decision.limit > 0 &&
+      decision.used >= Math.ceil(decision.limit * (Number(summary.limits.warning_percent) / 100)),
   };
+}
+
+// Atomically checks the tenant's monthly ai_message hard limit and reserves the
+// usage event BEFORE any Gemini invocation. Concurrency safety: the tenants row
+// is locked FOR UPDATE, so concurrent reservations for the same tenant
+// serialize and cannot all pass the check-then-insert window; the existing
+// (tenant_id, event_key) unique index keeps retries idempotent. The reservation
+// itself is the metering record — no second counting system is introduced.
+export async function reserveAiUsage({ tenantId, conversationId, messageId, whatsappMessageId } = {}) {
+  assertDatabase();
+  if (!validTenantId(tenantId)) throw new Error("Invalid tenant ID");
+  if (!validTenantId(conversationId)) throw new Error("Invalid conversation ID");
+  if (!validTenantId(whatsappMessageId || messageId)) throw new Error("Missing usage identifiers");
+
+  const eventKey = aiUsageEventKey({ messageId, whatsappMessageId });
+  const client = await dbPool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // Tenant-wide monthly limit → tenant-wide serialization point.
+    const tenantLock = await client.query(
+      `SELECT id FROM tenants
+       WHERE id = $1
+       FOR UPDATE`,
+      [tenantId],
+    );
+    if (tenantLock.rowCount === 0) throw new Error("Tenant not found");
+
+    const existingEvent = await client.query(
+      `SELECT id FROM usage_events
+       WHERE tenant_id = $1 AND event_key = $2
+       LIMIT 1`,
+      [tenantId, eventKey],
+    );
+    if (existingEvent.rowCount > 0) {
+      // This message already holds its AI reservation (durable-inbox retry
+      // after a crash mid-generation). Never self-block, never double-count.
+      await client.query("COMMIT");
+      return { allowed: true, duplicate: true };
+    }
+
+    const summary = await getUsageSummary(tenantId, { client });
+    const decision = evaluateHardLimit({
+      hardLimitEnabled: summary.limits.hard_limit_enabled,
+      used: summary.usage.aiMessages,
+      limit: summary.limits.monthly_ai_message_limit,
+    });
+
+    if (!decision.allowed) {
+      await client.query("ROLLBACK");
+      return { allowed: false, used: decision.used, limit: decision.limit, percent: decision.percent };
+    }
+
+    await client.query(
+      `INSERT INTO usage_events (
+         tenant_id, conversation_id, message_id, event_type, event_key, units, created_at
+       )
+       VALUES ($1, $2, $3, 'ai_message', $4, 1, NOW())
+       ON CONFLICT (tenant_id, event_key) DO NOTHING`,
+      [tenantId, conversationId, messageId || null, eventKey],
+    );
+
+    await client.query("COMMIT");
+    return { allowed: true, duplicate: false, used: decision.used + 1, limit: decision.limit };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Releases a reservation whose AI generation failed so failed attempts do not
+// consume the tenant's monthly AI quota. Safe to call when no reservation
+// exists; a durable-inbox retry reserves again on its next attempt.
+export async function releaseAiUsage({ tenantId, messageId, whatsappMessageId } = {}) {
+  assertDatabase();
+  if (!validTenantId(tenantId)) throw new Error("Invalid tenant ID");
+  if (!validTenantId(whatsappMessageId || messageId)) throw new Error("Missing usage identifiers");
+
+  const eventKey = aiUsageEventKey({ messageId, whatsappMessageId });
+  const result = await dbPool.query(
+    `DELETE FROM usage_events
+     WHERE tenant_id = $1 AND event_key = $2 AND event_type = 'ai_message'`,
+    [tenantId, eventKey],
+  );
+  return { released: result.rowCount > 0 };
 }

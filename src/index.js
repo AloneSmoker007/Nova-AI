@@ -54,7 +54,7 @@ import {
 } from "./services/whatsapp-delivery.service.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
-import { registerInboundUsage, getUsageSummary } from "./services/usage.service.js";
+import { registerInboundUsage, getUsageSummary, reserveAiUsage, releaseAiUsage } from "./services/usage.service.js";
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
 import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotPrompt, setUserSkills } from "./services/handoff.service.js";
 import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
@@ -394,6 +394,43 @@ async function processInboxMessage(inboxId, log = logger) {
 
     let reply = message.generated_response;
     if (!reply) {
+      // Hard usage limit gate — runs before any AI context work or the Gemini
+      // call. reserveAiUsage atomically checks the tenant's monthly ai_message
+      // limit (tenant-row serialization prevents concurrent overshoot) and
+      // reserves the ai_message usage event idempotently per WhatsApp message;
+      // the reservation itself is the metering record.
+      let aiReservation;
+      try {
+        aiReservation = await reserveAiUsage({
+          tenantId: message.tenant_id,
+          conversationId: persistedInbound.conversationId,
+          messageId: persistedInbound.messageId,
+          whatsappMessageId: message.whatsapp_message_id,
+        });
+      } catch (usageError) {
+        log.error({ error: usageError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to check AI usage limit");
+        throw usageError;
+      }
+
+      if (!aiReservation.allowed) {
+        // Same safe fallback as the AI-paused path: no reply is sent, nothing
+        // pretends an AI response went out, the message stays visible in the
+        // shared inbox for a human agent, and AI resumes automatically when
+        // usage frees up (new month, raised limit, or hard limit disabled).
+        await markCompleted(message.id, message.tenant_id, leaseToken, null);
+        log.warn(
+          {
+            inboxId: message.id,
+            tenantId: message.tenant_id,
+            conversationId: persistedInbound.conversationId,
+            used: aiReservation.used,
+            limit: aiReservation.limit,
+          },
+          "AI usage hard limit reached; message left for human agent",
+        );
+        return;
+      }
+
       let brain = null;
       try {
         brain = await getBusinessBrain(message.tenant_id);
@@ -420,8 +457,23 @@ async function processInboxMessage(inboxId, log = logger) {
       }
       const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
       const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") } : { customInstructions: advancedContext };
-      reply = await generateGeminiReply(message.body, aiBrain);
-      reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
+      try {
+        reply = await generateGeminiReply(message.body, aiBrain);
+        reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
+      } catch (aiError) {
+        // Failed generations must not consume the tenant's monthly AI quota;
+        // the durable-inbox retry will reserve again on its next attempt.
+        try {
+          await releaseAiUsage({
+            tenantId: message.tenant_id,
+            messageId: persistedInbound.messageId,
+            whatsappMessageId: message.whatsapp_message_id,
+          });
+        } catch (releaseError) {
+          log.warn({ error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to release reserved AI usage");
+        }
+        throw aiError;
+      }
     }
 
     if (message.provider_message_id) {
