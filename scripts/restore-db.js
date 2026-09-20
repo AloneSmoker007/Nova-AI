@@ -8,6 +8,20 @@ const MAGIC = Buffer.from("NOVA-BACKUP-V1\n");
 const IV_LENGTH = 12;
 const TAG_LENGTH = 16;
 
+function postgresEnv(databaseUrl) {
+  const parsed = new URL(databaseUrl);
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol)) throw new Error("DATABASE_URL must use PostgreSQL");
+  const env = { ...process.env };
+  env.PGHOST = parsed.hostname;
+  env.PGPORT = parsed.port || "5432";
+  env.PGUSER = decodeURIComponent(parsed.username);
+  env.PGPASSWORD = decodeURIComponent(parsed.password);
+  env.PGDATABASE = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  if (parsed.searchParams.has("sslmode")) env.PGSSLMODE = parsed.searchParams.get("sslmode");
+  delete env.DATABASE_URL;
+  return env;
+}
+
 function getKey() {
   const raw = process.env.BACKUP_ENCRYPTION_KEY?.trim();
   if (!raw) throw new Error("BACKUP_ENCRYPTION_KEY is required");
@@ -53,7 +67,8 @@ async function restore() {
     start: MAGIC.length + IV_LENGTH,
     end: stat.size - TAG_LENGTH - 1,
   });
-  const pgRestore = spawn("pg_restore", ["--no-owner", "--no-acl", "--dbname", target], {
+  const pgRestore = spawn("pg_restore", ["--no-owner", "--no-acl"], {
+    env: postgresEnv(target),
     stdio: ["pipe", "ignore", "pipe"],
     windowsHide: true,
   });
