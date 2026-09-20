@@ -10,6 +10,20 @@ const KEY_LENGTH = 32;
 const IV_LENGTH = 12;
 const TAG_LENGTH = 16;
 
+function postgresEnv(databaseUrl) {
+  const parsed = new URL(databaseUrl);
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol)) throw new Error("DATABASE_URL must use PostgreSQL");
+  const env = { ...process.env };
+  env.PGHOST = parsed.hostname;
+  env.PGPORT = parsed.port || "5432";
+  env.PGUSER = decodeURIComponent(parsed.username);
+  env.PGPASSWORD = decodeURIComponent(parsed.password);
+  env.PGDATABASE = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  if (parsed.searchParams.has("sslmode")) env.PGSSLMODE = parsed.searchParams.get("sslmode");
+  delete env.DATABASE_URL;
+  return env;
+}
+
 function getKey() {
   const raw = process.env.BACKUP_ENCRYPTION_KEY?.trim();
   if (!raw) throw new Error("BACKUP_ENCRYPTION_KEY is required");
@@ -25,7 +39,8 @@ function runPgDump(outputPath) {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is required");
   return new Promise((resolve, reject) => {
-    const child = spawn("pg_dump", ["--format=custom", "--no-owner", "--no-acl", "--dbname", url], {
+    const child = spawn("pg_dump", ["--format=custom", "--no-owner", "--no-acl"], {
+      env: postgresEnv(url),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -62,7 +77,8 @@ async function createBackup() {
   const iv = crypto.randomBytes(IV_LENGTH);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv, { authTagLength: TAG_LENGTH });
 
-  const child = spawn("pg_dump", ["--format=custom", "--no-owner", "--no-acl", "--dbname", process.env.DATABASE_URL], {
+  const child = spawn("pg_dump", ["--format=custom", "--no-owner", "--no-acl"], {
+    env: postgresEnv(process.env.DATABASE_URL),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
