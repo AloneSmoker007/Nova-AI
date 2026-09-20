@@ -431,6 +431,7 @@ async function processInboxMessage(inboxId, log = logger) {
         return;
       }
 
+      try {
       let brain = null;
       try {
         brain = await getBusinessBrain(message.tenant_id);
@@ -440,6 +441,7 @@ async function processInboxMessage(inboxId, log = logger) {
           "Failed to load Business Brain, falling back to default",
         );
       }
+
 
       const signal = await analyzeCustomerMessage(message.body, brain);
       try {
@@ -463,6 +465,21 @@ async function processInboxMessage(inboxId, log = logger) {
       } catch (aiError) {
         // Failed generations must not consume the tenant's monthly AI quota;
         // the durable-inbox retry will reserve again on its next attempt.
+        try {
+          await releaseAiUsage({
+            tenantId: message.tenant_id,
+            messageId: persistedInbound.messageId,
+            whatsappMessageId: message.whatsapp_message_id,
+          });
+        } catch (releaseError) {
+          log.warn({ error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to release reserved AI usage");
+        }
+        throw aiError;
+
+      } catch (aiError) {
+        // Any failure after reservation but before a successful durable AI response
+        // must release the reservation. This includes context/signal/memory work,
+        // Gemini failures, and saveGeneratedResponse failures.
         try {
           await releaseAiUsage({
             tenantId: message.tenant_id,
