@@ -6,6 +6,34 @@ const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 const KEY_LENGTH = 32;
 
+function decodeBase64Strict(value, encoding) {
+  if (typeof value !== "string" || !value) {
+    throw new Error("Invalid encrypted secret encoding");
+  }
+
+  const isBase64Url = encoding === "base64url";
+  const pattern = isBase64Url
+    ? /^[A-Za-z0-9_-]*$/
+    : /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+  if (!pattern.test(value)) {
+    throw new Error("Invalid encrypted secret encoding");
+  }
+
+  if (isBase64Url && value.length % 4 === 1) {
+    throw new Error("Invalid encrypted secret encoding");
+  }
+
+  const decoded = Buffer.from(value, encoding);
+  const canonical = decoded.toString(encoding);
+
+  if (canonical !== value) {
+    throw new Error("Invalid encrypted secret encoding");
+  }
+
+  return decoded;
+}
+
 function getEncryptionKey() {
   const rawKey = process.env.CREDENTIAL_ENCRYPTION_KEY?.trim();
 
@@ -19,7 +47,7 @@ function getEncryptionKey() {
     key = Buffer.from(rawKey, "hex");
   } else {
     try {
-      key = Buffer.from(rawKey, "base64");
+      key = decodeBase64Strict(rawKey, "base64");
     } catch {
       throw new Error("CREDENTIAL_ENCRYPTION_KEY must be 32-byte base64 or 64-character hex");
     }
@@ -73,9 +101,9 @@ export function decryptSecret(encryptedValue) {
   let ciphertext;
 
   try {
-    iv = Buffer.from(ivPart, "base64url");
-    authTag = Buffer.from(authTagPart, "base64url");
-    ciphertext = Buffer.from(ciphertextPart, "base64url");
+    iv = decodeBase64Strict(ivPart, "base64url");
+    authTag = decodeBase64Strict(authTagPart, "base64url");
+    ciphertext = decodeBase64Strict(ciphertextPart, "base64url");
   } catch {
     throw new Error("Invalid encrypted secret encoding");
   }
