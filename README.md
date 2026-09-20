@@ -159,3 +159,20 @@ Never run destructive production database operations casually. Back up productio
 
 Nova-AI is being developed incrementally toward a production WhatsApp AI SaaS platform. Tasks 1–13 are implemented on `main`; subsequent product capabilities should preserve the existing tenant-isolation and security model.
 
+
+
+## Production data retention and backups
+
+Nova-AI now runs bounded retention cleanup when PostgreSQL is configured. Defaults are conservative and can be adjusted with:
+- `RETENTION_DELETED_MESSAGES_DAYS` (default 90)
+- `RETENTION_WEBHOOK_COMPLETED_DAYS` (default 30)
+- `RETENTION_USAGE_EVENTS_DAYS` (default 365)
+- `RETENTION_OCR_DOCUMENTS_DAYS` (default 90)
+- `RETENTION_PAYMENT_EVENTS_DAYS` (default 90)
+
+Create an encrypted PostgreSQL custom-format backup with `npm run db:backup`. It requires `DATABASE_URL` and a dedicated `BACKUP_ENCRYPTION_KEY` (32-byte base64url or 64-character hex). Backups are written with restrictive permissions, authenticated with AES-256-GCM, accompanied by a manifest, and pruned according to `BACKUP_RETENTION_DAYS` (default 30).
+
+Restore is deliberately explicit and non-destructive by default:
+`RESTORE_TARGET_DATABASE_URL=... RESTORE_ALLOW_OVERWRITE=YES npm run db:restore -- ./backups/<file>.backup.enc`
+
+Never place database URLs or encryption keys in source control. Test restore against a disposable PostgreSQL database before relying on a backup operationally. The encrypted local backup utility is the production baseline; client-owned cloud/Drive transport remains an optional deployment integration rather than a requirement of the core database backup.
