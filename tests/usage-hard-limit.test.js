@@ -128,7 +128,7 @@ test("blocked AI attempts take the safe human-handoff fallback and are not doubl
 test("any post-reservation pre-success AI failure releases the reservation", () => {
   const aiSection = sliceBetween(
     indexSource,
-    "if (!aiReservation.allowed)",
+    "Hard usage limit gate",
     "if (message.provider_message_id)",
   );
   const reservation = aiSection.indexOf("reserveAiUsage({");
@@ -150,7 +150,7 @@ test("failed AI generations release the reservation so retries are not double-bi
   const guardedCall = sliceBetween(
     indexSource,
     "reply = await generateGeminiReply(message.body, aiBrain);",
-    "log.warn({ error: releaseError.message",
+    "Failed to release reserved AI usage",
   );
   assert.ok(
     guardedCall.includes("releaseAiUsage"),
