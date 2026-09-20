@@ -18,6 +18,55 @@ export function compareMigrationFilenames(a, b) {
   return numberDiff !== 0 ? numberDiff : a.localeCompare(b);
 }
 
+// A duplicate numeric prefix (for example 022_a.sql and 022_b.sql, or
+// 022_a.sql and 22_b.sql) would otherwise be applied in an ambiguous
+// locale-dependent order, so it is rejected before any migration runs.
+export function findDuplicateMigrationPrefixes(migrationFiles) {
+  const seenFilenames = new Set();
+  const duplicateFilenames = new Set();
+  const byNumber = new Map();
+
+  for (const filename of migrationFiles) {
+    if (seenFilenames.has(filename)) duplicateFilenames.add(filename);
+    seenFilenames.add(filename);
+
+    const match = /^([0-9]+)_/.exec(filename);
+    if (!match) continue;
+
+    const number = Number(match[1]);
+    const group = byNumber.get(number);
+    if (group) {
+      group.push(filename);
+    } else {
+      byNumber.set(number, [filename]);
+    }
+  }
+
+  return {
+    duplicateFilenames: [...duplicateFilenames].sort(),
+    duplicatePrefixes: [...byNumber.values()].filter((group) => group.length > 1),
+  };
+}
+
+export function assertUniqueMigrationNames(migrationFiles) {
+  const { duplicateFilenames, duplicatePrefixes } =
+    findDuplicateMigrationPrefixes(migrationFiles);
+
+  if (duplicateFilenames.length > 0) {
+    throw new Error(
+      `Duplicate database migration filenames detected: ${duplicateFilenames.join(", ")}.`,
+    );
+  }
+
+  if (duplicatePrefixes.length > 0) {
+    const details = duplicatePrefixes.map((group) => group.join(" / ")).join("; ");
+    throw new Error(
+      `Duplicate database migration numeric prefixes detected: ${details}. ` +
+        "Give every migration a unique numeric prefix before applying them.",
+    );
+  }
+}
+
 // One transaction-level advisory lock prevents multiple Nova-AI
 // instances from applying migrations concurrently during startup.
 const MIGRATION_ADVISORY_LOCK_ID = 7_421_991;
@@ -25,10 +74,14 @@ const MIGRATION_ADVISORY_LOCK_ID = 7_421_991;
 async function getMigrationFiles() {
   const entries = await fs.readdir(migrationsDirectory, { withFileTypes: true });
 
-  return entries
+  const migrationFiles = entries
     .filter((entry) => entry.isFile() && /^\d+_.+\.sql$/.test(entry.name))
-    .map((entry) => entry.name)
-    .sort(compareMigrationFilenames);
+    .map((entry) => entry.name);
+
+  // Fail clearly instead of silently ordering migrations that share a prefix.
+  assertUniqueMigrationNames(migrationFiles);
+
+  return migrationFiles.sort(compareMigrationFilenames);
 }
 
 export function validateMigrationOrder(migrationFiles, appliedFilenames) {

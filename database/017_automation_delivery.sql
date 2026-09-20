@@ -28,7 +28,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_deliveries_tenant_automation_step
   ON whatsapp_deliveries (tenant_id, automation_run_id, automation_step)
   WHERE automation_run_id IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_automation_runs_due
+CREATE INDEX IF NOT EXISTS idx_automation_runs_dispatch
   ON automation_runs (status, next_run_at)
   WHERE status IN ('queued','waiting','running');
 

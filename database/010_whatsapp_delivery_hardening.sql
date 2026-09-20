@@ -48,7 +48,7 @@ CREATE TABLE whatsapp_deliveries (
   CONSTRAINT fk_whatsapp_deliveries_conversation
     FOREIGN KEY (tenant_id, conversation_id)
     REFERENCES conversations (tenant_id, id)
-    ON DELETE SET NULL
+    ON DELETE SET NULL (conversation_id)
 );
 
 CREATE INDEX idx_whatsapp_deliveries_recovery

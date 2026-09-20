@@ -18,10 +18,12 @@ CREATE TABLE IF NOT EXISTS automation_workflows (
   created_by UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_automation_workflows_tenant_id
+    UNIQUE (tenant_id, id),
   CONSTRAINT fk_automation_workflows_creator
     FOREIGN KEY (tenant_id, created_by)
     REFERENCES users (tenant_id, id)
-    ON DELETE SET NULL
+    ON DELETE SET NULL (created_by)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_automation_workflows_tenant_name
@@ -46,6 +48,8 @@ CREATE TABLE IF NOT EXISTS automation_runs (
   completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_automation_runs_tenant_id
+    UNIQUE (tenant_id, id),
   CONSTRAINT fk_automation_runs_workflow
     FOREIGN KEY (tenant_id, workflow_id)
     REFERENCES automation_workflows (tenant_id, id)

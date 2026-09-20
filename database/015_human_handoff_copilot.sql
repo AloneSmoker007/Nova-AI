@@ -19,7 +19,7 @@ ALTER TABLE conversations
   ADD CONSTRAINT fk_conversations_ai_paused_by
   FOREIGN KEY (tenant_id, ai_paused_by)
   REFERENCES users (tenant_id, id)
-  ON DELETE SET NULL;
+  ON DELETE SET NULL (ai_paused_by);
 
 CREATE INDEX IF NOT EXISTS idx_conversations_handoff_queue
   ON conversations (tenant_id, status, ai_paused, assigned_skill, updated_at DESC);
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS ai_copilot_drafts (
   CONSTRAINT fk_copilot_drafts_author
     FOREIGN KEY (tenant_id, author_user_id)
     REFERENCES users (tenant_id, id)
-    ON DELETE SET NULL
+    ON DELETE SET NULL (author_user_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_copilot_drafts_lookup
