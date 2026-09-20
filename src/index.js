@@ -432,50 +432,39 @@ async function processInboxMessage(inboxId, log = logger) {
       }
 
       try {
-      let brain = null;
-      try {
-        brain = await getBusinessBrain(message.tenant_id);
-      } catch (brainError) {
-        log.error(
-          { error: brainError.message, tenantId: message.tenant_id, inboxId: message.id },
-          "Failed to load Business Brain, falling back to default",
-        );
-      }
-
-
-      const signal = await analyzeCustomerMessage(message.body, brain);
-      try {
-        await recordAiSignal(message.tenant_id, persistedInbound.conversationId, persistedInbound.messageId, signal);
-      } catch (signalError) {
-        log.warn({ error: signalError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to persist AI signal");
-      }
-      let memories = [];
-      if (persistedInbound.contactId) {
+        let brain = null;
         try {
-          memories = await getCustomerMemory(message.tenant_id, persistedInbound.contactId);
-        } catch (memoryError) {
-          log.warn({ error: memoryError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to load customer AI memory");
+          brain = await getBusinessBrain(message.tenant_id);
+        } catch (brainError) {
+          log.error(
+            { error: brainError.message, tenantId: message.tenant_id, inboxId: message.id },
+            "Failed to load Business Brain, falling back to default",
+          );
         }
-      }
-      const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
-      const aiBrain = brain ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") } : { customInstructions: advancedContext };
-      try {
+
+        const signal = await analyzeCustomerMessage(message.body, brain);
+        try {
+          await recordAiSignal(message.tenant_id, persistedInbound.conversationId, persistedInbound.messageId, signal);
+        } catch (signalError) {
+          log.warn({ error: signalError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to persist AI signal");
+        }
+
+        let memories = [];
+        if (persistedInbound.contactId) {
+          try {
+            memories = await getCustomerMemory(message.tenant_id, persistedInbound.contactId);
+          } catch (memoryError) {
+            log.warn({ error: memoryError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to load customer AI memory");
+          }
+        }
+
+        const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
+        const aiBrain = brain
+          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") }
+          : { customInstructions: advancedContext };
+
         reply = await generateGeminiReply(message.body, aiBrain);
         reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
-      } catch (aiError) {
-        // Failed generations must not consume the tenant's monthly AI quota;
-        // the durable-inbox retry will reserve again on its next attempt.
-        try {
-          await releaseAiUsage({
-            tenantId: message.tenant_id,
-            messageId: persistedInbound.messageId,
-            whatsappMessageId: message.whatsapp_message_id,
-          });
-        } catch (releaseError) {
-          log.warn({ error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to release reserved AI usage");
-        }
-        throw aiError;
-
       } catch (aiError) {
         // Any failure after reservation but before a successful durable AI response
         // must release the reservation. This includes context/signal/memory work,
@@ -487,7 +476,10 @@ async function processInboxMessage(inboxId, log = logger) {
             whatsappMessageId: message.whatsapp_message_id,
           });
         } catch (releaseError) {
-          log.warn({ error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id }, "Failed to release reserved AI usage");
+          log.warn(
+            { error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id },
+            "Failed to release reserved AI usage",
+          );
         }
         throw aiError;
       }
