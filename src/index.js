@@ -60,6 +60,7 @@ import { listConversations, getConversationMessages, updateConversation, markCon
 import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotPrompt, setUserSkills } from "./services/handoff.service.js";
 import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
 import { createAppointmentType, listAppointmentTypes, setBusinessHours, getBusinessHours, listAppointments, getAppointment, bookAppointment, updateAppointmentStatus, buildCalendarLinks, buildIcs } from "./services/appointment.service.js";
+import { startRetentionScheduler } from "./services/retention.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -1314,6 +1315,7 @@ async function startServer() {
     logger.info("WhatsApp queue worker started");
   }
 
+  const stopRetentionScheduler = startRetentionScheduler();
   if (isDatabaseConfigured()) startInboxRecovery();
 
   startupComplete = true;
@@ -1345,6 +1347,7 @@ async function startServer() {
         });
       });
 
+      stopRetentionScheduler?.();
       await closeQueue();
       await closeDatabaseConnection();
 
