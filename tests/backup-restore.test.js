@@ -16,3 +16,12 @@ test("restore utility refuses to proceed without explicit overwrite confirmation
   assert.match(source, /setAuthTag/);
   assert.match(source, /pg_restore/);
 });
+
+test("backup scripts do not pass DATABASE_URL directly to database CLI arguments", async () => {
+  const backup = await fs.readFile(new URL("../scripts/backup-db.js", import.meta.url), "utf8");
+  const restore = await fs.readFile(new URL("../scripts/restore-db.js", import.meta.url), "utf8");
+  assert.doesNotMatch(backup, /--dbname.*DATABASE_URL/);
+  assert.doesNotMatch(restore, /--dbname.*target/);
+  assert.match(backup, /PGPASSWORD/);
+  assert.match(restore, /PGPASSWORD/);
+});
