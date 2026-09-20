@@ -36,6 +36,22 @@ function runPgDump(outputPath) {
   });
 }
 
+async function pruneBackups(outputDir) {
+  const retentionDays = Number(process.env.BACKUP_RETENTION_DAYS || 30);
+  if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) throw new Error("BACKUP_RETENTION_DAYS must be between 1 and 3650");
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const entries = await fsp.readdir(outputDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".backup.enc")) continue;
+    const filePath = path.join(outputDir, entry.name);
+    const stat = await fsp.stat(filePath);
+    if (stat.mtimeMs < cutoff) {
+      await fsp.rm(filePath, { force: true });
+      await fsp.rm(`${filePath}.json`, { force: true });
+    }
+  }
+}
+
 async function createBackup() {
   const key = getKey();
   const outputDir = path.resolve(process.env.BACKUP_DIR || "./backups");
@@ -76,6 +92,7 @@ async function createBackup() {
       databaseDumpFormat: "postgres-custom",
     };
     await fsp.writeFile(`${finalPath}.json`, JSON.stringify(manifest, null, 2), { mode: 0o600 });
+    await pruneBackups(outputDir);
     console.log(JSON.stringify(manifest));
   } catch (error) {
     child.kill("SIGTERM");
