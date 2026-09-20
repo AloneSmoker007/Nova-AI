@@ -40,7 +40,7 @@ test("rejects illegal base64 characters in the encryption key", () => {
 
 test("rejects malformed base64 padding in the encryption key", () => {
   const valid = crypto.randomBytes(32).toString("base64").replace(/=+$/, "");
-  process.env.CREDENTIAL_ENCRYPTION_KEY = valid + "=";
+  process.env.CREDENTIAL_ENCRYPTION_KEY = valid + "==";
   assert.throws(
     () => encryptSecret("tenant-whatsapp-token"),
     /CREDENTIAL_ENCRYPTION_KEY must be 32-byte base64 or 64-character hex/,
