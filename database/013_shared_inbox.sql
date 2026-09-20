@@ -10,8 +10,8 @@ ALTER TABLE conversations
   ADD CONSTRAINT conversations_status_check
   CHECK (status IN ('active', 'paused', 'human', 'archived'));
 
-ALTER TABLE users
-  ADD CONSTRAINT uq_users_tenant_id UNIQUE (tenant_id, id);
+-- uq_users_tenant_id (users: tenant_id, id) is created by 007_tenant_scoped_integrity.sql;
+-- it must not be added again here.
 
 ALTER TABLE conversations
   ADD COLUMN IF NOT EXISTS assigned_user_id UUID,
@@ -26,7 +26,7 @@ ALTER TABLE conversations
   ADD CONSTRAINT fk_conversations_assigned_user
   FOREIGN KEY (tenant_id, assigned_user_id)
   REFERENCES users (tenant_id, id)
-  ON DELETE SET NULL;
+  ON DELETE SET NULL (assigned_user_id);
 
 CREATE INDEX IF NOT EXISTS idx_conversations_tenant_updated
   ON conversations (tenant_id, updated_at DESC);

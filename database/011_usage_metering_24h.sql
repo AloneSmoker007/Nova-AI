@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS conversation_windows (
   CONSTRAINT fk_conversation_windows_source_message
     FOREIGN KEY (tenant_id, source_message_id)
     REFERENCES messages (tenant_id, id)
-    ON DELETE SET NULL,
+    ON DELETE SET NULL (source_message_id),
   CONSTRAINT conversation_windows_times_valid
     CHECK (window_expires_at > window_started_at)
 );

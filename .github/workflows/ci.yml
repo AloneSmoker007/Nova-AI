@@ -36,3 +36,45 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  migrations:
+    name: Migration chain against PostgreSQL 15
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: nova
+          POSTGRES_PASSWORD: nova
+          POSTGRES_DB: nova_migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nova -d nova_migration_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    # tests/migration-postgres.test.js maps MIGRATION_TEST_DATABASE_URL onto
+    # DATABASE_URL before importing the migration runner, then applies the full
+    # chain to a fresh database and re-runs it to prove the second run is a no-op.
+    env:
+      MIGRATION_TEST_DATABASE_URL: postgres://nova:nova@127.0.0.1:5432/nova_migration_test
+      MIGRATION_TEST_ALLOW_RESET: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run database migration integration tests
+        run: node --test tests/migration-postgres.test.js

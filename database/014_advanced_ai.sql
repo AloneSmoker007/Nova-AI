@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS conversation_ai_signals (
   CONSTRAINT fk_conversation_ai_signals_message
     FOREIGN KEY (tenant_id, message_id)
     REFERENCES messages (tenant_id, id)
-    ON DELETE SET NULL
+    ON DELETE SET NULL (message_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversation_ai_signals_lookup

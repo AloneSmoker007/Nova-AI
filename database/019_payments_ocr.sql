@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS ocr_documents (
   created_by UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, id),
-  FOREIGN KEY (tenant_id, created_by) REFERENCES users(tenant_id, id) ON DELETE SET NULL
+  FOREIGN KEY (tenant_id, created_by) REFERENCES users(tenant_id, id) ON DELETE SET NULL (created_by)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ocr_documents_tenant_created
