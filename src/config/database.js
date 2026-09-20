@@ -59,7 +59,7 @@ export function isDatabaseConfigured() {
   return Boolean(dbPool);
 }
 
-export async function checkDatabaseConnection() {
+export async function checkDatabaseReadiness() {
   if (!dbPool) {
     return { configured: false, connected: false };
   }
@@ -71,6 +71,8 @@ export async function checkDatabaseConnection() {
     connected: result.rows[0]?.ok === 1,
   };
 }
+
+export const checkDatabaseConnection = checkDatabaseReadiness;
 
 export async function closeDatabaseConnection() {
   if (dbPool) {

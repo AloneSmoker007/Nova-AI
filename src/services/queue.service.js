@@ -32,6 +32,27 @@ export function isQueueConfigured() {
   return Boolean(process.env.REDIS_URL);
 }
 
+export async function checkRedisConnection() {
+  if (!isQueueConfigured()) {
+    return { configured: false, connected: false };
+  }
+
+  const redis = getConnection();
+  if (!redis) {
+    return { configured: true, connected: false };
+  }
+
+  try {
+    await Promise.race([
+      redis.ping(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Redis readiness timeout")), 3000)),
+    ]);
+    return { configured: true, connected: true };
+  } catch {
+    return { configured: true, connected: false };
+  }
+}
+
 function validateInboxId(inboxId) {
   return typeof inboxId === "string" && inboxId.trim() !== "";
 }

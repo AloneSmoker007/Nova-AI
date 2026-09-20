@@ -6,7 +6,7 @@ import compression from "compression";
 import rateLimit from "express-rate-limit";
 import Joi from "joi";
 
-import { checkDatabaseConnection, closeDatabaseConnection, isDatabaseConfigured, dbPool } from "./config/database.js";
+import { checkDatabaseReadiness, closeDatabaseConnection, isDatabaseConfigured, dbPool } from "./config/database.js";
 import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateGeminiReply } from "./services/gemini.service.js";
@@ -26,6 +26,7 @@ import {
   isQueueConfigured,
   startWorker,
   closeQueue,
+  checkRedisConnection,
 } from "./services/queue.service.js";
 import {
   ingestWebhookMessage,
@@ -66,6 +67,7 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PRODUCTION = NODE_ENV === "production";
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const META_APP_SECRET = process.env.META_APP_SECRET;
+let startupComplete = false;
 
 const REQUIRED_ENV_VARS = [
   "GEMINI_API_KEY",
@@ -113,7 +115,11 @@ app.get("/health", (req, res) => res.status(200).json({ status: "ok", service: "
 
 app.get("/ready", async (req, res) => {
   try {
-    const database = await checkDatabaseConnection();
+    if (!startupComplete) {
+      return res.status(503).json({ status: "not_ready", service: "Nova-AI", startup: "starting" });
+    }
+
+    const database = await checkDatabaseReadiness();
     if (!database.configured) {
       return res.status(IS_PRODUCTION ? 503 : 200).json({
         status: IS_PRODUCTION ? "not_ready" : "ready",
@@ -121,11 +127,24 @@ app.get("/ready", async (req, res) => {
         database: "not_configured",
       });
     }
-    if (!database.connected) return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "disconnected" });
-    return res.status(200).json({ status: "ready", service: "Nova-AI", database: "connected" });
+    if (!database.connected) {
+      return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "disconnected" });
+    }
+
+    const redis = await checkRedisConnection();
+    if (redis.configured && !redis.connected) {
+      return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "connected", redis: "disconnected" });
+    }
+
+    return res.status(200).json({
+      status: "ready",
+      service: "Nova-AI",
+      database: "connected",
+      ...(redis.configured ? { redis: "connected" } : {}),
+    });
   } catch (error) {
     req.log.error({ error: error.message }, "Readiness check failed");
-    return res.status(503).json({ status: "not_ready", service: "Nova-AI", database: "error" });
+    return res.status(503).json({ status: "not_ready", service: "Nova-AI", dependency: "error" });
   }
 });
 
@@ -736,10 +755,10 @@ async function recoverPendingDeliveries() {
 }
 
 async function dispatchPendingInboxMessages() {
-  if (recoveryPassRunning) return;
-  recoveryPassRunning = true;
+  if (recoveryPassPromise) return recoveryPassPromise;
 
-  try {
+  recoveryPassPromise = (async () => {
+    try {
     await recoverExpiredLeases();
     await recoverPendingDeliveries();
     await scheduleInactivityTriggers(100);
@@ -771,15 +790,20 @@ async function dispatchPendingInboxMessages() {
         );
       }
     }
-  } catch (error) {
-    logger.error({ error: error.message }, "Durable inbox recovery pass failed");
+    } catch (error) {
+      logger.error({ error: error.message }, "Durable inbox recovery pass failed");
+    }
+  })();
+
+  try {
+    return await recoveryPassPromise;
   } finally {
-    recoveryPassRunning = false;
+    recoveryPassPromise = null;
   }
 }
 
 let recoveryTimer = null;
-let recoveryPassRunning = false;
+let recoveryPassPromise = null;
 
 function startInboxRecovery() {
   if (recoveryTimer) return;
@@ -794,6 +818,9 @@ async function stopInboxRecovery() {
   if (recoveryTimer) {
     clearInterval(recoveryTimer);
     recoveryTimer = null;
+  }
+  if (recoveryPassPromise) {
+    await recoveryPassPromise;
   }
 }
 
@@ -1274,6 +1301,10 @@ async function startServer() {
   }
 
   const server = app.listen(PORT, () => logger.info(`Nova-AI server running on port ${PORT} [${NODE_ENV}]`));
+  server.on("error", (error) => {
+    logger.fatal({ error: error.message, code: error.code }, "HTTP server error — shutting down");
+    process.exit(1);
+  });
 
   if (isQueueConfigured()) {
     startWorker(async (jobData) => {
@@ -1285,40 +1316,59 @@ async function startServer() {
 
   if (isDatabaseConfigured()) startInboxRecovery();
 
+  startupComplete = true;
+  logger.info("Nova-AI startup completed");
+
   let shuttingDown = false;
   async function shutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
+    startupComplete = false;
     logger.info(`Received ${signal}, shutting down gracefully`);
-    await stopInboxRecovery();
-    server.close(async (error) => {
-      if (error) {
-        logger.error({ error: error.message }, "Server shutdown error");
-        process.exit(1);
-      }
-      try {
-        await closeQueue();
-        await closeDatabaseConnection();
-        logger.info("Nova-AI server closed successfully");
-        process.exit(0);
-      } catch (shutdownError) {
-        logger.error({ error: shutdownError.message }, "Graceful shutdown error");
-        process.exit(1);
-      }
-    });
-    setTimeout(() => { logger.error("Forced shutdown after 10 seconds"); process.exit(1); }, 10_000).unref();
+
+    const forceTimer = setTimeout(() => {
+      logger.error("Forced shutdown after 10 seconds");
+      process.exit(1);
+    }, 10_000);
+    forceTimer.unref();
+
+    try {
+      // Stop new recovery work first, then wait for any active recovery pass.
+      await stopInboxRecovery();
+
+      // Stop accepting HTTP traffic and wait for in-flight requests before
+      // closing Redis/BullMQ and PostgreSQL.
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+
+      await closeQueue();
+      await closeDatabaseConnection();
+
+      clearTimeout(forceTimer);
+      logger.info("Nova-AI server closed successfully");
+      process.exit(0);
+    } catch (shutdownError) {
+      clearTimeout(forceTimer);
+      logger.error({ error: shutdownError.message }, "Graceful shutdown error");
+      process.exit(1);
+    }
   }
 
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
 
-  // A crash must not silently skip graceful shutdown. Both handlers log the
-  // failure and exit; after an uncaught error the process is not safe to
-  // continue, so they do not attempt recovery.
   process.on("uncaughtException", (error) => {
-    logger.error({ error: error.message, stack: error.stack }, "Uncaught exception — shutting down");
+    logger.fatal(
+      { error: error.message, stack: error.stack },
+      "Uncaught exception — shutting down",
+    );
     process.exit(1);
   });
+
   process.on("unhandledRejection", (reason) => {
     const message =
       reason?.message != null
@@ -1326,11 +1376,10 @@ async function startServer() {
         : reason instanceof Error
           ? reason.toString()
           : String(reason);
-    logger.error({ reason: message }, "Unhandled promise rejection — shutting down");
+    logger.fatal({ reason: message }, "Unhandled promise rejection — shutting down");
     process.exit(1);
   });
 }
-
 startServer().catch((error) => {
   logger.fatal({ error: error.message }, "Nova-AI failed to start");
   process.exit(1);
