@@ -15,6 +15,8 @@ test("restore utility refuses to proceed without explicit overwrite confirmation
   assert.match(source, /RESTORE_ALLOW_OVERWRITE !== "YES"/);
   assert.match(source, /setAuthTag/);
   assert.match(source, /pg_restore/);
+  assert.match(source, /--single-transaction/);
+  assert.match(source, /--exit-on-error/);
 });
 
 test("backup scripts do not pass DATABASE_URL directly to database CLI arguments", async () => {
