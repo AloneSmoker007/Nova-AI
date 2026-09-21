@@ -19,6 +19,7 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
   let runMigrations = null;
   let compareMigrationFilenames = null;
   let dbPool = null;
+  let resolveTenantByPhoneNumberId = null;
   let expectedFilenames = [];
 
   before(async () => {
@@ -29,6 +30,7 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
       "../src/database/migrate.js"
     ));
     ({ dbPool } = await import("../src/config/database.js"));
+    ({ resolveTenantByPhoneNumberId } = await import("../src/services/tenant.service.js"));
 
     assert.ok(dbPool, "dbPool must be configured from MIGRATION_TEST_DATABASE_URL");
 
@@ -155,6 +157,11 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
       "INSERT INTO whatsapp_numbers (id, tenant_id, phone_number_id) VALUES ($1, $2, $3)",
       [numberId, tenantId, "1234567890"],
     );
+    const resolvedTenant = await resolveTenantByPhoneNumberId("1234567890");
+    assert.equal(resolvedTenant?.tenantId, tenantId);
+    assert.equal(resolvedTenant?.whatsappNumberId, numberId);
+    assert.equal(resolvedTenant?.phoneNumberId, "1234567890");
+
     await dbPool.query("INSERT INTO contacts (id, tenant_id, wa_id) VALUES ($1, $2, $3)", [
       contactId,
       tenantId,
