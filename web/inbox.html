@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Nova AI X2.0 Inbox">
+<title>Nova AI — Inbox</title>
+<link rel="stylesheet" href="./styles.css">
+<link rel="stylesheet" href="./inbox.css">
+</head>
+<body>
+<div class="app-shell">
+<aside class="sidebar" aria-label="Nova navigation">
+<div class="brand"><div class="brand-mark">N</div><div><strong>Nova</strong><span>AI Workspace</span></div></div>
+<nav>
+<a class="nav-item" href="./index.html">⌂ <span>Dashboard</span></a>
+<a class="nav-item active" href="./inbox.html">◈ <span>Inbox</span><b>12</b></a>
+<a class="nav-item" href="#customers">◎ <span>Customers</span></a>
+<a class="nav-item" href="#assistant">✦ <span>AI Assistant</span></a>
+<a class="nav-item" href="#appointments">□ <span>Appointments</span></a>
+<a class="nav-item" href="#payments">◇ <span>Payments</span></a>
+<a class="nav-item" href="#automations">↻ <span>Automations</span></a>
+<a class="nav-item" href="#analytics">⌁ <span>Analytics</span></a>
+</nav>
+<div class="sidebar-bottom"><a class="nav-item" href="#settings">⚙ <span>Settings</span></a><div class="health"><i></i><span><strong>Nova Online</strong><small>All systems healthy</small></span></div></div>
+</aside>
+<main class="main inbox-main">
+<header class="topbar"><div><button class="mobile-menu" aria-label="Open navigation">☰</button><span class="crumb">Workspace / Inbox</span></div><div class="top-actions"><button class="icon-btn" aria-label="Search">⌕</button><button class="icon-btn" aria-label="Notifications">♢</button><button class="avatar" aria-label="Profile">B</button></div></header>
+<section class="inbox-shell">
+<div class="inbox-toolbar"><div><p class="eyebrow">WHATSAPP INBOX</p><h1>Conversations</h1></div><div class="inbox-actions"><button class="filter active">All <b>24</b></button><button class="filter">Unread <b>12</b></button><button class="filter">Needs reply <b>7</b></button><button class="new-chat">＋ New conversation</button></div></div>
+<div class="inbox-grid">
+<section class="conversation-list panel">
+<div class="search-box"><span>⌕</span><input aria-label="Search conversations" placeholder="Search conversations"></div>
+<div class="list-filters"><button class="chip active">All</button><button class="chip">Leads</button><button class="chip">Follow-up</button><button class="chip">AI</button></div>
+<div class="conversations">
+<button class="conversation active"><span class="contact-avatar">A</span><span class="conversation-copy"><strong>Ahmed Khan</strong><small>Nova: I can help you with...</small></span><span class="conversation-meta"><time>2m</time><i class="unread"></i></span></button>
+<button class="conversation"><span class="contact-avatar violet">S</span><span class="conversation-copy"><strong>Sarah Malik</strong><small>Can I book an appointment?</small></span><span class="conversation-meta"><time>18m</time><i class="unread"></i></span></button>
+<button class="conversation"><span class="contact-avatar cyan">U</span><span class="conversation-copy"><strong>Usman Ali</strong><small>Thanks, I will confirm tomorrow.</small></span><span class="conversation-meta"><time>1h</time></span></button>
+<button class="conversation"><span class="contact-avatar amber">M</span><span class="conversation-copy"><strong>Mariam</strong><small>Payment screenshot received.</small></span><span class="conversation-meta"><time>2h</time><i class="unread"></i></span></button>
+</div>
+</section>
+<section class="chat panel">
+<div class="chat-head"><div class="contact-head"><span class="contact-avatar">A</span><div><strong>Ahmed Khan</strong><small>WhatsApp · Active now</small></div></div><div class="chat-head-actions"><button>☆</button><button>⋯</button></div></div>
+<div class="chat-body">
+<div class="date-divider">Today</div>
+<div class="bubble customer">Assalam o Alaikum, mujhe appointment ke bare mein details chahiye.<time>10:42 AM</time></div>
+<div class="bubble ai">Wa Alaikum Assalam! Bilkul. Main aap ko available appointment options aur timing share kar deta hoon.<time>10:42 AM · Nova AI</time></div>
+<div class="bubble customer">Friday ko evening mein koi slot available hai?</div>
+<div class="bubble ai draft">Nova draft: Friday evening ke available slots check karke customer ko options bhej sakti hoon.<time>10:43 AM · Draft</time></div>
+</div>
+<div class="composer"><button aria-label="Attach">＋</button><input aria-label="Message" placeholder="Write a message or ask Nova…"><button class="ask-nova">✦ Ask Nova</button><button class="send">➤</button></div>
+</section>
+<aside class="customer-panel panel">
+<div class="customer-head"><span class="profile-avatar">A</span><div><h2>Ahmed Khan</h2><p>+92 ••• ••• 214</p></div><button>⋯</button></div>
+<div class="status-row"><span class="status-dot"></span> Active customer <span class="tag">Lead</span></div>
+<div class="side-section"><div class="side-title">Nova Memory <button>Edit</button></div><p>Interested in an evening appointment and prefers concise replies.</p><p>Last appointment inquiry: today.</p></div>
+<div class="side-section"><div class="side-title">AI Signals</div><div class="signal"><span>🔥</span><div><strong>High intent</strong><small>Asked for a specific time slot.</small></div></div><div class="signal"><span>📅</span><div><strong>Appointment opportunity</strong><small>Ready for availability check.</small></div></div></div>
+<div class="side-section"><div class="side-title">Quick actions</div><button class="side-action">📅 Create appointment</button><button class="side-action">🧠 Save memory</button><button class="side-action">⏰ Schedule follow-up</button><button class="side-action">👤 Take over as human</button></div>
+</aside>
+</div>
+</section>
+</main>
+</div>
+<script src="./inbox.js"></script>
+</body>
+</html>
