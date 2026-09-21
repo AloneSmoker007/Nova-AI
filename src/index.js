@@ -61,6 +61,9 @@ import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversa
 import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
 import { createAppointmentType, listAppointmentTypes, setBusinessHours, getBusinessHours, listAppointments, getAppointment, bookAppointment, updateAppointmentStatus, buildCalendarLinks, buildIcs } from "./services/appointment.service.js";
 import { startRetentionScheduler } from "./services/retention.service.js";
+import { getDashboardSummary } from "./services/dashboard.service.js";
+import { listContacts } from "./services/contact.service.js";
+import { listPayments } from "./services/payment.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -878,6 +881,21 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
   } catch {
     return res.status(401).json({ status: "error", error: "Invalid or expired token" });
   }
+});
+
+app.get("/api/dashboard/summary", requireAuth, async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await getDashboardSummary(req.user.tenantId) }); }
+  catch (error) { return next(error); }
+});
+
+app.get("/api/contacts", requireAuth, async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await listContacts(req.user.tenantId, { search: req.query.search, limit: req.query.limit, offset: req.query.offset }) }); }
+  catch (error) { return next(error); }
+});
+
+app.get("/api/payments", requireAuth, async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await listPayments(req.user.tenantId, { status: req.query.status, limit: req.query.limit, offset: req.query.offset }) }); }
+  catch (error) { return next(error); }
 });
 
 app.get("/api/usage", requireAuth, async (req, res) => {
