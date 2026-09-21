@@ -45,7 +45,7 @@ export async function bookAppointment({tenantId,appointmentTypeId,startsAt,custo
     const r=await c.query("INSERT INTO appointments (tenant_id,appointment_type_id,contact_id,conversation_id,customer_name,customer_phone,customer_email,starts_at,ends_at,timezone,notes,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",[tenantId,appointmentTypeId,contactId,conversationId,customerName,customerPhone,customerEmail,start,end,zone,typeof notes==="string"?notes.slice(0,4000):null,createdBy]);
     await c.query("COMMIT"); return r.rows[0];
   } catch(e){
-    try { await c.query("ROLLBACK"); } catch (rollbackError) { e.rollbackError = rollbackError; }
+    try { await c.query("ROLLBACK"); } catch { /* preserve the original booking error */ }
     if(e.code==="23P01" || e.code==="23505") throw new Error("Appointment time is already booked");
     throw e;
   } finally { c.release(); }
