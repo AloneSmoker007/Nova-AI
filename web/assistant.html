@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Nova AI X2.0 Assistant and Command Center">
+<title>Nova AI — Assistant</title>
+<link rel="stylesheet" href="./styles.css">
+<link rel="stylesheet" href="./assistant.css">
+</head>
+<body>
+<div class="app-shell">
+<aside class="sidebar" aria-label="Nova navigation">
+<div class="brand"><div class="brand-mark">N</div><div><strong>Nova</strong><span>AI Workspace</span></div></div>
+<nav>
+<a class="nav-item" href="./index.html">⌂ <span>Dashboard</span></a>
+<a class="nav-item" href="./inbox.html">◈ <span>Inbox</span><b>12</b></a>
+<a class="nav-item" href="./customers.html">◎ <span>Customers</span></a>
+<a class="nav-item active" href="./assistant.html" aria-current="page">✦ <span>AI Assistant</span></a>
+<a class="nav-item" href="#appointments">□ <span>Appointments</span></a>
+<a class="nav-item" href="#payments">◇ <span>Payments</span></a>
+<a class="nav-item" href="#automations">↻ <span>Automations</span></a>
+<a class="nav-item" href="#analytics">⌁ <span>Analytics</span></a>
+</nav>
+<div class="sidebar-bottom"><a class="nav-item" href="#settings">⚙ <span>Settings</span></a><div class="health"><i></i><span><strong>Nova Online</strong><small>All systems healthy</small></span></div></div>
+</aside>
+<main class="main">
+<header class="topbar"><div><button class="mobile-menu" aria-label="Open navigation">☰</button><span class="crumb">Workspace / AI Assistant</span></div><div class="top-actions"><button class="icon-btn" aria-label="Open Command Center" id="command-button">⌘</button><button class="icon-btn" aria-label="Notifications">♢</button><button class="avatar" aria-label="Profile">B</button></div></header>
+<section class="assistant">
+<div class="assistant-hero">
+<div><p class="eyebrow">NOVA COMMAND CENTER</p><h1>What can I help you with?</h1><p class="muted">Ask Nova about your business, customers and supported workspace actions.</p></div>
+<div class="robo-mini" aria-label="Nova Robo ready"><span class="robo-eye"></span><span class="robo-eye"></span><span class="robo-mouth"></span></div>
+</div>
+<div class="assistant-grid">
+<section class="panel assistant-chat" aria-label="Nova conversation">
+<div class="chat-head"><div class="contact-head"><div class="nova-avatar">✦</div><div><strong>Nova</strong><small id="nova-status">Ready · Workspace context available</small></div></div><span class="secure">● Secure</span></div>
+<div class="assistant-messages" id="assistant-messages" aria-live="polite">
+<div class="nova-message"><span class="message-label">Nova</span><p>Hi Bilal. I can help you understand what needs attention and prepare supported actions. I’ll always show a preview before an action that changes business data.</p><time>Now</time></div>
+</div>
+<form class="assistant-composer" id="assistant-form">
+<label class="sr-only" for="assistant-input">Ask Nova</label>
+<textarea id="assistant-input" rows="2" maxlength="2000" placeholder="Ask Nova… e.g. “What needs my attention today?”" autocomplete="off"></textarea>
+<div class="composer-footer"><span>Read-only questions can be answered directly. Impactful actions require confirmation.</span><button class="primary" type="submit">Ask Nova <span>↗</span></button></div>
+</form>
+</section>
+<aside class="assistant-side">
+<section class="panel suggestions"><div class="panel-head"><div><p class="eyebrow">QUICK PROMPTS</p><h2>Start with Nova</h2></div></div>
+<button class="suggestion" data-prompt="What needs my attention today?"><span>◉</span><div><strong>Daily briefing</strong><small>Priorities, follow-ups and important activity</small></div><b>→</b></button>
+<button class="suggestion" data-prompt="Show me customers who need follow-up."><span>↗</span><div><strong>Follow-ups</strong><small>Find conversations that need attention</small></div><b>→</b></button>
+<button class="suggestion" data-prompt="Summarize my recent customer activity."><span>≡</span><div><strong>Customer activity</strong><small>Get a concise workspace summary</small></div><b>→</b></button>
+</section>
+<section class="panel permissions"><div class="panel-head"><div><p class="eyebrow">CONTROL MODEL</p><h2>Nova permissions</h2></div></div>
+<div class="permission"><span class="permission-dot safe"></span><div><strong>Safe actions</strong><small>Read data and change UI preferences automatically.</small></div></div>
+<div class="permission"><span class="permission-dot confirm"></span><div><strong>Business actions</strong><small>Preview + confirmation before changes or sends.</small></div></div>
+<div class="permission"><span class="permission-dot critical"></span><div><strong>Critical actions</strong><small>Explicit confirmation and stronger safeguards.</small></div></div>
+</section>
+<section class="panel activity"><div class="panel-head"><div><p class="eyebrow">ACTIVITY</p><h2>Recent Nova actions</h2></div></div><div id="activity-list"><p class="empty">No actions performed in this session.</p></div></section>
+</aside>
+</div>
+</section>
+</main>
+</div>
+<div class="command-overlay" id="command-overlay" hidden>
+<div class="command-backdrop" data-close-command></div>
+<section class="command-modal" role="dialog" aria-modal="true" aria-labelledby="command-title">
+<div class="command-modal-head"><div><p class="eyebrow">COMMAND CENTER</p><h2 id="command-title">Jump anywhere</h2></div><button class="icon-btn" data-close-command aria-label="Close Command Center">×</button></div>
+<label class="command-search"><span>⌕</span><input id="command-input" autocomplete="off" placeholder="Search or ask Nova…"><kbd>ESC</kbd></label>
+<div class="command-results" id="command-results">
+<button data-command="Ask Nova" data-target="./assistant.html"><span>✦</span><div><strong>Ask Nova</strong><small>Open the AI Assistant</small></div><kbd>↵</kbd></button>
+<button data-command="Inbox" data-target="./inbox.html"><span>◈</span><div><strong>Inbox</strong><small>Open WhatsApp conversations</small></div><kbd>↵</kbd></button>
+<button data-command="Customers" data-target="./customers.html"><span>◎</span><div><strong>Customers</strong><small>Open customer memory</small></div><kbd>↵</kbd></button>
+</div>
+<p class="command-hint">Ctrl/⌘ K to open · Esc to close · Enter to select</p>
+</section>
+</div>
+<script src="./assistant.js"></script>
+</body>
+</html>
