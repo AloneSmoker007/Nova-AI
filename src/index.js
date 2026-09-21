@@ -64,6 +64,7 @@ import { startRetentionScheduler } from "./services/retention.service.js";
 import { getDashboardSummary } from "./services/dashboard.service.js";
 import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
+import { registerTask16Routes } from "./task16.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -483,7 +484,7 @@ async function processInboxMessage(inboxId, log = logger) {
 
         const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
         const aiBrain = brain
-          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") }
+          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\n\n") }
           : { customInstructions: advancedContext };
 
         reply = await generateGeminiReply(message.body, aiBrain);
@@ -1293,6 +1294,9 @@ app.put("/api/business-brain", requireAuth, requireRole("owner", "admin"), async
 });
 
 const geminiTestSchema = Joi.object({ message: Joi.string().trim().min(1).max(4000).required() });
+
+// Register payment/OCR routes before the terminal 404 handler.
+registerTask16Routes(app);
 if (!IS_PRODUCTION) {
   app.post("/api/test/gemini", async (req, res, next) => {
     try {
