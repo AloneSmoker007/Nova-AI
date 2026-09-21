@@ -1074,7 +1074,7 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
       const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
       const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
         ...(brain || {}),
-        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\\n\\n"),
+        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\n\n"),
       });
       saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
     } catch (error) {
