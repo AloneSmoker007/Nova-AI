@@ -26,10 +26,8 @@ export async function resolveTenantByPhoneNumberId(phoneNumberId) {
         wn.phone_number_id,
         wn.access_token_encrypted,
         wn.display_name,
-        wn.phone_number,
         wn.status AS whatsapp_status,
         t.name AS tenant_name,
-        t.slug AS tenant_slug,
         t.status AS tenant_status
       FROM whatsapp_numbers AS wn
       INNER JOIN tenants AS t
@@ -53,12 +51,10 @@ export async function resolveTenantByPhoneNumberId(phoneNumberId) {
   return {
     tenantId: row.tenant_id,
     tenantName: row.tenant_name,
-    tenantSlug: row.tenant_slug,
     whatsappNumberId: row.whatsapp_number_id,
     phoneNumberId: row.phone_number_id,
     accessTokenEncrypted: row.access_token_encrypted,
     displayName: row.display_name,
-    phoneNumber: row.phone_number,
   };
 }
 
