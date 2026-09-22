@@ -208,7 +208,7 @@ ${String(additionalSystemContext).slice(0, MAX_CONTEXT_LENGTH)}`
       model: MODEL,
       contents,
       config: {
-        systemInstruction,
+        systemInstruction: systemInstructionWithContext,
         abortSignal: controller.signal,
       },
     });
