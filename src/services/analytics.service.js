@@ -11,7 +11,7 @@ export async function getAnalytics(tenant, {days:range=30}={}) {
    (SELECT COUNT(*) FROM conversations WHERE tenant_id=$1 AND created_at >= $2)::int AS conversations,
    (SELECT COUNT(*) FROM messages WHERE tenant_id=$1 AND direction='inbound' AND created_at >= $2)::int AS inbound_messages,
    (SELECT COUNT(*) FROM messages WHERE tenant_id=$1 AND direction='outbound' AND created_at >= $2)::int AS outbound_messages,
-   (SELECT COALESCE(SUM(units),0) FROM usage_events WHERE tenant_id=$1 AND event_type IN ('ai_message','copilot_draft','ocr_document') AND created_at >= $2)::int AS ai_usage,
+   (SELECT COALESCE(SUM(units),0) FROM usage_events WHERE tenant_id=$1 AND event_type IN ('ai_message','copilot_draft','ocr_document','assistant_query') AND created_at >= $2)::int AS ai_usage,
    (SELECT COUNT(*) FROM appointments WHERE tenant_id=$1 AND status IN ('pending','confirmed') AND starts_at >= $2)::int AS appointments,
    (SELECT COUNT(*) FROM appointments WHERE tenant_id=$1 AND status='completed' AND starts_at >= $2)::int AS completed_appointments,
    (SELECT COALESCE(SUM(amount_minor),0) FROM payments WHERE tenant_id=$1 AND status='paid' AND created_at >= $2)::bigint AS revenue_minor`,[t,start]),
