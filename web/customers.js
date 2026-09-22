@@ -11,7 +11,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const brain = document.querySelector(".brain");
     if (!brain) return;
     try {
-      const result = await NovaAPI.request(`/api/contacts/${encodeURIComponent(contact.id)}/ai-memory`);
+      const result = await window.NovaAPI.request(`/api/contacts/${encodeURIComponent(contact.id)}/ai-memory`);
       const memories = Array.isArray(result.data) ? result.data : [];
       const section = brain.querySelector(".memory-section");
       if (section) {
@@ -22,7 +22,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (heading) heading.textContent = contact.display_name || contact.wa_id;
       const phone = profile?.querySelector("p");
       if (phone) phone.textContent = contact.wa_id || "—";
-    } catch {}
+    } catch {
+      const section = brain.querySelector(".memory-section");
+      if (section) section.insertAdjacentHTML("beforeend", '<p class="muted">Memory unavailable.</p>');
+    }
   }
   function render() {
     const q = String(search?.value || "").trim().toLowerCase();
