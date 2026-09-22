@@ -2,8 +2,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   const list = document.querySelector(".conversations");
   const search = document.querySelector(".search-input, .search-box input, input[placeholder*='Search']");
   const chat = document.querySelector(".chat");
-  const empty = document.createElement("p");
-  empty.className = "muted";
   let conversations = [];
 
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
@@ -24,20 +22,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!item || !chat) return;
     list.querySelectorAll(".conversation").forEach((x) => x.classList.toggle("active", x.dataset.id === id));
     try {
-      const result = await NovaAPI.request(`/api/conversations/${encodeURIComponent(id)}/messages?limit=100`);
+      const result = await window.NovaAPI.request(`/api/conversations/${encodeURIComponent(id)}/messages?limit=100`);
       const messages = Array.isArray(result.data) ? [...result.data].reverse() : [];
       const title = chat.querySelector("h2, h3, .chat-title");
       if (title) title.textContent = item.display_name || item.wa_id;
       const body = chat.querySelector(".messages, .chat-messages, .message-list");
       if (body) body.innerHTML = messages.length ? messages.map((m) => `<div class="message ${m.direction === "outbound" ? "outbound" : "inbound"}"><p>${escape(m.text || "")}</p><small>${escape(m.status || "")} · ${new Date(m.created_at).toLocaleString()}</small></div>`).join("") : '<p class="muted">No messages yet.</p>';
-      await NovaAPI.request(`/api/conversations/${encodeURIComponent(id)}/read`, { method: "POST" }).catch(() => {});
+      await window.NovaAPI.request(`/api/conversations/${encodeURIComponent(id)}/read`, { method: "POST" }).catch(() => {});
     } catch {
       if (chat) chat.setAttribute("data-load-error", "true");
     }
   }
   if (!window.NovaAPI || !list) return;
   try {
-    const result = await NovaAPI.request("/api/conversations?limit=100");
+    const result = await window.NovaAPI.request("/api/conversations?limit=100");
     conversations = Array.isArray(result.data) ? result.data : [];
     renderList();
     if (conversations[0]) await openConversation(conversations[0].id);
