@@ -1,7 +1,6 @@
 document.addEventListener("DOMContentLoaded", async () => {
   const list = document.querySelector(".customer-list");
   if (!window.NovaAPI || !list) return;
-  const rowsContainer = list;
   const search = list.querySelector("input");
   let contacts = [];
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
