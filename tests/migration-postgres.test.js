@@ -20,6 +20,8 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
   let compareMigrationFilenames = null;
   let dbPool = null;
   let resolveTenantByPhoneNumberId = null;
+  let issueRefreshToken = null;
+  let rotateRefreshToken = null;
   let expectedFilenames = [];
 
   before(async () => {
@@ -31,6 +33,7 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
     ));
     ({ dbPool } = await import("../src/config/database.js"));
     ({ resolveTenantByPhoneNumberId } = await import("../src/services/tenant.service.js"));
+    ({ issueRefreshToken, rotateRefreshToken } = await import("../src/services/refresh-token.service.js"));
 
     assert.ok(dbPool, "dbPool must be configured from MIGRATION_TEST_DATABASE_URL");
 
@@ -140,6 +143,45 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
       "017 must create the partial dispatch index",
     );
     assert.match(byName.get("idx_automation_runs_dispatch") ?? "", /next_run_at/);
+  });
+
+  it("rotates refresh tokens and revokes the full session family on reuse", async () => {
+    const tenantId = "66666666-6666-4666-8666-666666666666";
+    const userId = "77777777-7777-4777-8777-777777777777";
+
+    await dbPool.query("INSERT INTO tenants (id, name) VALUES ($1, $2)", [
+      tenantId,
+      "refresh-token-test",
+    ]);
+    await dbPool.query(
+      "INSERT INTO users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, $4, $5)",
+      [userId, tenantId, "refresh-token-test@example.com", "test-hash", "owner"],
+    );
+
+    const original = await issueRefreshToken(userId, tenantId);
+    const rotated = await rotateRefreshToken(original);
+
+    assert.ok(rotated?.refreshToken);
+    assert.equal(rotated.userId, userId);
+    assert.equal(rotated.tenantId, tenantId);
+    assert.notEqual(rotated.refreshToken, original);
+
+    const oldRow = await dbPool.query(
+      "SELECT revoked_at FROM refresh_tokens WHERE user_id = $1 AND tenant_id = $2 ORDER BY id ASC LIMIT 1",
+      [userId, tenantId],
+    );
+    assert.ok(oldRow.rows[0]?.revoked_at);
+
+    const reused = await rotateRefreshToken(original);
+    assert.equal(reused, null);
+
+    const activeRows = await dbPool.query(
+      "SELECT count(*)::int AS count FROM refresh_tokens WHERE user_id = $1 AND tenant_id = $2 AND revoked_at IS NULL",
+      [userId, tenantId],
+    );
+    assert.equal(activeRows.rows[0].count, 0);
+
+    await dbPool.query("DELETE FROM tenants WHERE id = $1", [tenantId]);
   });
 
   it("preserves tenant_id when a referenced conversation is deleted", async () => {
