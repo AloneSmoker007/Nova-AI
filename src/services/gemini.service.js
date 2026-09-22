@@ -180,7 +180,7 @@ export async function generateGeminiReply(message, businessBrain = null, additio
     throw new Error(`Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`);
   }
 
-  const baseInstruction = buildSystemInstruction(businessBrain);\n  const systemInstruction = additionalSystemContext\n    ? `${baseInstruction}\\n\\n## AUTHENTICATED WORKSPACE CONTEXT\\n${String(additionalSystemContext).slice(0, MAX_CONTEXT_LENGTH)}`\n    : baseInstruction;
+  const baseInstruction = buildSystemInstruction(businessBrain);\n  const systemInstruction = additionalSystemContext\n    ? `${baseInstruction}\n\n## AUTHENTICATED WORKSPACE CONTEXT\n${String(additionalSystemContext).slice(0, MAX_CONTEXT_LENGTH)}`\n    : baseInstruction;
   const contents = [
     {
       role: "user",
