@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mock } from "node:test";\nimport fs from "node:fs/promises";
+import { mock } from "node:test";
+import fs from "node:fs/promises";
 
 process.env.AUTOMATION_WEBHOOK_ALLOWLIST = "example.com";
 process.env.DATABASE_URL ||= "postgres://automation-test:automation-test@127.0.0.1:1/automation_test";
