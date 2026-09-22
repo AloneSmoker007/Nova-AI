@@ -1333,9 +1333,22 @@ registerTask16Routes(app);
 
 app.use((req, res) => res.status(404).json({ status: "error", message: "Route not found" }));
 app.use((error, req, res, next) => {
-  req.log?.error({ error: error.message }, "Unhandled application error");
+  req.log?.error({ error: error.message, code: error.code }, "Unhandled application error");
   if (res.headersSent) return next(error);
-  return res.status(500).json({ status: "error", message: IS_PRODUCTION ? "Internal server error" : error.message });
+
+  // Keep one stable machine-readable error field across unhandled failures.
+  // Preserve the legacy "message" field for existing X2 clients.
+  const statusCode = Number.isInteger(error?.statusCode)
+    ? error.statusCode
+    : error?.code === "23505" || error?.code === "23P01"
+      ? 409
+      : 500;
+  const publicMessage = IS_PRODUCTION ? "Internal server error" : error?.message || "Internal server error";
+  return res.status(statusCode).json({
+    status: "error",
+    error: publicMessage,
+    message: publicMessage,
+  });
 });
 
 async function startServer() {
