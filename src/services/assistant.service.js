@@ -22,7 +22,11 @@ export async function askNova({ tenantId, prompt }) {
     const reply = await generateGeminiReply(prompt.trim(), brain, workspaceContext);
     return { blocked: false, reply };
   } catch (error) {
-    await releaseAiUsage({ tenantId, eventKey: reservation.eventKey, type: "assistant_query" });
+    try {
+      await releaseAiUsage({ tenantId, eventKey: reservation.eventKey, type: "assistant_query" });
+    } catch {
+      // Preserve the original failure; the failed request must not be masked by cleanup.
+    }
     throw error;
   }
 }
