@@ -208,6 +208,30 @@ export async function scheduleInactivityTriggers(limit=100) {
   return created;
 }
 
+async function withRunHeartbeat(run, action) {
+  let stopped = false;
+  const beat = async () => {
+    if (stopped) return;
+    try {
+      await dbPool.query(
+        "UPDATE automation_runs SET updated_at=NOW() WHERE tenant_id=$1 AND id=$2 AND status='running'",
+        [run.tenant_id, run.id],
+      );
+    } catch {
+      // Execution continues; crash recovery remains the final safety net.
+    }
+  };
+  await beat();
+  const timer = setInterval(() => { void beat(); }, 30_000);
+  try {
+    return await action();
+  } finally {
+    stopped = true;
+    clearInterval(timer);
+    await beat();
+  }
+}
+
 export async function processDueWorkflowRuns(limit=20) {
   assertDb();
   const safe=Math.min(Math.max(Number(limit)||20,1),50);
@@ -252,12 +276,12 @@ export async function processDueWorkflowRuns(limit=20) {
         if(step.action==="condition"){ idx=condition(step,ctx)?step.if_true:step.if_false; continue; }
         if(step.action==="send_message"){
           const client=await dbPool.connect();
-          try { await executeSendMessage(client,run,step,idx); } finally { client.release(); }
+          try { await withRunHeartbeat(run, () => executeSendMessage(client,run,step,idx)); } finally { client.release(); }
         } else if(step.action==="add_tag"){
           const client=await dbPool.connect();
-          try { await executeTag(client,run,step); } finally { client.release(); }
+          try { await withRunHeartbeat(run, () => executeTag(client,run,step)); } finally { client.release(); }
         } else if(step.action==="webhook"){
-          await executeWebhook(step,run,ctx,idx);
+          await withRunHeartbeat(run, () => executeWebhook(step,run,ctx,idx));
         }
         idx++;
         await dbPool.query(
