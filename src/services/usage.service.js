@@ -23,7 +23,7 @@ export function aiUsageEventKey({ messageId, whatsappMessageId }) {
 // (monthly_ai_message_limit) under the existing hard_limit_enabled flag.
 // Distinct event types keep operations auditable without introducing new
 // billing plans; extending this list requires no schema migration.
-export const AI_EVENT_TYPES = ["ai_message", "copilot_draft", "ocr_document"];
+export const AI_EVENT_TYPES = ["ai_message", "copilot_draft", "ocr_document", "assistant_query"];
 
 function isAiEventType(type) {
   return AI_EVENT_TYPES.includes(type);
@@ -232,7 +232,7 @@ export async function reserveAiUsage({ tenantId, conversationId, messageId, what
   }
   // ocr_document carries no conversation/message context; both stay NULL.
 
-  const eventKey = aiUsageEventKeyForType(type, { messageId, whatsappMessageId });
+  const eventKey = type === "assistant_query" ? `assistant_query:${randomUUID()}` : aiUsageEventKeyForType(type, { messageId, whatsappMessageId });
   const client = await dbPool.connect();
 
   try {
