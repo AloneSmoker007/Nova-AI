@@ -64,6 +64,7 @@ import { startRetentionScheduler } from "./services/retention.service.js";
 import { getDashboardSummary } from "./services/dashboard.service.js";
 import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
+import { getAnalytics } from "./services/analytics.service.js";
 import { registerTask16Routes } from "./task16.routes.js";
 
 const app = express();
@@ -899,7 +900,7 @@ app.get("/api/payments", requireAuth, async (req, res, next) => {
   catch (error) { return next(error); }
 });
 
-app.get("/api/usage", requireAuth, async (req, res) => {
+app.get("/api/analytics", requireAuth, async (req, res, next) => {\n  try { return res.status(200).json({ status: "ok", data: await getAnalytics(req.user.tenantId, { days: req.query.days }) }); }\n  catch (error) { return next(error); }\n});\n\napp.get("/api/usage", requireAuth, async (req, res) => {
   try {
     const summary = await getUsageSummary(req.user.tenantId);
     return res.status(200).json({ status: "ok", data: summary });
