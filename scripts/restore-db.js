@@ -67,7 +67,7 @@ async function restore() {
     start: MAGIC.length + IV_LENGTH,
     end: stat.size - TAG_LENGTH - 1,
   });
-  const pgRestore = spawn("pg_restore", ["--no-owner", "--no-acl"], {
+  const pgRestore = spawn("pg_restore", ["--no-owner", "--no-acl", "--single-transaction", "--exit-on-error"], {
     env: postgresEnv(target),
     stdio: ["pipe", "ignore", "pipe"],
     windowsHide: true,

@@ -64,6 +64,9 @@ import { startRetentionScheduler } from "./services/retention.service.js";
 import { getDashboardSummary } from "./services/dashboard.service.js";
 import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
+import { getAnalytics } from "./services/analytics.service.js";
+import { registerTask16Routes } from "./task16.routes.js";
+import { askNova } from "./services/assistant.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -483,7 +486,7 @@ async function processInboxMessage(inboxId, log = logger) {
 
         const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
         const aiBrain = brain
-          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") }
+          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\n\n") }
           : { customInstructions: advancedContext };
 
         reply = await generateGeminiReply(message.body, aiBrain);
@@ -898,6 +901,15 @@ app.get("/api/payments", requireAuth, async (req, res, next) => {
   catch (error) { return next(error); }
 });
 
+
+app.get("/api/analytics", requireAuth, async (req, res, next) => {
+  try {
+    return res.status(200).json({ status: "ok", data: await getAnalytics(req.user.tenantId, { days: req.query.days }) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.get("/api/usage", requireAuth, async (req, res) => {
   try {
     const summary = await getUsageSummary(req.user.tenantId);
@@ -1073,7 +1085,7 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
       const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
       const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
         ...(brain || {}),
-        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\\n\\n"),
+        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\n\n"),
       });
       saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
     } catch (error) {
@@ -1270,6 +1282,17 @@ app.post("/api/ai/analyze", requireAuth, async (req, res, next) => {
   }
 });
 
+
+app.post("/api/assistant/ask", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const result = await askNova({ tenantId: req.user.tenantId, prompt: req.body?.prompt });
+    if (result.blocked) return res.status(429).json({ status: "error", error: "AI monthly limit reached", data: result });
+    return res.status(200).json({ status: "ok", data: result });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.get("/api/business-brain", requireAuth, async (req, res) => {
   try {
     const brain = await getBusinessBrain(req.user.tenantId);
@@ -1306,11 +1329,26 @@ if (!IS_PRODUCTION) {
   });
 }
 
+registerTask16Routes(app);
+
 app.use((req, res) => res.status(404).json({ status: "error", message: "Route not found" }));
 app.use((error, req, res, next) => {
-  req.log?.error({ error: error.message }, "Unhandled application error");
+  req.log?.error({ error: error.message, code: error.code }, "Unhandled application error");
   if (res.headersSent) return next(error);
-  return res.status(500).json({ status: "error", message: IS_PRODUCTION ? "Internal server error" : error.message });
+
+  // Keep one stable machine-readable error field across unhandled failures.
+  // Preserve the legacy "message" field for existing X2 clients.
+  const statusCode = Number.isInteger(error?.statusCode)
+    ? error.statusCode
+    : error?.code === "23505" || error?.code === "23P01"
+      ? 409
+      : 500;
+  const publicMessage = IS_PRODUCTION ? "Internal server error" : error?.message || "Internal server error";
+  return res.status(statusCode).json({
+    status: "error",
+    error: publicMessage,
+    message: publicMessage,
+  });
 });
 
 async function startServer() {

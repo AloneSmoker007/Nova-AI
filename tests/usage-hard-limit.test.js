@@ -221,7 +221,7 @@ test("usage gate and fallback never log message bodies or AI content", () => {
 test("every billable Gemini operation shares the existing monthly AI limit", () => {
   assert.deepEqual(
     [...usageService.AI_EVENT_TYPES].sort(),
-    ["ai_message", "copilot_draft", "ocr_document"],
+    ["ai_message", "assistant_query", "copilot_draft", "ocr_document"],
     "copilot and OCR must be billable AI event types",
   );
   const reserve = usageSource.slice(

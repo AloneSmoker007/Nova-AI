@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
+import fs from "node:fs/promises";
 
 process.env.AUTOMATION_WEBHOOK_ALLOWLIST = "example.com";
 process.env.DATABASE_URL ||= "postgres://automation-test:automation-test@127.0.0.1:1/automation_test";
@@ -234,4 +235,17 @@ test("rejects unsupported actions and invalid condition operators", () => {
     () => normalizeWorkflowDefinition({ steps: [{ action: "condition", field: "x", operator: "regex" }] }),
     /condition operator/,
   );
+});
+
+test("long-running automation actions keep their run heartbeat alive", async () => {
+  const source = await fs.readFile(
+    new URL("../src/services/automation.service.js", import.meta.url),
+    "utf8",
+  );
+  assert.ok(source.includes("async function withRunHeartbeat(run, action)"));
+  assert.ok(source.includes("setInterval(() => { void beat(); }, 30_000)"));
+  assert.ok(source.includes("withRunHeartbeat(run, () => executeSendMessage"));
+  assert.ok(source.includes("withRunHeartbeat(run, () => executeTag"));
+  assert.ok(source.includes("withRunHeartbeat(run, () => executeWebhook"));
+  assert.ok(source.includes("UPDATE automation_runs SET updated_at=NOW()"));
 });
