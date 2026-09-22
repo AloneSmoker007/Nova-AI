@@ -169,7 +169,7 @@ function buildSystemInstruction(brain) {
   return assembled.slice(0, strictRulesEnd) + businessDataSlice.slice(0, availableForBusinessData);
 }
 
-export async function generateGeminiReply(message, businessBrain = null) {
+export async function generateGeminiReply(message, businessBrain = null, additionalSystemContext = "") {
   if (!message || typeof message !== "string") {
     throw new Error("Message is required");
   }
@@ -180,7 +180,7 @@ export async function generateGeminiReply(message, businessBrain = null) {
     throw new Error(`Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`);
   }
 
-  const systemInstruction = buildSystemInstruction(businessBrain);
+  const baseInstruction = buildSystemInstruction(businessBrain);\n  const systemInstruction = additionalSystemContext\n    ? `${baseInstruction}\\n\\n## AUTHENTICATED WORKSPACE CONTEXT\\n${String(additionalSystemContext).slice(0, MAX_CONTEXT_LENGTH)}`\n    : baseInstruction;
   const contents = [
     {
       role: "user",
