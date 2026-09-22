@@ -486,7 +486,9 @@ async function processInboxMessage(inboxId, log = logger) {
 
         const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
         const aiBrain = brain
-          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\n\n") }
+          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("
+
+") }
           : { customInstructions: advancedContext };
 
         reply = await generateGeminiReply(message.body, aiBrain);
@@ -901,7 +903,12 @@ app.get("/api/payments", requireAuth, async (req, res, next) => {
   catch (error) { return next(error); }
 });
 
-app.get("/api/analytics", requireAuth, async (req, res, next) => {\n  try { return res.status(200).json({ status: "ok", data: await getAnalytics(req.user.tenantId, { days: req.query.days }) }); }\n  catch (error) { return next(error); }\n});\n\napp.get("/api/usage", requireAuth, async (req, res) => {
+app.get("/api/analytics", requireAuth, async (req, res, next) => {
+  try { return res.status(200).json({ status: "ok", data: await getAnalytics(req.user.tenantId, { days: req.query.days }) }); }
+  catch (error) { return next(error); }
+});
+
+app.get("/api/usage", requireAuth, async (req, res) => {
   try {
     const summary = await getUsageSummary(req.user.tenantId);
     return res.status(200).json({ status: "ok", data: summary });
@@ -1076,7 +1083,9 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
       const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
       const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
         ...(brain || {}),
-        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\n\n"),
+        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("
+
+"),
       });
       saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
     } catch (error) {
