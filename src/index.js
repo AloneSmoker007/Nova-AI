@@ -66,6 +66,7 @@ import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
 import { getAnalytics } from "./services/analytics.service.js";
 import { registerTask16Routes } from "./task16.routes.js";
+import { askNova } from "./services/assistant.service.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -1267,6 +1268,16 @@ app.post("/api/ai/analyze", requireAuth, async (req, res, next) => {
       return res.status(400).json({ status: "error", error: "Invalid message" });
     }
     return res.status(200).json({ status: "ok", data: await analyzeCustomerMessage(message) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/assistant/ask", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const result = await askNova({ tenantId: req.user.tenantId, prompt: req.body?.prompt });
+    if (result.blocked) return res.status(429).json({ status: "error", error: "AI monthly limit reached", data: result });
+    return res.status(200).json({ status: "ok", data: result });
   } catch (error) {
     return next(error);
   }
