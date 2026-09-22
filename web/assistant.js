@@ -30,10 +30,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const lower = prompt.toLowerCase();
     try {
       const [dashboard, usage, contacts, conversations] = await Promise.all([
-        window.NovaAPI.request("/api/dashboard/summary"),
-        NovaAPI.request("/api/usage"),
-        NovaAPI.request("/api/contacts?limit=100"),
-        NovaAPI.request("/api/conversations?limit=100"),
+        window.window.NovaAPI.request("/api/dashboard/summary"),
+        window.NovaAPI.request("/api/usage"),
+        window.NovaAPI.request("/api/contacts?limit=100"),
+        window.NovaAPI.request("/api/conversations?limit=100"),
       ]);
       const d = dashboard.data || {};
       const u = usage.data || {};
