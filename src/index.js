@@ -486,7 +486,7 @@ async function processInboxMessage(inboxId, log = logger) {
 
         const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
         const aiBrain = brain
-          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") }
+          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\n\n") }
           : { customInstructions: advancedContext };
 
         reply = await generateGeminiReply(message.body, aiBrain);
@@ -1085,7 +1085,7 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
       const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
       const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
         ...(brain || {}),
-        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\\n\\n"),
+        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\n\n"),
       });
       saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
     } catch (error) {
