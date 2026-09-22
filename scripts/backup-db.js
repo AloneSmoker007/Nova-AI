@@ -35,22 +35,6 @@ function getKey() {
   return key;
 }
 
-function runPgDump(outputPath) {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL is required");
-  return new Promise((resolve, reject) => {
-    const child = spawn("pg_dump", ["--format=custom", "--no-owner", "--no-acl"], {
-      env: postgresEnv(url),
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", (error) => reject(new Error(`pg_dump failed to start: ${error.message}`)));
-    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`pg_dump failed (${code}): ${stderr.slice(-2000)}`)));
-  });
-}
-
 async function pruneBackups(outputDir) {
   const retentionDays = Number(process.env.BACKUP_RETENTION_DAYS || 30);
   if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) throw new Error("BACKUP_RETENTION_DAYS must be between 1 and 3650");
