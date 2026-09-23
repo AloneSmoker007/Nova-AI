@@ -44,6 +44,7 @@ import {
 import {
   claimDelivery,
   deliveryStatusToMessageStatus,
+  failExhaustedDeliveries,
   findRecoverableDeliveries,
   getDelivery,
   markDeliveryFailed,
@@ -583,6 +584,7 @@ async function processInboxMessage(inboxId, log = logger) {
         message.tenant_id,
         deliveryClaim.leaseToken,
         providerMessageId,
+        deliveryClaim.delivery.attempt_count,
       );
 
       await recordProviderMessageId(
@@ -614,6 +616,7 @@ async function processInboxMessage(inboxId, log = logger) {
           message.tenant_id,
           deliveryClaim.leaseToken,
           sendError,
+          deliveryClaim.delivery.attempt_count,
         );
         await markCompleted(message.id, message.tenant_id, leaseToken, null);
         log.warn(
@@ -628,6 +631,7 @@ async function processInboxMessage(inboxId, log = logger) {
         message.tenant_id,
         deliveryClaim.leaseToken,
         sendError,
+        deliveryClaim.delivery.attempt_count,
       );
       await markCompleted(message.id, message.tenant_id, leaseToken, null);
       log.warn(
@@ -652,6 +656,7 @@ async function processInboxMessage(inboxId, log = logger) {
 
 async function recoverPendingDeliveries() {
   try {
+    await failExhaustedDeliveries();
     const pending = await findRecoverableDeliveries(50);
 
     for (const row of pending) {
@@ -680,7 +685,7 @@ async function recoverPendingDeliveries() {
         }
 
         if (!phoneNumberId) {
-          await markDeliveryFailed(delivery.id, delivery.tenant_id, claim.leaseToken, new Error("Unable to resolve WhatsApp number for delivery"));
+          await markDeliveryFailed(delivery.id, delivery.tenant_id, claim.leaseToken, new Error("Unable to resolve WhatsApp number for delivery"), claim.delivery.attempt_count);
           continue;
         }
 
@@ -691,6 +696,7 @@ async function recoverPendingDeliveries() {
             delivery.tenant_id,
             claim.leaseToken,
             new Error("Stored WhatsApp delivery tenant mapping is no longer valid"),
+            claim.delivery.attempt_count,
           );
           continue;
         }
@@ -716,6 +722,7 @@ async function recoverPendingDeliveries() {
             delivery.tenant_id,
             claim.leaseToken,
             providerMessageId,
+            claim.delivery.attempt_count,
           );
 
           await persistOutboundMessage({
@@ -736,6 +743,7 @@ async function recoverPendingDeliveries() {
               delivery.tenant_id,
               claim.leaseToken,
               sendError,
+              claim.delivery.attempt_count,
             );
           } else {
             await markDeliveryFailed(
@@ -743,6 +751,7 @@ async function recoverPendingDeliveries() {
               delivery.tenant_id,
               claim.leaseToken,
               sendError,
+              claim.delivery.attempt_count,
             );
           }
         }
