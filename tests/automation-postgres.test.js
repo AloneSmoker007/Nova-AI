@@ -26,6 +26,7 @@ describe("Automation PostgreSQL integration", { skip }, () => {
   });
 
   async function seed() {
+    await dbPool.query("DELETE FROM automation_runs");
     const tenantId = randomUUID();
     const userId = randomUUID();
     const numberId = randomUUID();
