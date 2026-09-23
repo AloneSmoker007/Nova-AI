@@ -5,6 +5,11 @@ import { dbPool, isDatabaseConfigured } from "../config/database.js";
  *
  * The phone_number_id is the tenant routing key. No caller-supplied
  * tenant identifier is trusted for webhook processing.
+ *
+ * Column names below must exist in the database/ migration chain:
+ *   whatsapp_numbers.display_phone_number (001_initial_schema.sql)
+ * The migrations never add `whatsapp_numbers.phone_number` or `tenants.slug`,
+ * so neither may be selected here.
  */
 export async function resolveTenantByPhoneNumberId(phoneNumberId) {
   if (!isDatabaseConfigured() || !dbPool) {
@@ -26,10 +31,13 @@ export async function resolveTenantByPhoneNumberId(phoneNumberId) {
         wn.phone_number_id,
         wn.access_token_encrypted,
         wn.display_name,
-        wn.phone_number,
+        wn.display_phone_number,
         wn.status AS whatsapp_status,
         t.name AS tenant_name,
-        t.slug AS tenant_slug,
+        -- tenants has no slug column in the migration chain. Keep the field in
+        -- the result shape as an explicit NULL rather than selecting a column
+        -- that does not exist (which aborted the whole lookup).
+        NULL::text AS tenant_slug,
         t.status AS tenant_status
       FROM whatsapp_numbers AS wn
       INNER JOIN tenants AS t
@@ -58,7 +66,7 @@ export async function resolveTenantByPhoneNumberId(phoneNumberId) {
     phoneNumberId: row.phone_number_id,
     accessTokenEncrypted: row.access_token_encrypted,
     displayName: row.display_name,
-    phoneNumber: row.phone_number,
+    phoneNumber: row.display_phone_number,
   };
 }
 

@@ -44,6 +44,7 @@ import {
 import {
   claimDelivery,
   deliveryStatusToMessageStatus,
+  failExhaustedDeliveries,
   findRecoverableDeliveries,
   getDelivery,
   markDeliveryFailed,
@@ -64,6 +65,7 @@ import { startRetentionScheduler } from "./services/retention.service.js";
 import { getDashboardSummary } from "./services/dashboard.service.js";
 import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
+import { registerTask16Routes } from "./task16.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -583,6 +585,7 @@ async function processInboxMessage(inboxId, log = logger) {
         message.tenant_id,
         deliveryClaim.leaseToken,
         providerMessageId,
+        deliveryClaim.delivery.attempt_count,
       );
 
       await recordProviderMessageId(
@@ -614,6 +617,7 @@ async function processInboxMessage(inboxId, log = logger) {
           message.tenant_id,
           deliveryClaim.leaseToken,
           sendError,
+          deliveryClaim.delivery.attempt_count,
         );
         await markCompleted(message.id, message.tenant_id, leaseToken, null);
         log.warn(
@@ -628,6 +632,7 @@ async function processInboxMessage(inboxId, log = logger) {
         message.tenant_id,
         deliveryClaim.leaseToken,
         sendError,
+        deliveryClaim.delivery.attempt_count,
       );
       await markCompleted(message.id, message.tenant_id, leaseToken, null);
       log.warn(
@@ -652,6 +657,7 @@ async function processInboxMessage(inboxId, log = logger) {
 
 async function recoverPendingDeliveries() {
   try {
+    await failExhaustedDeliveries();
     const pending = await findRecoverableDeliveries(50);
 
     for (const row of pending) {
@@ -680,7 +686,7 @@ async function recoverPendingDeliveries() {
         }
 
         if (!phoneNumberId) {
-          await markDeliveryFailed(delivery.id, delivery.tenant_id, claim.leaseToken, new Error("Unable to resolve WhatsApp number for delivery"));
+          await markDeliveryFailed(delivery.id, delivery.tenant_id, claim.leaseToken, new Error("Unable to resolve WhatsApp number for delivery"), claim.delivery.attempt_count);
           continue;
         }
 
@@ -691,6 +697,7 @@ async function recoverPendingDeliveries() {
             delivery.tenant_id,
             claim.leaseToken,
             new Error("Stored WhatsApp delivery tenant mapping is no longer valid"),
+            claim.delivery.attempt_count,
           );
           continue;
         }
@@ -716,6 +723,7 @@ async function recoverPendingDeliveries() {
             delivery.tenant_id,
             claim.leaseToken,
             providerMessageId,
+            claim.delivery.attempt_count,
           );
 
           await persistOutboundMessage({
@@ -736,6 +744,7 @@ async function recoverPendingDeliveries() {
               delivery.tenant_id,
               claim.leaseToken,
               sendError,
+              claim.delivery.attempt_count,
             );
           } else {
             await markDeliveryFailed(
@@ -1305,6 +1314,10 @@ if (!IS_PRODUCTION) {
     }
   });
 }
+
+// Task16 payment/OCR routes must be mounted BEFORE the terminal 404 handler
+// below; registrations after that catch-all are shadowed and unreachable.
+registerTask16Routes(app);
 
 app.use((req, res) => res.status(404).json({ status: "error", message: "Route not found" }));
 app.use((error, req, res, next) => {
