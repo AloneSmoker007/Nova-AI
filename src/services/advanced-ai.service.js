@@ -35,6 +35,15 @@ function sanitizeMemoryValue(value) {
   );
 }
 
+function escapeMemoryXml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 function detectLanguage(text) {
   const value = normalizeText(text, 4000);
   if (!value) return "unknown";
@@ -253,8 +262,8 @@ export function buildAdvancedAiContext({ signal, memories = [], businessBrain = 
       "<customer_memory>",
     );
     for (const item of memories.slice(0, MAX_MEMORY_ITEMS)) {
-      const key = sanitizeMemoryValue(item?.memory_key);
-      const value = sanitizeMemoryValue(item?.memory_value);
+      const key = escapeMemoryXml(sanitizeMemoryValue(item?.memory_key));
+      const value = escapeMemoryXml(sanitizeMemoryValue(item?.memory_value));
       const confidence = Number.isFinite(Number(item?.confidence)) ? Math.max(0, Math.min(Number(item.confidence), 1)) : 0;
       if (key && value) parts.push(`<memory key="${key}" confidence="${confidence}">${value}</memory>`);
     }
