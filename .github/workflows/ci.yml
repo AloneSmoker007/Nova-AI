@@ -78,3 +78,53 @@ jobs:
 
       - name: Run database migration integration tests
         run: node --test tests/migration-postgres.test.js
+
+  integration:
+    name: Part 4 PostgreSQL integration (${{ matrix.test }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - tests/migration-postgres.test.js
+          - tests/tenant-resolver-postgres.test.js
+          - tests/delivery-reliability.test.js
+          - tests/automation-postgres.test.js
+          - tests/automation-executor-fencing.test.js
+          - tests/task16-payments.test.js
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: nova
+          POSTGRES_PASSWORD: nova
+          POSTGRES_DB: nova_migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nova -d nova_migration_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MIGRATION_TEST_DATABASE_URL: postgres://nova:nova@127.0.0.1:5432/nova_migration_test
+      MIGRATION_TEST_ALLOW_RESET: "1"
+      NODE_ENV: test
+      GEMINI_API_KEY: test-gemini-key
+      WEBHOOK_VERIFY_TOKEN: test-verify-token
+      META_APP_SECRET: test-meta-secret
+      CREDENTIAL_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      JWT_SECRET: test-jwt-secret-0123456789abcdef0123456789abcdef
+      PAYMENT_WEBHOOK_SECRET: test-payment-secret
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run integration test
+        run: node --test ${{ matrix.test }}

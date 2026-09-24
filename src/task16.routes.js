@@ -7,11 +7,19 @@ import {
   getPayment,
   updatePaymentStatus,
   applyPaymentWebhook,
-  verifyPaymentWebhook,
+  loadPaymentWebhookSecrets,
+  verifyPaymentWebhookForTenant,
 } from "./services/payment.service.js";
 import { extractTextFromDocument, listOcrDocuments, getOcrDocument, ALLOWED, MAX_IMAGE_BYTES } from "./services/ocr.service.js";
 
-const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET || "";
+// Each tenant authenticates its payment webhooks with its own signing secret
+// (PAYMENT_WEBHOOK_SECRETS = {"<tenantId>": "<secret>", ...}). Tenant signing
+// secrets are independent: holding one tenant's secret must never let a caller
+// forge events for another tenant. Tenants without a configured secret fail
+// closed.
+const PAYMENT_WEBHOOK_SECRETS = loadPaymentWebhookSecrets(process.env.PAYMENT_WEBHOOK_SECRETS || "");
+
+const registeredApps = new WeakSet();
 
 function bad(error) {
   return error.message.startsWith("Invalid") ||
@@ -21,6 +29,11 @@ function bad(error) {
 }
 
 export function registerTask16Routes(app) {
+  // Mounting is idempotent: src/index.js mounts these routes before the
+  // terminal 404 handler and src/bootstrap.js keeps its historical call.
+  if (registeredApps.has(app)) return;
+  registeredApps.add(app);
+
   app.get("/api/payments", requireAuth, async (req, res, next) => {
     try {
       return res.status(200).json({
@@ -85,10 +98,9 @@ export function registerTask16Routes(app) {
       const signature = req.get("x-nova-payment-signature");
       const rawBody = req.rawBody;
       if (
-        !PAYMENT_WEBHOOK_SECRET ||
         !Buffer.isBuffer(rawBody) ||
         rawBody.length > 64 * 1024 ||
-        !verifyPaymentWebhook(rawBody, signature, PAYMENT_WEBHOOK_SECRET)
+        !verifyPaymentWebhookForTenant(rawBody, signature, req.params.tenantId, PAYMENT_WEBHOOK_SECRETS)
       ) {
         return res.sendStatus(403);
       }

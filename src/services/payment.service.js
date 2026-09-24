@@ -172,6 +172,50 @@ export function verifyPaymentWebhook(rawBody, signature, secret) {
   return received.length === expectedBuffer.length && crypto.timingSafeEqual(received, expectedBuffer);
 }
 
+// Parses PAYMENT_WEBHOOK_SECRETS: a JSON object mapping tenant id -> that
+// tenant's own webhook signing secret. The secrets are independent per tenant
+// so a caller who holds one tenant's secret cannot forge events for another
+// tenant (the previous single shared secret allowed exactly that).
+export function loadPaymentWebhookSecrets(raw) {
+  if (raw === undefined || raw === null || raw === "") return {};
+  if (typeof raw !== "string") throw new Error("Invalid payment webhook secrets");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("Invalid payment webhook secrets");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid payment webhook secrets");
+  }
+  const secrets = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    const normalized = tenant(key).toLowerCase();
+    if (typeof value !== "string" || !value.trim() || value.length > 512) {
+      throw new Error("Invalid payment webhook secrets");
+    }
+    secrets[normalized] = value;
+  }
+  return secrets;
+}
+
+// Verifies a webhook signature with the TARGET tenant's signing secret. A
+// signature produced with any other tenant's secret fails, so authentication
+// is bound to the tenant the event is applied to. Unknown tenants and
+// malformed tenant ids fail closed.
+export function verifyPaymentWebhookForTenant(rawBody, signature, tenantId, secretsByTenant) {
+  if (!Buffer.isBuffer(rawBody) || !secretsByTenant || typeof secretsByTenant !== "object") return false;
+  let normalized;
+  try {
+    normalized = tenant(tenantId).toLowerCase();
+  } catch {
+    return false;
+  }
+  const secret = secretsByTenant[normalized];
+  if (typeof secret !== "string" || !secret) return false;
+  return verifyPaymentWebhook(rawBody, signature, secret);
+}
+
 export async function applyPaymentWebhook({ tenantId, provider: providerName, providerPaymentId, status, eventId: webhookEventId, signatureValid }) {
   if (!signatureValid) throw new Error("Invalid payment webhook signature");
   const t = tenant(tenantId);

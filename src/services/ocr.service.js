@@ -62,6 +62,9 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
     const base64 = buffer.toString("base64");
     const response = await ai.models.generateContent({
       model: MODEL,
+      config: {
+        httpOptions: { timeout: 30_000 },
+      },
       contents: [{
         role: "user",
         parts: [

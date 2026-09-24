@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
 
 const MAX_STEPS = 50;
@@ -142,7 +143,7 @@ export async function startWorkflowRun({tenantId,workflowId,conversationId=null,
   assertDb(); const t=tenant(tenantId);
   if(!uuid(workflowId)) throw new Error("Invalid workflow ID");
   const r=await dbPool.query(`INSERT INTO automation_runs(tenant_id,workflow_id,conversation_id,contact_id,status,context,next_run_at,trigger_key)
-    SELECT $1,w.id,$3,$4,'queued',$5,NOW() FROM automation_workflows w
+    SELECT $1,w.id,$3,$4,'queued',$5,NOW(),$6 FROM automation_workflows w
     WHERE w.tenant_id=$1 AND w.id=$2 AND w.status='active' ON CONFLICT (tenant_id,workflow_id,trigger_key) WHERE trigger_key IS NOT NULL DO NOTHING RETURNING *`,[t,workflowId,conversationId,contactId,context,triggerKey]);
   return r.rows[0] ?? null;
 }
@@ -166,7 +167,7 @@ async function executeSendMessage(client, run, step, stepIndex) {
   const d=await client.query(`INSERT INTO whatsapp_deliveries
     (tenant_id,inbox_message_id,conversation_id,recipient_wa_id,body,automation_run_id,automation_step)
     VALUES($1,NULL,$2,$3,$4,$5,$6)
-    ON CONFLICT (tenant_id,automation_run_id,automation_step) DO NOTHING
+    ON CONFLICT (tenant_id,automation_run_id,automation_step) WHERE automation_run_id IS NOT NULL DO NOTHING
     RETURNING id`,[run.tenant_id,row.id,row.wa_id,step.body,run.id,stepIndex]);
   return d.rows[0] ? "queued" : "already_queued";
 }
@@ -218,13 +219,14 @@ export async function processDueWorkflowRuns(limit=20) {
       SELECT id FROM automation_runs
       WHERE (status IN ('queued','waiting')
         AND (next_run_at IS NULL OR next_run_at<=NOW()))
-        OR (status='running' AND updated_at < NOW() - INTERVAL '2 minutes')
+        OR (status='running' AND (executor_lease_until IS NULL OR executor_lease_until<NOW()))
       ORDER BY next_run_at NULLS FIRST,created_at
       FOR UPDATE SKIP LOCKED LIMIT $1)
       UPDATE automation_runs r
       SET status='running',attempts=attempts+1,
-          started_at=COALESCE(started_at,NOW()),updated_at=NOW()
-      FROM picked WHERE r.id=picked.id RETURNING r.*`,[safe]);
+          started_at=COALESCE(started_at,NOW()),updated_at=NOW(),
+          executor_token=$2, executor_lease_until=NOW()+INTERVAL '15 minutes'
+      FROM picked WHERE r.id=picked.id RETURNING r.*`,[safe,randomUUID()]);
     runs=r.rows;
   } finally { claimClient.release(); }
 
@@ -244,8 +246,8 @@ export async function processDueWorkflowRuns(limit=20) {
         const step=steps[idx];
         if(step.action==="wait") {
           await dbPool.query(
-            "UPDATE automation_runs SET status='waiting',current_step=$3,next_run_at=NOW()+($5*INTERVAL '1 second'),context=$4::jsonb,updated_at=NOW() WHERE tenant_id=$1 AND id=$2",
-            [run.tenant_id,run.id,idx+1,JSON.stringify(ctx),step.seconds],
+            "UPDATE automation_runs SET status='waiting',current_step=$3,next_run_at=NOW()+($5*INTERVAL '1 second'),context=$4::jsonb,updated_at=NOW(),executor_token=NULL,executor_lease_until=NULL WHERE tenant_id=$1 AND id=$2 AND status='running' AND executor_token=$6",
+            [run.tenant_id,run.id,idx+1,JSON.stringify(ctx),step.seconds,run.executor_token],
           );
           break;
         }
@@ -261,14 +263,14 @@ export async function processDueWorkflowRuns(limit=20) {
         }
         idx++;
         await dbPool.query(
-          "UPDATE automation_runs SET current_step=$3,context=$4::jsonb,updated_at=NOW() WHERE tenant_id=$1 AND id=$2 AND status='running'",
-          [run.tenant_id,run.id,idx,JSON.stringify(ctx)],
+          "UPDATE automation_runs SET current_step=$3,context=$4::jsonb,updated_at=NOW(),executor_lease_until=NOW()+INTERVAL '15 minutes' WHERE tenant_id=$1 AND id=$2 AND status='running' AND executor_token=$5",
+          [run.tenant_id,run.id,idx,JSON.stringify(ctx),run.executor_token],
         );
       }
       if(idx>=steps.length) {
         await dbPool.query(
-          "UPDATE automation_runs SET status='completed',current_step=$3,next_run_at=NULL,completed_at=NOW(),updated_at=NOW() WHERE tenant_id=$1 AND id=$2 AND status='running'",
-          [run.tenant_id,run.id,idx],
+          "UPDATE automation_runs SET status='completed',current_step=$3,next_run_at=NULL,completed_at=NOW(),updated_at=NOW(),executor_token=NULL,executor_lease_until=NULL WHERE tenant_id=$1 AND id=$2 AND status='running' AND executor_token=$4",
+          [run.tenant_id,run.id,idx,run.executor_token],
         );
       }
     } catch(error) {
@@ -276,9 +278,9 @@ export async function processDueWorkflowRuns(limit=20) {
       await dbPool.query(
         `UPDATE automation_runs SET status=$3,
           next_run_at=CASE WHEN $3='queued' THEN NOW()+(LEAST(300,POWER(2,GREATEST(attempts-1,0))*2)*INTERVAL '1 second') ELSE NULL END,
-          last_error=$4,updated_at=NOW()
-          WHERE tenant_id=$1 AND id=$2 AND status='running'`,
-        [run.tenant_id,run.id,retry?"queued":"failed",String(error.message||error).slice(0,1000)],
+          last_error=$4,updated_at=NOW(),executor_token=NULL,executor_lease_until=NULL
+          WHERE tenant_id=$1 AND id=$2 AND status='running' AND executor_token=$5`,
+        [run.tenant_id,run.id,retry?"queued":"failed",String(error.message||error).slice(0,1000),run.executor_token],
       );
     }
   }

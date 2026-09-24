@@ -35,6 +35,15 @@ function sanitizeMemoryValue(value) {
   );
 }
 
+function escapeMemoryXml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 function detectLanguage(text) {
   const value = normalizeText(text, 4000);
   if (!value) return "unknown";
@@ -211,6 +220,14 @@ export async function recordAiSignal(tenantId, conversationId, messageId, signal
       (tenant_id, conversation_id, message_id, intent, sentiment, priority, detected_language,
        preferred_language, negotiation_requested, competitor_comparison_requested)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT (tenant_id, message_id) WHERE message_id IS NOT NULL DO UPDATE SET
+       intent = EXCLUDED.intent,
+       sentiment = EXCLUDED.sentiment,
+       priority = EXCLUDED.priority,
+       detected_language = EXCLUDED.detected_language,
+       preferred_language = EXCLUDED.preferred_language,
+       negotiation_requested = EXCLUDED.negotiation_requested,
+       competitor_comparison_requested = EXCLUDED.competitor_comparison_requested
      RETURNING id, intent, sentiment, priority, detected_language, preferred_language,
                negotiation_requested, competitor_comparison_requested, created_at`,
     [
@@ -245,8 +262,8 @@ export function buildAdvancedAiContext({ signal, memories = [], businessBrain = 
       "<customer_memory>",
     );
     for (const item of memories.slice(0, MAX_MEMORY_ITEMS)) {
-      const key = sanitizeMemoryValue(item?.memory_key);
-      const value = sanitizeMemoryValue(item?.memory_value);
+      const key = escapeMemoryXml(sanitizeMemoryValue(item?.memory_key));
+      const value = escapeMemoryXml(sanitizeMemoryValue(item?.memory_value));
       const confidence = Number.isFinite(Number(item?.confidence)) ? Math.max(0, Math.min(Number(item.confidence), 1)) : 0;
       if (key && value) parts.push(`<memory key="${key}" confidence="${confidence}">${value}</memory>`);
     }
