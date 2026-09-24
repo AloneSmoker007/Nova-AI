@@ -90,6 +90,7 @@ jobs:
           - tests/tenant-resolver-postgres.test.js
           - tests/delivery-reliability.test.js
           - tests/automation-postgres.test.js
+          - tests/automation-executor-fencing.test.js
           - tests/task16-payments.test.js
     services:
       postgres:
