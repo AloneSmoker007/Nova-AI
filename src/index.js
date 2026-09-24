@@ -1303,7 +1303,9 @@ app.put("/api/business-brain", requireAuth, requireRole("owner", "admin"), async
 
 const geminiTestSchema = Joi.object({ message: Joi.string().trim().min(1).max(4000).required() });
 if (!IS_PRODUCTION) {
-  app.post("/api/test/gemini", async (req, res, next) => {
+  // Development-only Gemini diagnostics remain tenant/user scoped so this
+  // endpoint cannot become an unauthenticated provider-cost oracle.
+  app.post("/api/test/gemini", requireAuth, async (req, res, next) => {
     try {
       const { error, value } = geminiTestSchema.validate(req.body);
       if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
