@@ -64,6 +64,7 @@ import { startRetentionScheduler } from "./services/retention.service.js";
 import { getDashboardSummary } from "./services/dashboard.service.js";
 import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
+import { registerTask16Routes } from "./task16.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -1305,6 +1306,10 @@ if (!IS_PRODUCTION) {
     }
   });
 }
+
+// Register Task 16 routes before the terminal 404 middleware. Production starts via bootstrap.js,
+// but keeping route registration here makes the exported app fully composed before catch-all handling.
+registerTask16Routes(app);
 
 app.use((req, res) => res.status(404).json({ status: "error", message: "Route not found" }));
 app.use((error, req, res, next) => {
