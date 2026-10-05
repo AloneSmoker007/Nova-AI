@@ -78,3 +78,12 @@ jobs:
 
       - name: Run database migration integration tests
         run: node --test tests/migration-postgres.test.js
+
+      # TASK-01 regression coverage (A-5.15A-X-001): tenant resolver schema fix.
+      # Kept as its own step so it runs after the migration suite in a separate
+      # process; both suites reset the shared test database, and GitHub Actions
+      # step serialization guarantees they cannot overlap.
+      # Note: when running these locally with MIGRATION_TEST_ALLOW_RESET=1, run
+      # one database suite file at a time for the same reason.
+      - name: Run tenant resolver integration tests
+        run: node --test tests/tenant-resolver.test.js
