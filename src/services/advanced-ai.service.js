@@ -211,6 +211,14 @@ export async function recordAiSignal(tenantId, conversationId, messageId, signal
       (tenant_id, conversation_id, message_id, intent, sentiment, priority, detected_language,
        preferred_language, negotiation_requested, competitor_comparison_requested)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT (tenant_id, message_id) WHERE message_id IS NOT NULL DO UPDATE SET
+       intent = EXCLUDED.intent,
+       sentiment = EXCLUDED.sentiment,
+       priority = EXCLUDED.priority,
+       detected_language = EXCLUDED.detected_language,
+       preferred_language = EXCLUDED.preferred_language,
+       negotiation_requested = EXCLUDED.negotiation_requested,
+       competitor_comparison_requested = EXCLUDED.competitor_comparison_requested
      RETURNING id, intent, sentiment, priority, detected_language, preferred_language,
                negotiation_requested, competitor_comparison_requested, created_at`,
     [
