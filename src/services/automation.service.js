@@ -142,7 +142,7 @@ export async function startWorkflowRun({tenantId,workflowId,conversationId=null,
   assertDb(); const t=tenant(tenantId);
   if(!uuid(workflowId)) throw new Error("Invalid workflow ID");
   const r=await dbPool.query(`INSERT INTO automation_runs(tenant_id,workflow_id,conversation_id,contact_id,status,context,next_run_at,trigger_key)
-    SELECT $1,w.id,$3,$4,'queued',$5,NOW() FROM automation_workflows w
+    SELECT $1,w.id,$3,$4,'queued',$5,NOW(),$6 FROM automation_workflows w
     WHERE w.tenant_id=$1 AND w.id=$2 AND w.status='active' ON CONFLICT (tenant_id,workflow_id,trigger_key) WHERE trigger_key IS NOT NULL DO NOTHING RETURNING *`,[t,workflowId,conversationId,contactId,context,triggerKey]);
   return r.rows[0] ?? null;
 }
@@ -166,7 +166,7 @@ async function executeSendMessage(client, run, step, stepIndex) {
   const d=await client.query(`INSERT INTO whatsapp_deliveries
     (tenant_id,inbox_message_id,conversation_id,recipient_wa_id,body,automation_run_id,automation_step)
     VALUES($1,NULL,$2,$3,$4,$5,$6)
-    ON CONFLICT (tenant_id,automation_run_id,automation_step) DO NOTHING
+    ON CONFLICT (tenant_id,automation_run_id,automation_step) WHERE automation_run_id IS NOT NULL DO NOTHING
     RETURNING id`,[run.tenant_id,row.id,row.wa_id,step.body,run.id,stepIndex]);
   return d.rows[0] ? "queued" : "already_queued";
 }

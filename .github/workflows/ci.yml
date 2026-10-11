@@ -87,3 +87,8 @@ jobs:
       # one database suite file at a time for the same reason.
       - name: Run tenant resolver integration tests
         run: node --test tests/tenant-resolver.test.js
+
+      # TASK-02 regression coverage: execute automation SQL against real PostgreSQL.
+      # Keep this as a separate serialized step because the integration suite resets public schema.
+      - name: Run automation SQL integration tests
+        run: node --test tests/automation-postgres.test.js
