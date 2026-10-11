@@ -92,3 +92,9 @@ jobs:
       # Keep this as a separate serialized step because the integration suite resets public schema.
       - name: Run automation SQL integration tests
         run: node --test tests/automation-postgres.test.js
+
+      # TASK-03 regression coverage: per-tenant payment webhook authentication,
+      # tested against the real application and PostgreSQL. This suite resets
+      # the shared test schema, so it runs as a separate serialized step.
+      - name: Run payment webhook tenant-isolation integration tests
+        run: node --test tests/payment-webhook-tenant-isolation.test.js

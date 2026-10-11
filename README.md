@@ -95,6 +95,21 @@ The server defaults to port 3000.
 
 Never commit `.env` or real API keys, tokens, database URLs, or encryption keys.
 
+### Payment webhook signing secrets
+
+`PAYMENT_WEBHOOK_SECRETS` configures per-tenant signing keys for the payment webhook endpoint (`POST /api/payments/webhook/:tenantId`). It is a JSON object mapping each tenant UUID to an independent, high-entropy HMAC-SHA256 secret (at least 32 characters; 64 random hex characters are recommended).
+
+```json
+{
+  "11111111-1111-4111-8111-111111111111": "<64 random hex chars for tenant 1>",
+  "22222222-2222-4222-8222-222222222222": "<64 random hex chars for tenant 2>"
+}
+```
+
+The endpoint verifies the `x-nova-payment-signature` HMAC-SHA256 over the **raw** request body using the **target tenant's** key and fails closed (HTTP 403) when the tenant id is malformed or unknown, or when its key is missing or invalid. It never falls back to a shared secret, so one tenant's signer cannot forge an event that mutates another tenant's payments.
+
+**Deployment note:** integrations that previously signed payment webhooks with the single shared `PAYMENT_WEBHOOK_SECRET` must be configured with their correct tenant-specific key in `PAYMENT_WEBHOOK_SECRETS` **before rollout**. The legacy shared secret no longer authenticates this endpoint and is never used as a fallback.
+
 ## Useful endpoints
 
 - `GET /` — basic service health.
@@ -120,6 +135,8 @@ Customer data must remain isolated:
 **Tenant A cannot access Tenant B's contacts, conversations, messages, AI memory, credentials, usage, or handoff data.**
 
 Do not accept a client-supplied tenant identifier as authority for authorization.
+
+Payment webhook requests are authenticated per tenant: the request HMAC must validate against the **target tenant's own** signing key (`PAYMENT_WEBHOOK_SECRETS`), so one tenant's signer cannot authorize an event that mutates another tenant's payments.
 
 ## Testing and CI
 

@@ -8,10 +8,9 @@ import {
   updatePaymentStatus,
   applyPaymentWebhook,
   verifyPaymentWebhook,
+  resolveTenantWebhookSecret,
 } from "./services/payment.service.js";
 import { extractTextFromDocument, listOcrDocuments, getOcrDocument, ALLOWED, MAX_IMAGE_BYTES } from "./services/ocr.service.js";
-
-const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET || "";
 
 function bad(error) {
   return error.message.startsWith("Invalid") ||
@@ -84,11 +83,15 @@ export function registerTask16Routes(app) {
     try {
       const signature = req.get("x-nova-payment-signature");
       const rawBody = req.rawBody;
+      // Authenticate with the target tenant's own signing key (fail closed when
+      // the tenant id is malformed/unknown or no key is configured). The legacy
+      // shared PAYMENT_WEBHOOK_SECRET is intentionally NOT used here.
+      const tenantSecret = resolveTenantWebhookSecret(req.params.tenantId);
       if (
-        !PAYMENT_WEBHOOK_SECRET ||
+        !tenantSecret ||
         !Buffer.isBuffer(rawBody) ||
         rawBody.length > 64 * 1024 ||
-        !verifyPaymentWebhook(rawBody, signature, PAYMENT_WEBHOOK_SECRET)
+        !verifyPaymentWebhook(rawBody, signature, tenantSecret)
       ) {
         return res.sendStatus(403);
       }
