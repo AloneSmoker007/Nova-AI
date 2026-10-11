@@ -163,6 +163,36 @@ export async function updatePaymentStatus(tenantId, id, status) {
     client.release();
   }
 }
+// Minimum length for a per-tenant webhook signing secret. HMAC-SHA256 keys
+// shorter than this are rejected as non-high-entropy and fail closed.
+const MIN_WEBHOOK_SECRET_LENGTH = 32;
+
+// Resolve the per-tenant signing secret for the payment webhook from the
+// PAYMENT_WEBHOOK_SECRETS config: a JSON object mapping tenant UUIDs to
+// independent, high-entropy signing secrets, e.g.
+//   {"<tenant-uuid>": "<64-hex-chars>", ...}
+//
+// Fails closed (returns null) on ANY missing, malformed, invalid, or
+// unknown-tenant configuration so the webhook endpoint can reject the request.
+// Never falls back to the legacy shared PAYMENT_WEBHOOK_SECRET (that would
+// preserve the cross-tenant weakness) and never logs or returns secret values
+// except the resolved key for the requested tenant.
+export function resolveTenantWebhookSecret(tenantId) {
+  if (typeof tenantId !== "string" || !UUID.test(tenantId)) return null;
+  const raw = process.env.PAYMENT_WEBHOOK_SECRETS;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) return null;
+  const secret = config[tenantId];
+  if (typeof secret !== "string" || secret.length < MIN_WEBHOOK_SECRET_LENGTH) return null;
+  return secret;
+}
+
 export function verifyPaymentWebhook(rawBody, signature, secret) {
   if (!Buffer.isBuffer(rawBody) || !rawBody.length || typeof signature !== "string" || !secret) return false;
   if (!/^[a-f0-9]{64}$/i.test(signature)) return false;
