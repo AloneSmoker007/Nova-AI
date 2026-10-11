@@ -20,7 +20,7 @@ import { after, before, describe, it } from "node:test";
 
 const integrationUrl = process.env.MIGRATION_TEST_DATABASE_URL || "";
 const allowReset = process.env.MIGRATION_TEST_ALLOW_RESET === "1";
-const skip = integrationUrl
+const skip = integrationUrl && allowReset
   ? false
   : "Set MIGRATION_TEST_DATABASE_URL (and MIGRATION_TEST_ALLOW_RESET=1) to run this test";
 
@@ -59,6 +59,12 @@ function fakeServer() {
 }
 
 before(async () => {
+  // This hook is declared outside the skipped describe block, so return early
+  // when the explicit PostgreSQL integration-test prerequisites are absent.
+  // In particular, never import the app or access a null dbPool in the mocked
+  // npm test suite, and never reset a database without MIGRATION_TEST_ALLOW_RESET=1.
+  if (skip) return;
+
   // Set required env (dev-mode only warns otherwise) and the DB target BEFORE
   // any module import.
   process.env.DATABASE_URL = integrationUrl;
