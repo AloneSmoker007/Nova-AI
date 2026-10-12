@@ -752,6 +752,7 @@ async function recoverPendingDeliveries() {
               delivery.tenant_id,
               claim.leaseToken,
               sendError,
+              claim.delivery.attempt_count,
             );
           }
         }
