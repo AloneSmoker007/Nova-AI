@@ -104,3 +104,8 @@ jobs:
       # Run in its own serialized step because the suite resets public schema.
       - name: Run WhatsApp delivery reliability integration tests
         run: node --test tests/delivery-reliability.test.js
+
+      # TASK-07 regression coverage: message-scoped AI signal idempotency.
+      # This suite also resets public schema, so keep it serialized.
+      - name: Run AI signal idempotency integration tests
+        run: node --test tests/ai-signal-idempotency.test.js
