@@ -119,3 +119,9 @@ jobs:
       # both sequential and concurrent bookings. This suite resets public schema.
       - name: Run appointment buffer integration tests
         run: node --test tests/appointment-buffer.test.js
+
+      # TASK-25 regression coverage: expired revoked tokens cannot revoke fresh
+      # sessions, while valid-window reuse still triggers session revocation.
+      # This suite resets public schema and also verifies expired-token retention.
+      - name: Run refresh-token replay protection tests
+        run: node --test tests/refresh-token-replay.test.js
