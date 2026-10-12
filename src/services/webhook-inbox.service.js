@@ -32,9 +32,21 @@ const STORED_MESSAGE_TYPES = new Set([
 ]);
 
 function cleanMessageText(value, max = 4096) {
-  return typeof value === "string"
-    ? value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim().slice(0, max)
-    : "";
+  if (typeof value !== "string") return "";
+  const cleaned = Array.from(value, (character) => {
+    const code = character.charCodeAt(0);
+    if (
+      code <= 0x08 ||
+      code === 0x0B ||
+      code === 0x0C ||
+      (code >= 0x0E && code <= 0x1F) ||
+      code === 0x7F
+    ) {
+      return " ";
+    }
+    return character;
+  }).join("");
+  return cleaned.trim().slice(0, max);
 }
 
 export function normalizeIncomingWebhookContent(message) {
