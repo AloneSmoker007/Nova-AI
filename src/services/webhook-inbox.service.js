@@ -180,7 +180,7 @@ export async function ingestWebhookMessage({ message, tenant }) {
   const waId = message.from.trim();
   const { messageType, body } = normalizeIncomingWebhookContent(message);
 
-  if (!validateTenantId(tenantId) || !/^\\d{5,30}$/.test(phoneNumberId) || !body) {
+  if (!validateTenantId(tenantId) || !/^\d{5,30}$/.test(phoneNumberId) || !body) {
     throw new Error("Invalid webhook message data");
   }
 
