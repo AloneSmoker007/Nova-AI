@@ -226,7 +226,7 @@ export async function scheduleInactivityTriggers(limit = 100) {
      JOIN conversations AS c ON c.tenant_id = w.tenant_id
      CROSS JOIN LATERAL (
        SELECT CASE
-         WHEN jsonb_typeof(w.trigger_config -> 'afterSeconds') = 'number'
+         WHEN jsonb_typeof(w.trigger_config -> 'afterSeconds') IN ('number', 'string')
          THEN CASE
            WHEN (w.trigger_config ->> 'afterSeconds') ~ '^[0-9]{1,7}$'
            THEN CASE
