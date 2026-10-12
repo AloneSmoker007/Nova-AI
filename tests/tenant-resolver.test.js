@@ -307,38 +307,60 @@ describe("Tenant resolver schema fix (A-5.15A-X-001)", { skip }, () => {
     let child = null;
     const childOutput = [];
 
-    const buildPayload = (phoneNumberId, messageId) => ({
-      object: "whatsapp_business_account",
-      entry: [
-        {
-          id: "WABA-TEST",
-          changes: [
-            {
-              field: "messages",
-              value: {
-                metadata: { phone_number_id: phoneNumberId },
-                contacts: [{ profile: { name: "Test Contact" }, wa_id: "15551234567" }],
-                messages: [
-                  {
-                    from: "15551234567",
-                    id: messageId,
-                    timestamp: "1700000000",
-                    type: "text",
-                    text: { body: "hello from the webhook test" },
-                  },
-                ],
+    const buildPayload = (phoneNumberId, messageId, messageType = "text") => {
+      const messageContent = messageType === "text"
+        ? { type: "text", text: { body: "hello from the webhook test" } }
+        : messageType === "image"
+          ? {
+              type: "image",
+              image: {
+                id: "media-" + messageId,
+                mime_type: "image/jpeg",
+                sha256: "a".repeat(64),
+                caption: "Photo of my damaged parcel",
               },
-            },
-          ],
-        },
-      ],
-    });
+            }
+          : {
+              type: "audio",
+              audio: {
+                id: "media-" + messageId,
+                mime_type: "audio/ogg",
+                sha256: "b".repeat(64),
+              },
+            };
+
+      return {
+        object: "whatsapp_business_account",
+        entry: [
+          {
+            id: "WABA-TEST",
+            changes: [
+              {
+                field: "messages",
+                value: {
+                  metadata: { phone_number_id: phoneNumberId },
+                  contacts: [{ profile: { name: "Test Contact" }, wa_id: "15551234567" }],
+                  messages: [
+                    {
+                      from: "15551234567",
+                      id: messageId,
+                      timestamp: "1700000000",
+                      ...messageContent,
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+    };
 
     const sign = (payload) =>
       `sha256=${crypto.createHmac("sha256", WEBHOOK_SECRET).update(payload).digest("hex")}`;
 
-    const postWebhook = async (phoneNumberId, messageId) => {
-      const payload = buildPayload(phoneNumberId, messageId);
+    const postWebhook = async (phoneNumberId, messageId, messageType = "text") => {
+      const payload = buildPayload(phoneNumberId, messageId, messageType);
       const body = JSON.stringify(payload);
       return fetch(`http://127.0.0.1:${PORT}/webhook`, {
         method: "POST",
@@ -393,6 +415,51 @@ describe("Tenant resolver schema fix (A-5.15A-X-001)", { skip }, () => {
 
     after(() => {
       if (child && child.exitCode === null && !child.killed) child.kill("SIGKILL");
+    });
+
+    it("durably stores non-text inbound media and completes it without an AI auto-reply", async () => {
+      const messageId = "wamid.TENANT-RESOLVER-IMAGE";
+      const response = await postWebhook(PHONE_A, messageId, "image");
+      assert.equal(response.status, 200, "a valid signed image webhook must be accepted");
+
+      const deadline = Date.now() + 10_000;
+      let inbox = null;
+      while (Date.now() < deadline) {
+        const result = await dbPool.query(
+          `SELECT id, tenant_id, message_type, body, state, generated_response, provider_message_id
+           FROM webhook_messages WHERE whatsapp_message_id=$1`,
+          [messageId],
+        );
+        inbox = result.rows[0] || null;
+        if (inbox?.state === "COMPLETED") break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      assert.ok(inbox, "the non-text message must be recorded in the durable inbox");
+      assert.equal(inbox.tenant_id, TENANT_A);
+      assert.equal(inbox.message_type, "image");
+      assert.equal(inbox.body, "Photo of my damaged parcel", "the media caption must remain available to the agent");
+      assert.equal(inbox.state, "COMPLETED", "non-text messages must not retry indefinitely through the text-only AI path");
+      assert.equal(inbox.generated_response, null, "no AI answer should be generated for media the service has not downloaded");
+      assert.equal(inbox.provider_message_id, null, "the media event should not trigger an automatic outbound reply");
+
+      const history = await dbPool.query(
+        `SELECT tenant_id, direction, message_type, "text", status
+         FROM messages
+         WHERE tenant_id=$1 AND whatsapp_message_id=$2`,
+        [TENANT_A, messageId],
+      );
+      assert.equal(history.rowCount, 1, "the non-text event must be visible in conversation history");
+      assert.equal(history.rows[0].direction, "inbound");
+      assert.equal(history.rows[0].message_type, "image");
+      assert.equal(history.rows[0].text, "Photo of my damaged parcel");
+      assert.equal(history.rows[0].status, "received");
+
+      const contact = await dbPool.query(
+        "SELECT display_name FROM contacts WHERE tenant_id=$1 AND wa_id=$2",
+        [TENANT_A, "15551234567"],
+      );
+      assert.equal(contact.rows[0]?.display_name, "Test Contact", "webhook profile name must reach inbound persistence");
     });
 
     it("ingests an inbound webhook under the owning tenant resolved from phone_number_id", async () => {
