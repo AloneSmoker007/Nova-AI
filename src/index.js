@@ -346,7 +346,7 @@ function extractWebhookEvents(body) {
           messages.push({
             ...message,
             phoneNumberId,
-            profileName: value?.contacts?.[0]?.profile?.name,
+            profileName: value?.contacts?.find((contact) => contact?.wa_id === message.from)?.profile?.name,
           });
         }
       }
