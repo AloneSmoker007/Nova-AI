@@ -13,6 +13,7 @@ test("tenant-controlled business content never enters the trusted system instruc
     businessName: "Nova Store",
     description: injection,
     customInstructions: injection,
+    advancedContext: "Customer memory and derived AI signals: " + injection,
     rules: [injection],
     persona: { name: injection },
     products: [{ name: "Widget", description: injection }],
@@ -36,6 +37,7 @@ test("tenant-controlled business content never enters the trusted system instruc
   const payload = JSON.parse(userPayloadText.slice(jsonStart + 1));
   assert.equal(payload.businessContext.business.description, injection);
   assert.equal(payload.businessContext.customInstructions, injection);
+  assert.equal(payload.businessContext.advancedContext, "Customer memory and derived AI signals: " + injection);
   assert.equal(payload.businessContext.rules[0], injection);
   assert.equal(payload.customerMessage, customerMessage);
 });
