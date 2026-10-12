@@ -65,7 +65,10 @@ export async function persistInboundMessage({
         VALUES ($1, $2, $3, 'active', $4)
         ON CONFLICT (whatsapp_number_id, contact_id)
         DO UPDATE SET
-          last_message_at = EXCLUDED.last_message_at,
+          last_message_at = GREATEST(
+            conversations.last_message_at,
+            EXCLUDED.last_message_at
+          ),
           updated_at = NOW()
         RETURNING id
       `,
