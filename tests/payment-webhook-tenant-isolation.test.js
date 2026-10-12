@@ -111,6 +111,7 @@ before(async () => {
     `INSERT INTO payments (tenant_id, provider, provider_payment_id, amount_minor, currency, status) VALUES
        ($1,'stripe','pay-a-accept',   1000,'USD','pending'),
        ($1,'stripe','pay-a-replay',   1000,'USD','pending'),
+       ($1,'stripe','pay-a-retention',1000,'USD','pending'),
        ($1,'stripe','pay-a-legal',    1000,'USD','pending'),
        ($1,'stripe','pay-a-illegal',  1000,'USD','paid'),
        ($1,'stripe','pay-a-mismatch', 1000,'USD','pending'),
