@@ -171,6 +171,14 @@ async function eventCount(tenantId, eventId) {
   return r.rows[0].n;
 }
 
+async function eventKeyCount(tenantId, eventId) {
+  const r = await dbPool.query(
+    "SELECT count(*)::int AS n FROM payment_webhook_event_keys WHERE tenant_id=$1 AND provider='stripe' AND event_id=$2",
+    [tenantId, eventId],
+  );
+  return r.rows[0].n;
+}
+
 describe("payment webhook tenant isolation (real app + PostgreSQL)", { skip }, () => {
   it("1. correctly signed event for Tenant A is accepted and mutates only Tenant A", async () => {
     process.env.PAYMENT_WEBHOOK_SECRETS = ALL_KEYS;
@@ -300,7 +308,33 @@ describe("payment webhook tenant isolation (real app + PostgreSQL)", { skip }, (
     assert.equal(await eventCount(TENANT_A, "evt-replay-1"), 1, "exactly one event record for the idempotent event");
   });
 
-  it("9. legal and illegal payment status transitions still behave correctly", async () => {
+  it("9. event dedupe survives detailed-event retention cleanup", async () => {
+    process.env.PAYMENT_WEBHOOK_SECRETS = ALL_KEYS;
+    const body = paymentBody(TENANT_A, "pay-a-retention", "paid", "evt-retention-long-lived");
+    const first = await signedWebhook(TENANT_A, body, SECRET_A);
+    assert.equal(first.status, 200, `initial event -> 200, got ${first.status} ${first.body}`);
+    assert.equal(await paymentStatus(TENANT_A, "pay-a-retention"), "paid");
+    assert.equal(await eventCount(TENANT_A, "evt-retention-long-lived"), 1);
+    assert.equal(await eventKeyCount(TENANT_A, "evt-retention-long-lived"), 1);
+
+    // Simulate the normal 90-day detail-row retention deletion while preserving
+    // the minimal idempotency tombstone. The same valid body/signature must not
+    // re-apply a stale event after its detailed row is gone.
+    await dbPool.query(
+      "DELETE FROM payment_webhook_events WHERE tenant_id=$1 AND provider='stripe' AND event_id=$2",
+      [TENANT_A, "evt-retention-long-lived"],
+    );
+    assert.equal(await eventCount(TENANT_A, "evt-retention-long-lived"), 0);
+    assert.equal(await eventKeyCount(TENANT_A, "evt-retention-long-lived"), 1);
+
+    const replay = await signedWebhook(TENANT_A, body, SECRET_A);
+    assert.equal(replay.status, 200, `expired detail replay -> idempotent 200, got ${replay.status} ${replay.body}`);
+    assert.equal(await paymentStatus(TENANT_A, "pay-a-retention"), "paid");
+    assert.equal(await eventCount(TENANT_A, "evt-retention-long-lived"), 0, "replay must not recreate expired detail data");
+    assert.equal(await eventKeyCount(TENANT_A, "evt-retention-long-lived"), 1, "the permanent idempotency key must remain");
+  });
+
+  it("10. legal and illegal payment status transitions still behave correctly", async () => {
     process.env.PAYMENT_WEBHOOK_SECRETS = ALL_KEYS;
     // Legal: pending -> paid.
     const legal = await signedWebhook(TENANT_A, paymentBody(TENANT_A, "pay-a-legal", "paid", "evt-legal-1"), SECRET_A);
@@ -314,7 +348,7 @@ describe("payment webhook tenant isolation (real app + PostgreSQL)", { skip }, (
     assert.equal(await eventCount(TENANT_A, "evt-illegal-1"), 0, "rejected transition must not leave an event record");
   });
 
-  it("10. the real app entry point reaches the webhook route (not the terminal 404)", async () => {
+  it("11. the real app entry point reaches the webhook route (not the terminal 404)", async () => {
     process.env.PAYMENT_WEBHOOK_SECRETS = ALL_KEYS;
     const res = await sendRaw(TENANT_A, rawJson(paymentBody(TENANT_A, "pay-a-accept", "paid", "evt-reach")), undefined);
     assert.notEqual(res.status, 404, "the webhook route must be reachable");
