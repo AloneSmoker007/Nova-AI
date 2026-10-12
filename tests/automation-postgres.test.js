@@ -350,18 +350,31 @@ describe("Automation SQL regressions against real PostgreSQL", { skip }, () => {
       "accepted numeric string must be persisted as a JSON number, not the original exponent string",
     );
 
-    // Simulate an older/directly-mutated row. Scheduling must not throw a
-    // PostgreSQL integer-cast error if its legacy JSON value is not integer text.
+    // Legacy JSON strings containing plain integer text were accepted by
+    // PostgreSQL before normalization and must keep their intended delay.
+    await dbPool.query(
+      `UPDATE automation_workflows
+       SET trigger_config = jsonb_set(trigger_config, '{afterSeconds}', '"3600"'::jsonb)
+       WHERE tenant_id=$1 AND id=$2`,
+      [TENANT_A, workflow.id],
+    );
+    await assert.doesNotReject(
+      () => scheduleInactivityTriggers(10),
+      "legacy digit-only delay strings must continue to work",
+    );
+
+    // A legacy exponent-form string passed JavaScript Number() validation but
+    // cannot be cast directly to a PostgreSQL integer; it should use the safe
+    // default rather than crash the scheduler.
     await dbPool.query(
       `UPDATE automation_workflows
        SET trigger_config = jsonb_set(trigger_config, '{afterSeconds}', '"1e2"'::jsonb)
        WHERE tenant_id=$1 AND id=$2`,
       [TENANT_A, workflow.id],
     );
-
     await assert.doesNotReject(
       () => scheduleInactivityTriggers(10),
-      "invalid legacy inactivity configuration must use a safe default, not break scheduler recovery",
+      "malformed legacy inactivity configuration must use a safe default, not break scheduler recovery",
     );
   });
 });
