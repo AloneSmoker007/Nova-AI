@@ -357,7 +357,7 @@ test("terminal delivery recovery backfills outbound history without attempting a
   const backfill = sliceBetween(
     recovery,
     "const missingMessages = await findDeliveriesMissingOutboundMessage(50);",
-    "} catch (error) {\n    logger.error({ error: error.message }, \"WhatsApp delivery recovery pass failed\");",
+    'logger.error({ error: error.message }, "WhatsApp delivery recovery pass failed");',
   );
   assert.ok(backfill.includes("persistOutboundMessage("), "missing outbound history must be inserted idempotently");
   assert.ok(backfill.includes("syncDeliveryToMessage("), "persisted message status must be reconciled to provider state");
