@@ -69,7 +69,7 @@ describe("webhook dead-letter operations (PostgreSQL)", { skip }, () => {
 
   async function seedInbox({
     tenantId = TENANT_A,
-    numberId = NUMBER_A,
+    numberId = null,
     messageId = "wamid-dead-" + randomUUID(),
     state = "DEAD_LETTER",
     attempts = 5,
@@ -77,6 +77,7 @@ describe("webhook dead-letter operations (PostgreSQL)", { skip }, () => {
     generatedResponse = null,
     providerMessageId = null,
   } = {}) {
+    const resolvedNumberId = numberId || (tenantId === TENANT_A ? NUMBER_A : NUMBER_B);
     const phoneNumberId = tenantId === TENANT_A ? "15550000101" : "15550000102";
     const result = await dbPool.query(
       `INSERT INTO webhook_messages (
@@ -90,7 +91,7 @@ describe("webhook dead-letter operations (PostgreSQL)", { skip }, () => {
        RETURNING id`,
       [
         tenantId,
-        numberId,
+        resolvedNumberId,
         phoneNumberId,
         messageId,
         state,
