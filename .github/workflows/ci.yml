@@ -130,3 +130,8 @@ jobs:
       # conversation's last_message_at backwards. This suite resets public schema.
       - name: Run inbound message ordering integration tests
         run: node --test tests/inbound-message-ordering.test.js
+
+      # TASK-31 regression coverage: operator dead-letter listing/retry is
+      # tenant-scoped and auditable. This suite resets public schema.
+      - name: Run webhook dead-letter operations integration tests
+        run: node --test tests/webhook-dead-letter-operations.test.js
