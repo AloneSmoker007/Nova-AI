@@ -208,79 +208,229 @@ export async function scheduleInactivityTriggers(limit=100) {
   return created;
 }
 
-export async function processDueWorkflowRuns(limit=20) {
+export async function processDueWorkflowRuns(limit = 20) {
   assertDb();
-  const safe=Math.min(Math.max(Number(limit)||20,1),50);
-  const claimClient=await dbPool.connect();
-  let runs=[];
-  try {
-    const r=await claimClient.query(`WITH picked AS (
-      SELECT id FROM automation_runs
-      WHERE (status IN ('queued','waiting')
-        AND (next_run_at IS NULL OR next_run_at<=NOW()))
-        OR (status='running' AND updated_at < NOW() - INTERVAL '2 minutes')
-      ORDER BY next_run_at NULLS FIRST,created_at
-      FOR UPDATE SKIP LOCKED LIMIT $1)
-      UPDATE automation_runs r
-      SET status='running',attempts=attempts+1,
-          started_at=COALESCE(started_at,NOW()),updated_at=NOW()
-      FROM picked WHERE r.id=picked.id RETURNING r.*`,[safe]);
-    runs=r.rows;
-  } finally { claimClient.release(); }
+  const safe = Math.min(Math.max(Number(limit) || 20, 1), 50);
+  const claimClient = await dbPool.connect();
+  let runs = [];
 
-  for(const run of runs) {
+  try {
+    const claimed = await claimClient.query(
+      `WITH picked AS (
+        SELECT id
+        FROM automation_runs
+        WHERE (
+          status IN ('queued', 'waiting')
+          AND (next_run_at IS NULL OR next_run_at <= NOW())
+        ) OR (
+          status = 'running'
+          AND (executor_lease_until IS NULL OR executor_lease_until < NOW())
+        )
+        ORDER BY next_run_at NULLS FIRST, created_at
+        FOR UPDATE SKIP LOCKED
+        LIMIT $1
+      )
+      UPDATE automation_runs AS run
+      SET status = 'running',
+          attempts = run.attempts + 1,
+          started_at = COALESCE(run.started_at, NOW()),
+          updated_at = NOW(),
+          executor_token = gen_random_uuid(),
+          executor_lease_until = NOW() + INTERVAL '15 minutes'
+      FROM picked
+      WHERE run.id = picked.id
+      RETURNING run.*`,
+      [safe],
+    );
+    runs = claimed.rows;
+  } finally {
+    claimClient.release();
+  }
+
+  for (const run of runs) {
     try {
-      const wf=(await dbPool.query(
-        "SELECT * FROM automation_workflows WHERE tenant_id=$1 AND id=$2 AND status='active'",
-        [run.tenant_id,run.workflow_id],
-      )).rows[0];
-      if(!wf) throw new Error("Workflow is no longer active");
-      const steps=normalizeWorkflowDefinition(wf.definition).steps;
-      let idx=run.current_step;
-      const ctx=run.context||{};
-      let executed=0;
-      while(idx<steps.length) {
-        if(++executed>MAX_STEPS) throw new Error("Workflow execution step limit exceeded");
-        const step=steps[idx];
-        if(step.action==="wait") {
-          await dbPool.query(
-            "UPDATE automation_runs SET status='waiting',current_step=$3,next_run_at=NOW()+($5*INTERVAL '1 second'),context=$4::jsonb,updated_at=NOW() WHERE tenant_id=$1 AND id=$2",
-            [run.tenant_id,run.id,idx+1,JSON.stringify(ctx),step.seconds],
-          );
+      // A batch may sit while earlier runs execute. Confirm ownership and
+      // renew the lease before loading workflow data or performing side effects.
+      const initialLease = await dbPool.query(
+        `UPDATE automation_runs
+         SET executor_lease_until = NOW() + INTERVAL '15 minutes',
+             updated_at = NOW()
+         WHERE tenant_id = $1
+           AND id = $2
+           AND status = 'running'
+           AND executor_token = $3
+           AND executor_lease_until > NOW()
+         RETURNING id`,
+        [run.tenant_id, run.id, run.executor_token],
+      );
+      if (initialLease.rowCount !== 1) continue;
+
+      const wf = (
+        await dbPool.query(
+          "SELECT * FROM automation_workflows WHERE tenant_id=$1 AND id=$2 AND status='active'",
+          [run.tenant_id, run.workflow_id],
+        )
+      ).rows[0];
+      if (!wf) throw new Error("Workflow is no longer active");
+
+      const steps = normalizeWorkflowDefinition(wf.definition).steps;
+      let idx = run.current_step;
+      const ctx = run.context || {};
+      let executed = 0;
+      let lostLease = false;
+
+      while (idx < steps.length) {
+        if (++executed > MAX_STEPS) {
+          throw new Error("Workflow execution step limit exceeded");
+        }
+
+        // Do not start another action if this executor's lease expired or a
+        // newer executor replaced its token while the previous action awaited.
+        const renewedLease = await dbPool.query(
+          `UPDATE automation_runs
+           SET executor_lease_until = NOW() + INTERVAL '15 minutes',
+               updated_at = NOW()
+           WHERE tenant_id = $1
+             AND id = $2
+             AND status = 'running'
+             AND executor_token = $3
+             AND executor_lease_until > NOW()
+           RETURNING id`,
+          [run.tenant_id, run.id, run.executor_token],
+        );
+        if (renewedLease.rowCount !== 1) {
+          lostLease = true;
           break;
         }
-        if(step.action==="condition"){ idx=condition(step,ctx)?step.if_true:step.if_false; continue; }
-        if(step.action==="send_message"){
-          const client=await dbPool.connect();
-          try { await executeSendMessage(client,run,step,idx); } finally { client.release(); }
-        } else if(step.action==="add_tag"){
-          const client=await dbPool.connect();
-          try { await executeTag(client,run,step); } finally { client.release(); }
-        } else if(step.action==="webhook"){
-          await executeWebhook(step,run,ctx,idx);
+
+        const step = steps[idx];
+
+        if (step.action === "wait") {
+          const waiting = await dbPool.query(
+            `UPDATE automation_runs
+             SET status = 'waiting',
+                 current_step = $3,
+                 next_run_at = NOW() + ($5 * INTERVAL '1 second'),
+                 context = $4::jsonb,
+                 updated_at = NOW(),
+                 executor_token = NULL,
+                 executor_lease_until = NULL
+             WHERE tenant_id = $1
+               AND id = $2
+               AND status = 'running'
+               AND executor_token = $6
+               AND executor_lease_until > NOW()
+             RETURNING id`,
+            [
+              run.tenant_id,
+              run.id,
+              idx + 1,
+              JSON.stringify(ctx),
+              step.seconds,
+              run.executor_token,
+            ],
+          );
+          if (waiting.rowCount !== 1) lostLease = true;
+          break;
         }
+
+        if (step.action === "condition") {
+          idx = condition(step, ctx) ? step.if_true : step.if_false;
+          continue;
+        }
+
+        if (step.action === "send_message") {
+          const client = await dbPool.connect();
+          try {
+            await executeSendMessage(client, run, step, idx);
+          } finally {
+            client.release();
+          }
+        } else if (step.action === "add_tag") {
+          const client = await dbPool.connect();
+          try {
+            await executeTag(client, run, step);
+          } finally {
+            client.release();
+          }
+        } else if (step.action === "webhook") {
+          await executeWebhook(step, run, ctx, idx);
+        }
+
         idx++;
+        const advanced = await dbPool.query(
+          `UPDATE automation_runs
+           SET current_step = $3,
+               context = $4::jsonb,
+               updated_at = NOW(),
+               executor_lease_until = NOW() + INTERVAL '15 minutes'
+           WHERE tenant_id = $1
+             AND id = $2
+             AND status = 'running'
+             AND executor_token = $5
+             AND executor_lease_until > NOW()
+           RETURNING id`,
+          [run.tenant_id, run.id, idx, JSON.stringify(ctx), run.executor_token],
+        );
+        if (advanced.rowCount !== 1) {
+          lostLease = true;
+          break;
+        }
+      }
+
+      if (lostLease) continue;
+
+      if (idx >= steps.length) {
         await dbPool.query(
-          "UPDATE automation_runs SET current_step=$3,context=$4::jsonb,updated_at=NOW() WHERE tenant_id=$1 AND id=$2 AND status='running'",
-          [run.tenant_id,run.id,idx,JSON.stringify(ctx)],
+          `UPDATE automation_runs
+           SET status = 'completed',
+               current_step = $3,
+               next_run_at = NULL,
+               completed_at = NOW(),
+               updated_at = NOW(),
+               executor_token = NULL,
+               executor_lease_until = NULL
+           WHERE tenant_id = $1
+             AND id = $2
+             AND status = 'running'
+             AND executor_token = $4
+             AND executor_lease_until > NOW()
+           RETURNING id`,
+          [run.tenant_id, run.id, idx, run.executor_token],
         );
       }
-      if(idx>=steps.length) {
-        await dbPool.query(
-          "UPDATE automation_runs SET status='completed',current_step=$3,next_run_at=NULL,completed_at=NOW(),updated_at=NOW() WHERE tenant_id=$1 AND id=$2 AND status='running'",
-          [run.tenant_id,run.id,idx],
-        );
-      }
-    } catch(error) {
-      const retry=run.attempts<MAX_RETRIES;
+    } catch (error) {
+      const retry = run.attempts < MAX_RETRIES;
+      // Failure reporting is fenced too: stale executors must not requeue or
+      // fail a workflow that a newer executor already owns.
       await dbPool.query(
-        `UPDATE automation_runs SET status=$3,
-          next_run_at=CASE WHEN $3='queued' THEN NOW()+(LEAST(300,POWER(2,GREATEST(attempts-1,0))*2)*INTERVAL '1 second') ELSE NULL END,
-          last_error=$4,updated_at=NOW()
-          WHERE tenant_id=$1 AND id=$2 AND status='running'`,
-        [run.tenant_id,run.id,retry?"queued":"failed",String(error.message||error).slice(0,1000)],
+        `UPDATE automation_runs
+         SET status = $3,
+             next_run_at = CASE
+               WHEN $3 = 'queued'
+               THEN NOW() + (LEAST(300, POWER(2, GREATEST(attempts - 1, 0)) * 2) * INTERVAL '1 second')
+               ELSE NULL
+             END,
+             last_error = $4,
+             updated_at = NOW(),
+             executor_token = NULL,
+             executor_lease_until = NULL
+         WHERE tenant_id = $1
+           AND id = $2
+           AND status = 'running'
+           AND executor_token = $5
+           AND executor_lease_until > NOW()
+         RETURNING id`,
+        [
+          run.tenant_id,
+          run.id,
+          retry ? "queued" : "failed",
+          String(error.message || error).slice(0, 1000),
+          run.executor_token,
+        ],
       );
     }
   }
+
   return runs.length;
 }
