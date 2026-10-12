@@ -13,12 +13,16 @@ describe("inbound message ordering (PostgreSQL)", { skip }, () => {
   let dbPool = null;
   let runMigrations = null;
   let persistInboundMessage = null;
+  let persistOutboundMessage = null;
 
   before(async () => {
     process.env.DATABASE_URL = integrationUrl;
     ({ runMigrations } = await import("../src/database/migrate.js"));
     ({ dbPool } = await import("../src/config/database.js"));
-    ({ persistInboundMessage } = await import("../src/services/message-persistence.service.js"));
+    ({
+      persistInboundMessage,
+      persistOutboundMessage,
+    } = await import("../src/services/message-persistence.service.js"));
 
     assert.ok(dbPool, "dbPool must use the integration database URL");
     await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
@@ -90,6 +94,24 @@ describe("inbound message ordering (PostgreSQL)", { skip }, () => {
       "late-arriving messages must not regress conversation activity time",
     );
     assert.equal(conversation.rows[0].unread_count, 2);
+
+    await persistOutboundMessage({
+      tenantId,
+      conversationId: newest.conversationId,
+      whatsappMessageId: "wamid-order-delayed-outbound-" + randomUUID(),
+      body: "outbound history repaired later",
+      sentAt: new Date(olderReceivedAt.getTime() - 60 * 1000),
+    });
+
+    const afterOutboundRepair = await dbPool.query(
+      "SELECT last_message_at FROM conversations WHERE tenant_id=$1 AND id=$2",
+      [tenantId, newest.conversationId],
+    );
+    assert.equal(
+      new Date(afterOutboundRepair.rows[0].last_message_at).getTime(),
+      newestReceivedAt.getTime(),
+      "delayed outbound history persistence must not regress conversation activity time either",
+    );
   });
 
   it("duplicate replay of an old inbound event preserves the newest activity timestamp and unread count", async () => {
