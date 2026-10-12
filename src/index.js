@@ -48,9 +48,11 @@ import {
   findRecoverableDeliveries,
   getDelivery,
   markDeliveryFailed,
+  markDeliveryRequestStarted,
   markDeliverySent,
   markDeliveryStatus,
   markDeliveryUnknown,
+  markExpiredAmbiguousDeliveries,
   prepareDelivery,
   syncDeliveryToMessage,
 } from "./services/whatsapp-delivery.service.js";
@@ -579,6 +581,12 @@ async function processInboxMessage(inboxId, log = logger) {
     const accessToken = decryptSecret(tenant.accessTokenEncrypted);
 
     try {
+      await markDeliveryRequestStarted(
+        delivery.id,
+        message.tenant_id,
+        deliveryClaim.leaseToken,
+        deliveryClaim.delivery.attempt_count,
+      );
       const sentMessage = await sendWhatsAppMessage({
         to: deliveryClaim.delivery.recipient_wa_id,
         message: deliveryClaim.delivery.body,
@@ -669,6 +677,18 @@ async function processInboxMessage(inboxId, log = logger) {
 
 async function recoverPendingDeliveries() {
   try {
+    // A stale lease after a provider request started is ambiguous: WhatsApp
+    // may have accepted the send even if the worker died before persisting its
+    // response. Mark it UNKNOWN and wait for the provider callback instead of
+    // blindly sending the customer a duplicate message.
+    const ambiguous = await markExpiredAmbiguousDeliveries(50);
+    if (ambiguous.length > 0) {
+      logger.warn(
+        { count: ambiguous.length, deliveryIds: ambiguous.map((row) => row.id) },
+        "WhatsApp delivery outcome uncertain after expired request lease",
+      );
+    }
+
     await failExhaustedDeliveries();
     const pending = await findRecoverableDeliveries(50);
 
@@ -717,6 +737,12 @@ async function recoverPendingDeliveries() {
         const accessToken = decryptSecret(tenant.accessTokenEncrypted);
 
         try {
+          await markDeliveryRequestStarted(
+            delivery.id,
+            delivery.tenant_id,
+            claim.leaseToken,
+            claim.delivery.attempt_count,
+          );
           const sentMessage = await sendWhatsAppMessage({
             to: delivery.recipient_wa_id,
             message: delivery.body,
