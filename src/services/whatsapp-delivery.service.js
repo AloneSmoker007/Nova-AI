@@ -563,11 +563,11 @@ export async function failExhaustedDeliveries(limit = 50) {
 
   const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
 
-  // Finalize deliveries that hit MAX_DELIVERY_ATTEMPTS while nobody holds a
-  // live lease. They can never be claimed again (the claim gate enforces the
-  // cap), so this only moves them to the terminal FAILED state. Rows with a
-  // live lease are skipped: the fenced attempt_count CAS keeps the current
-  // owner authoritative.
+  // Finalize only safe pre-send retries that hit MAX_DELIVERY_ATTEMPTS.
+  // A row whose provider request started is ambiguous on lease expiry and must
+  // remain UNKNOWN rather than being mislabeled FAILED or automatically resent.
+  // Rows with a live lease are skipped: the fenced attempt_count CAS keeps the
+  // current owner authoritative.
   const result = await dbPool.query(
     `
       UPDATE whatsapp_deliveries
@@ -582,6 +582,7 @@ export async function failExhaustedDeliveries(limit = 50) {
         FROM whatsapp_deliveries
         WHERE state = 'SENDING'
           AND provider_message_id IS NULL
+          AND provider_request_started_at IS NULL
           AND attempt_count >= $1
           AND (lease_until IS NULL OR lease_until < NOW())
         ORDER BY last_attempt_at ASC
