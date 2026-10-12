@@ -36,3 +36,17 @@ test("escapes ICS text delimiters and newlines", () => {
   assert.match(ics, /SUMMARY:A\\,B\\;C/);
   assert.match(ics, /DESCRIPTION:line 1\\nline 2/);
 });
+
+test("escapes lone carriage returns so appointment notes cannot inject ICS properties", () => {
+  const notes = "legitimate note\\rX-ATTACH:https://attacker.example/payload\\nSUMMARY:Injected";
+  const ics = buildIcs({ ...appointment, notes });
+  const lines = ics.split("\\r\\n");
+
+  assert.ok(
+    lines.includes("DESCRIPTION:legitimate note\\\\nX-ATTACH:https://attacker.example/payload\\\\nSUMMARY:Injected"),
+    "CR and LF in text must become escaped iCalendar newline sequences",
+  );
+  assert.equal(lines.filter((line) => line.startsWith("X-ATTACH:")).length, 0);
+  assert.equal(lines.filter((line) => line === "BEGIN:VEVENT").length, 1);
+  assert.equal(lines.filter((line) => line.startsWith("SUMMARY:")).length, 1);
+});
