@@ -20,10 +20,10 @@ export async function listAppointmentTypes(tenantId) { tenantId=validTenant(tena
 export function validateBusinessHourRange(startTime, endTime) {
   const validStart =
     typeof startTime === "string" &&
-    /^(?:[01]\\d|2[0-3]):[0-5]\\d$/.test(startTime);
+    /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(startTime);
   const validEnd =
     typeof endTime === "string" &&
-    (/^(?:[01]\\d|2[0-3]):[0-5]\\d$/.test(endTime) || endTime === "24:00");
+    (/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(endTime) || endTime === "24:00");
 
   if (!validStart || !validEnd || startTime >= endTime) {
     throw new Error("Invalid business hours");
