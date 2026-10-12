@@ -18,12 +18,32 @@ WHERE occupied_until IS NULL;
 ALTER TABLE appointments
   ALTER COLUMN occupied_until SET NOT NULL;
 
+-- Existing appointments may already overlap because older application versions
+-- lacked a database-level exclusion constraint. Keep those rows grandfathered,
+-- while every new row opts into constraint enforcement.
+ALTER TABLE appointments
+  ADD COLUMN IF NOT EXISTS enforce_overlap BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE appointments
+  ALTER COLUMN enforce_overlap SET DEFAULT TRUE;
+
 CREATE OR REPLACE FUNCTION prevent_appointment_overlap()
 RETURNS TRIGGER AS $$
 BEGIN
+  -- The migration's existing rows are grandfathered. New inserts always opt in;
+  -- updates preserve the prior flag so routine edits to a legacy row don't make
+  -- an old overlap suddenly block unrelated appointment administration.
+  IF TG_OP = 'INSERT' THEN
+    NEW.enforce_overlap := TRUE;
+  ELSE
+    NEW.enforce_overlap := OLD.enforce_overlap;
+  END IF;
+
   NEW.occupied_until := NEW.ends_at + (NEW.buffer_minutes * INTERVAL '1 minute');
 
-  IF NEW.status IN ('pending', 'confirmed') AND EXISTS (
+  -- New/enforced bookings are checked against every active appointment,
+  -- including grandfathered legacy rows, before the row is written.
+  IF NEW.enforce_overlap AND NEW.status IN ('pending', 'confirmed') AND EXISTS (
     SELECT 1
     FROM appointments AS appointment
     WHERE appointment.tenant_id = NEW.tenant_id
@@ -56,4 +76,4 @@ ALTER TABLE appointments
     tenant_id WITH =,
     tstzrange(starts_at, occupied_until, '[)') WITH &&
   )
-  WHERE (status IN ('pending', 'confirmed'));
+  WHERE (status IN ('pending', 'confirmed') AND enforce_overlap);
