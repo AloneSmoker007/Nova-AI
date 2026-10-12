@@ -6,7 +6,11 @@ process.env.AUTOMATION_WEBHOOK_ALLOWLIST = "example.com";
 process.env.DATABASE_URL ||= "postgres://automation-test:automation-test@127.0.0.1:1/automation_test";
 
 const { dbPool } = await import("../src/config/database.js");
-const { normalizeWorkflowDefinition, triggerWorkflows } = await import("../src/services/automation.service.js");
+const {
+  normalizeWorkflowDefinition,
+  serializeConfiguredWebhookBody,
+  triggerWorkflows,
+} = await import("../src/services/automation.service.js");
 
 test.afterEach(() => mock.restoreAll());
 test.after(async () => {
@@ -150,6 +154,33 @@ test("rejects insecure and non-allowlisted webhooks", () => {
     () => normalizeWorkflowDefinition({ steps: [{ action: "webhook", url: "https://evil.example/hook" }] }),
     /allowlisted/,
   );
+});
+
+test("serializes only the configured webhook payload, never implicit run context", () => {
+  const configuredBody = {
+    event: "support.ticket.updated",
+    caseId: "CASE-123",
+    fields: { priority: "normal" },
+  };
+  const step = normalizeWorkflowDefinition({
+    steps: [{
+      action: "webhook",
+      url: "https://example.com/hook",
+      body: configuredBody,
+    }],
+  }).steps[0];
+  const requestBody = serializeConfiguredWebhookBody(step);
+
+  assert.deepEqual(JSON.parse(requestBody), configuredBody);
+  assert.ok(!requestBody.includes("PRIVATE_CUSTOMER_CONTEXT"), "the executor must not append run context to the configured payload");
+});
+
+test("webhook serialization defaults to an empty object if no body was configured", () => {
+  const step = normalizeWorkflowDefinition({
+    steps: [{ action: "webhook", url: "https://example.com/hook" }],
+  }).steps[0];
+
+  assert.equal(serializeConfiguredWebhookBody(step), "{}");
 });
 
 test("validates JSON-safe webhook bodies, including objects and arrays", () => {
