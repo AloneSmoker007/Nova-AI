@@ -137,7 +137,7 @@ test("copilot policy remains trusted while summaries and conversation messages s
   );
 
   const userPayloadText = prompt.contents[0].parts[0].text;
-  const jsonStart = userPayloadText.indexOf("\\n");
+  const jsonStart = userPayloadText.indexOf("\n");
   assert.ok(jsonStart >= 0, "the untrusted JSON must follow its explicit preface");
   const payload = JSON.parse(userPayloadText.slice(jsonStart + 1));
   assert.equal(payload.businessContext.customInstructions, "Use the owner's configured sales guardrails.");
