@@ -133,8 +133,8 @@ export function buildBusinessContext(brain) {
   // Shrink oversized free-text fields explicitly before dropping structured facts.
   // Each setter updates the exact field being shortened; do not confuse dynamic
   // customer context with owner-authored custom instructions.
-  const collectionKeys = ["products", "faqs", "rules"];
-  let collectionCursor = 0;
+  const trimTargetKeys = ["products", "faqs", "rules", "persona", "salesGuardrails", "languageConfig", "hours"];
+  let trimTargetCursor = 0;
   while (JSON.stringify(businessContext).length > MAX_CONTEXT_LENGTH) {
     const shrinkFields = [
       {
@@ -178,31 +178,33 @@ export function buildBusinessContext(brain) {
     }
     if (shortened) continue;
 
-    // Trim collections round-robin instead of exhausting one category
-    // (for example products) before touching the others.
-    let trimmedCollection = false;
-    for (let offset = 0; offset < collectionKeys.length; offset += 1) {
-      const index = (collectionCursor + offset) % collectionKeys.length;
-      const key = collectionKeys[index];
-      if (businessContext[key].length > 0) {
-        businessContext[key].pop();
-        collectionCursor = (index + 1) % collectionKeys.length;
-        trimmedCollection = true;
-        break;
-      }
-    }
-    if (trimmedCollection) continue;
+    // Trim collection entries and map entries round-robin. This keeps a
+    // representative subset of products, FAQs, rules, persona and guardrails
+    // instead of deleting one whole category before touching the next.
+    let trimmedEntry = false;
+    for (let offset = 0; offset < trimTargetKeys.length; offset += 1) {
+      const index = (trimTargetCursor + offset) % trimTargetKeys.length;
+      const key = trimTargetKeys[index];
+      const value = businessContext[key];
 
-    let removedMapEntry = false;
-    for (const map of ["persona", "salesGuardrails", "languageConfig", "hours"]) {
-      const keys = Object.keys(businessContext[map]);
-      if (keys.length > 0) {
-        delete businessContext[map][keys[keys.length - 1]];
-        removedMapEntry = true;
+      if (Array.isArray(value) && value.length > 0) {
+        value.pop();
+        trimTargetCursor = (index + 1) % trimTargetKeys.length;
+        trimmedEntry = true;
         break;
       }
+
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const keys = Object.keys(value);
+        if (keys.length > 0) {
+          delete value[keys[keys.length - 1]];
+          trimTargetCursor = (index + 1) % trimTargetKeys.length;
+          trimmedEntry = true;
+          break;
+        }
+      }
     }
-    if (removedMapEntry) continue;
+    if (trimmedEntry) continue;
 
     // All supported fields are already at their minimum sizes. Fail closed
     // with a valid, small payload rather than spin forever or corrupt fields.
