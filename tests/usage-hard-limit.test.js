@@ -306,7 +306,7 @@ test("the dev-only Gemini test route is privileged and rate-limited", () => {
   assert.ok(route.includes('requireRole("owner", "admin")'), "only business owners/admins may invoke diagnostics");
   assert.match(
     indexSource,
-    /const geminiTestLimiter = rateLimit\(\{[\s\S]*?max: 5,[\s\S]*?15 \* 60 \* 1000/,
+    /const geminiTestLimiter = rateLimit\(\{\s*windowMs: 15 \* 60 \* 1000,\s*max: 5,/,
     "the per-IP diagnostic limit must stay at five requests per fifteen minutes",
   );
 });
