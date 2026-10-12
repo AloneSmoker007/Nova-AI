@@ -6,6 +6,8 @@ const LEASE_SECONDS = 120;
 const LEASE_HEARTBEAT_SECONDS = 30;
 const MAX_ATTEMPTS = 5;
 const MAX_ERROR_LENGTH = 1000;
+const MAX_MANUAL_RETRIES = 10;
+const MAX_DEAD_LETTER_PAGE_SIZE = 100;
 
 function assertDatabase() {
   if (!isDatabaseConfigured() || !dbPool) {
@@ -19,6 +21,11 @@ function validateTenantId(tenantId) {
 
 function validateInboxId(inboxId) {
   return typeof inboxId === "string" && inboxId.trim() !== "";
+}
+
+function validateUuid(value) {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
 }
 
 function normalizeError(error) {
@@ -423,4 +430,74 @@ export async function recoverExpiredLeases(limit = 100) {
   );
 
   return result.rows;
+}
+
+export async function listDeadLetterMessages(tenantId, limit = 50) {
+  assertDatabase();
+  if (!validateUuid(tenantId)) throw new Error("Invalid tenant ID");
+
+  const requested = Number(limit);
+  const safeLimit = Number.isInteger(requested)
+    ? Math.min(Math.max(requested, 1), MAX_DEAD_LETTER_PAGE_SIZE)
+    : 50;
+  const result = await dbPool.query(
+    `SELECT
+       id, whatsapp_message_id, wa_id, profile_name, message_type, body,
+       received_at, attempts, last_error, manual_retry_count,
+       last_manual_retry_at, last_manual_retry_by, last_manual_retry_reason,
+       updated_at
+     FROM webhook_messages
+     WHERE tenant_id = $1 AND state = 'DEAD_LETTER'
+     ORDER BY updated_at DESC, id ASC
+     LIMIT $2`,
+    [tenantId.trim(), safeLimit],
+  );
+  return result.rows;
+}
+
+export async function requeueDeadLetterMessage(inboxId, tenantId, requestedBy, reason) {
+  assertDatabase();
+  if (!validateUuid(inboxId) || !validateUuid(tenantId) || !validateUuid(requestedBy)) {
+    throw new Error("Invalid webhook inbox identifier");
+  }
+  if (typeof reason !== "string" || !reason.trim() || reason.trim().length > 500) {
+    throw new Error("Invalid manual retry reason");
+  }
+
+  // Explicit operator action only. Reset the current retry cycle and leave any
+  // durable generated response/provider message ID intact so existing delivery
+  // reconciliation can avoid sending a duplicate outbound message.
+  const result = await dbPool.query(
+    `UPDATE webhook_messages AS inbox
+     SET state = 'RETRY_WAIT',
+         attempts = 0,
+         available_at = NOW(),
+         lease_until = NULL,
+         lease_token = NULL,
+         queue_dispatched_at = NULL,
+         completed_at = NULL,
+         last_error = NULL,
+         manual_retry_count = inbox.manual_retry_count + 1,
+         last_manual_retry_at = NOW(),
+         last_manual_retry_by = $3,
+         last_manual_retry_reason = $4,
+         updated_at = NOW()
+     WHERE inbox.id = $1
+       AND inbox.tenant_id = $2
+       AND inbox.state = 'DEAD_LETTER'
+       AND inbox.manual_retry_count < $5
+       AND EXISTS (
+         SELECT 1
+         FROM users AS operator
+         WHERE operator.id = $3
+           AND operator.tenant_id = $2
+           AND operator.status = 'active'
+       )
+     RETURNING
+       inbox.id, inbox.tenant_id, inbox.state, inbox.attempts,
+       inbox.manual_retry_count, inbox.last_manual_retry_at,
+       inbox.last_manual_retry_by, inbox.last_manual_retry_reason`,
+    [inboxId.trim(), tenantId.trim(), requestedBy.trim(), reason.trim(), MAX_MANUAL_RETRIES],
+  );
+  return result.rows[0] ?? null;
 }
