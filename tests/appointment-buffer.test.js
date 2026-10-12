@@ -110,4 +110,53 @@ describe("appointment buffer enforcement (PostgreSQL)", { skip }, () => {
     const rejected = attempts.find((result) => result.status === "rejected");
     assert.match(rejected.reason.message, /Appointment time is already booked/);
   });
+
+  it("grandfathers already-overlapping legacy rows but rejects new bookings against them", async () => {
+    const { tenantId, noBuffer } = await seedTenantAndTypes();
+    const start = new Date(Date.now() + 120 * 60 * 60 * 1000);
+    start.setUTCMinutes(0, 0, 0);
+
+    const first = await booking(tenantId, noBuffer.id, start, "Legacy overlap A");
+    const second = await booking(
+      tenantId,
+      noBuffer.id,
+      new Date(start.getTime() + 2 * 60 * 60 * 1000),
+      "Legacy overlap B",
+    );
+
+    // Simulate pre-migration rows: bypass the new trigger while removing both
+    // from the exclusion index, then make the historical ranges overlap.
+    await dbPool.query("ALTER TABLE appointments DISABLE TRIGGER appointments_no_overlap");
+    try {
+      await dbPool.query(
+        "UPDATE appointments SET enforce_overlap = FALSE WHERE id = ANY($1::uuid[])",
+        [[first.id, second.id]],
+      );
+      await dbPool.query(
+        `UPDATE appointments
+         SET starts_at = $3, ends_at = $4, occupied_until = $4
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, second.id, first.starts_at, first.ends_at],
+      );
+    } finally {
+      await dbPool.query("ALTER TABLE appointments ENABLE TRIGGER appointments_no_overlap");
+    }
+
+    const legacyRows = await dbPool.query(
+      `SELECT id FROM appointments
+       WHERE tenant_id = $1
+         AND enforce_overlap = FALSE
+         AND starts_at < $3
+         AND occupied_until > $2`,
+      [tenantId, start, start],
+    );
+    assert.equal(legacyRows.rowCount, 2, "both historical appointments remain untouched and grandfathered");
+
+    await assert.rejects(
+      () => booking(tenantId, noBuffer.id, start, "New conflicting booking"),
+      /Appointment time is already booked/,
+      "new bookings must still be checked against grandfathered legacy appointments",
+    );
+  });
+
 });
