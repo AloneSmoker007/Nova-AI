@@ -109,3 +109,8 @@ jobs:
       # This suite also resets public schema, so keep it serialized.
       - name: Run AI signal idempotency integration tests
         run: node --test tests/ai-signal-idempotency.test.js
+
+      # TASK-08 regression coverage: only the current automation executor may
+      # advance a run; this integration suite resets public schema too.
+      - name: Run automation executor fencing integration tests
+        run: node --test tests/automation-executor-fencing.test.js
