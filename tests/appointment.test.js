@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { buildCalendarLinks, buildIcs, validateBusinessHourRange } = await import("../src/services/appointment.service.js");
+const {
+  buildCalendarLinks,
+  buildIcs,
+  validateBusinessHourRange,
+  validateAppointmentTimezone,
+} = await import("../src/services/appointment.service.js");
 
 const appointment = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -78,6 +83,26 @@ test("validates business-hour clock ranges before database writes", () => {
       () => validateBusinessHourRange(start, end),
       /Invalid business hours/,
       `invalid business-hour range should be rejected: ${String(start)}–${String(end)}`,
+    );
+  }
+});
+
+test("accepts valid IANA time zones with multiple path segments and aliases", () => {
+  for (const zone of [
+    "UTC",
+    "GMT",
+    "Asia/Kolkata",
+    "America/Argentina/Buenos_Aires",
+    "America/Indiana/Indianapolis",
+  ]) {
+    assert.equal(validateAppointmentTimezone(zone), zone);
+  }
+
+  for (const zone of ["Not/ARealZone", "America/Argentina/Not_A_Zone", ""]) {
+    assert.throws(
+      () => validateAppointmentTimezone(zone),
+      /Invalid timezone|Invalid value/,
+      `invalid timezone should be rejected: ${zone}`,
     );
   }
 });
