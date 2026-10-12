@@ -98,7 +98,9 @@ test("accepts valid IANA time zones with multiple path segments and aliases", ()
     assert.equal(validateAppointmentTimezone(zone), zone);
   }
 
-  for (const zone of ["Not/ARealZone", "America/Argentina/Not_A_Zone", ""]) {
+  assert.equal(validateAppointmentTimezone(""), "UTC", "blank timezone keeps the existing UTC default");
+
+  for (const zone of ["Not/ARealZone", "America/Argentina/Not_A_Zone"]) {
     assert.throws(
       () => validateAppointmentTimezone(zone),
       /Invalid timezone|Invalid value/,
