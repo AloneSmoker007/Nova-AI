@@ -30,6 +30,7 @@ import {
 } from "./services/queue.service.js";
 import {
   ingestWebhookMessage,
+  normalizeIncomingWebhookContent,
   getInboxMessage,
   claimInboxMessage,
   markQueueDispatched,
@@ -268,7 +269,15 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
       await triggerWorkflows({
         tenantId: tenant.tenantId,
         triggerType: "message_received",
-        context: { message: { id: message.id, from: message.from, body: message.text?.body || "" }, inboxId: inboxMessage.id },
+        context: {
+          message: {
+            id: message.id,
+            from: message.from,
+            type: inboxMessage.message_type,
+            body: inboxMessage.body,
+          },
+          inboxId: inboxMessage.id,
+        },
       });
     }
   } catch (error) {
@@ -331,8 +340,15 @@ function extractWebhookEvents(body) {
             continue;
           }
 
-          if (!message?.text?.body) continue;
-          messages.push({ ...message, phoneNumberId });
+          // Preserve supported non-text events too. The durable inbox stores
+          // type + caption/placeholder; media bytes are not downloaded here.
+          // profileName must come from the webhook's contacts[] entry, not the
+          // message object (Meta does not repeat it on each message).
+          messages.push({
+            ...message,
+            phoneNumberId,
+            profileName: value?.contacts?.[0]?.profile?.name,
+          });
         }
       }
 
@@ -424,6 +440,24 @@ async function processInboxMessage(inboxId, log = logger) {
     if (handoffState?.ai_paused) {
       await markCompleted(message.id, message.tenant_id, leaseToken, null);
       log.info({ inboxId: message.id, tenantId: message.tenant_id, conversationId: persistedInbound.conversationId }, "AI paused; message left for human agent");
+      return;
+    }
+
+    // Media, locations, contact cards and interactive events are preserved in
+    // history, but are not sent to the text-only Gemini prompt or auto-replied
+    // to without a media retrieval/interpretation path. Leave them visible for
+    // human handling instead of dropping them or hallucinating about contents.
+    if (message.message_type !== "text") {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.info(
+        {
+          inboxId: message.id,
+          tenantId: message.tenant_id,
+          conversationId: persistedInbound.conversationId,
+          messageType: message.message_type,
+        },
+        "Non-text inbound stored for human review; automatic AI reply skipped",
+      );
       return;
     }
 
