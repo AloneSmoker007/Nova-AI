@@ -388,6 +388,22 @@ async function processInboxMessage(inboxId, log = logger) {
       receivedAt: message.received_at,
     });
 
+    // A provider message ID is idempotent within the tenant. If a retry
+    // reuses it with a different sender, WhatsApp number, type or body, do not
+    // attach the new payload to the original contact or let it reach AI memory.
+    if (persistedInbound.identityConflict) {
+      log.warn(
+        {
+          inboxId: message.id,
+          tenantId: message.tenant_id,
+          whatsappMessageId: message.whatsapp_message_id,
+        },
+        "Rejected conflicting duplicate WhatsApp message identity",
+      );
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      return;
+    }
+
     if (!persistedInbound.duplicate) {
       await registerInboundUsage({
         tenantId: message.tenant_id,
