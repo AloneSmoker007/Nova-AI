@@ -133,6 +133,8 @@ export function buildBusinessContext(brain) {
   // Shrink oversized free-text fields explicitly before dropping structured facts.
   // Each setter updates the exact field being shortened; do not confuse dynamic
   // customer context with owner-authored custom instructions.
+  const collectionKeys = ["products", "faqs", "rules"];
+  let collectionCursor = 0;
   while (JSON.stringify(businessContext).length > MAX_CONTEXT_LENGTH) {
     const shrinkFields = [
       {
@@ -176,13 +178,20 @@ export function buildBusinessContext(brain) {
     }
     if (shortened) continue;
 
-    const collection = ["products", "faqs", "rules"].find(
-      (key) => businessContext[key].length > 0,
-    );
-    if (collection) {
-      businessContext[collection].pop();
-      continue;
+    // Trim collections round-robin instead of exhausting one category
+    // (for example products) before touching the others.
+    let trimmedCollection = false;
+    for (let offset = 0; offset < collectionKeys.length; offset += 1) {
+      const index = (collectionCursor + offset) % collectionKeys.length;
+      const key = collectionKeys[index];
+      if (businessContext[key].length > 0) {
+        businessContext[key].pop();
+        collectionCursor = (index + 1) % collectionKeys.length;
+        trimmedCollection = true;
+        break;
+      }
     }
+    if (trimmedCollection) continue;
 
     let removedMapEntry = false;
     for (const map of ["persona", "salesGuardrails", "languageConfig", "hours"]) {
