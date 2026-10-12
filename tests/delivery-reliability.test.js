@@ -92,6 +92,44 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
     return { tenantId, inboxId, conversationId, phoneNumberId, delivery };
   }
 
+  async function seedAutomationDelivery() {
+    const base = await seedDelivery();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+
+    await dbPool.query(
+      `INSERT INTO automation_workflows
+         (id, tenant_id, name, status, trigger_type, trigger_config, definition)
+       VALUES ($1, $2, $3, 'active', 'manual', '{}'::jsonb, '{"version":1,"steps":[]}'::jsonb)`,
+      [workflowId, base.tenantId, "automation-" + workflowId],
+    );
+
+    const run = await dbPool.query(
+      `INSERT INTO automation_runs
+         (id, tenant_id, workflow_id, conversation_id, contact_id, status, context)
+       SELECT $1, $2, $3, c.id, c.contact_id, 'completed', '{}'::jsonb
+       FROM conversations c
+       WHERE c.tenant_id = $2 AND c.id = $4
+       RETURNING id`,
+      [runId, base.tenantId, workflowId, base.conversationId],
+    );
+    assert.equal(run.rowCount, 1, "automation run must belong to the seeded conversation");
+
+    const result = await dbPool.query(
+      `INSERT INTO whatsapp_deliveries
+         (tenant_id, inbox_message_id, conversation_id, recipient_wa_id, body, automation_run_id, automation_step)
+       VALUES ($1, NULL, $2, $3, $4, $5, 0)
+       RETURNING *`,
+      [base.tenantId, base.conversationId, "15550001111", "automation test delivery", runId],
+    );
+
+    return {
+      ...base,
+      automationRunId: runId,
+      automationDelivery: result.rows[0],
+    };
+  }
+
   // Time-warp: make the row fully stale (retry window elapsed AND lease expired).
   async function warpStale(deliveryId) {
     await dbPool.query(
@@ -468,4 +506,60 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
     assert.equal(row.attempt_count, 2);
     assert.equal(row.provider_message_id, "wamid.recovered-1");
   });
+  it("recovers PENDING automation deliveries that have no inbox message", async () => {
+    const { delivery, automationDelivery, tenantId } = await seedAutomationDelivery();
+    assert.equal(automationDelivery.inbox_message_id, null);
+    assert.ok(automationDelivery.automation_run_id);
+
+    const recoverable = await svc.findRecoverableDeliveries(50);
+    assert.ok(
+      recoverable.some((row) => row.id === automationDelivery.id && row.tenant_id === tenantId),
+      "pending automation delivery must enter the recovery scan",
+    );
+    assert.ok(
+      !recoverable.some((row) => row.id === delivery.id),
+      "an ordinary PENDING inbound delivery must not be dispatched by this recovery path",
+    );
+  });
+
+  it("reconciles automation callbacks through tenant-scoped conversation and WhatsApp-number joins", async () => {
+    const { tenantId, phoneNumberId, automationDelivery } = await seedAutomationDelivery();
+    const providerMessageId = "wamid.automation-status-test";
+    const callbackData = automationDelivery.delivery_key;
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    const wrongPhone = await svc.markDeliveryStatus({
+      tenantId,
+      phoneNumberId: "wrong-phone-number-id",
+      providerMessageId,
+      callbackData,
+      status: "delivered",
+      timestamp,
+    });
+    assert.equal(wrongPhone, null, "a callback for a different WhatsApp number must not match");
+
+    const wrongTenant = await svc.markDeliveryStatus({
+      tenantId: randomUUID(),
+      phoneNumberId,
+      providerMessageId,
+      callbackData,
+      status: "delivered",
+      timestamp,
+    });
+    assert.equal(wrongTenant, null, "a callback scoped to another tenant must not match");
+
+    const updated = await svc.markDeliveryStatus({
+      tenantId,
+      phoneNumberId,
+      providerMessageId,
+      callbackData,
+      status: "delivered",
+      timestamp,
+    });
+    assert.ok(updated, "automation status callback must find the delivery without an inbox_message_id");
+    assert.equal(updated.id, automationDelivery.id);
+    assert.equal(updated.state, "DELIVERED");
+    assert.equal(updated.provider_message_id, providerMessageId);
+  });
+
 });
