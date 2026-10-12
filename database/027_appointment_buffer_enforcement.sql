@@ -35,6 +35,11 @@ BEGIN
   -- an old overlap suddenly block unrelated appointment administration.
   IF TG_OP = 'INSERT' THEN
     NEW.enforce_overlap := TRUE;
+  ELSIF NEW.status IN ('pending', 'confirmed')
+    AND OLD.status NOT IN ('pending', 'confirmed') THEN
+    -- Reactivating a grandfathered booking is a new occupancy decision and
+    -- must pass the current overlap rules before returning to the calendar.
+    NEW.enforce_overlap := TRUE;
   ELSE
     NEW.enforce_overlap := OLD.enforce_overlap;
   END IF;
