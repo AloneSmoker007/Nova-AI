@@ -297,11 +297,17 @@ test("OCR extraction reserves quota before the Gemini call and releases on failu
   );
 });
 
-test("the dev-only Gemini test route stays out of production builds", () => {
+test("the dev-only Gemini test route is privileged and rate-limited", () => {
   const devSection = sliceBetween(indexSource, "if (!IS_PRODUCTION)", "app.use((req, res) => res.status(404)");
-  assert.ok(
-    devSection.includes("/api/test/gemini"),
-    "the un-gated Gemini test route must only exist behind the IS_PRODUCTION guard",
+  const route = sliceBetween(devSection, 'app.post(\n    "/api/test/gemini"', "// Register Task 16 routes");
+  assert.ok(devSection.includes("/api/test/gemini"), "the diagnostic route must remain dev-only");
+  assert.ok(route.includes("geminiTestLimiter"), "the route must use its dedicated low rate limit");
+  assert.ok(route.includes("requireAuth"), "the diagnostic route must require authentication");
+  assert.ok(route.includes('requireRole("owner", "admin")'), "only business owners/admins may invoke diagnostics");
+  assert.match(
+    indexSource,
+    /const geminiTestLimiter = rateLimit\(\{[\s\S]*?max: 5,[\s\S]*?15 \* 60 \* 1000/,
+    "the per-IP diagnostic limit must stay at five requests per fifteen minutes",
   );
 });
 
