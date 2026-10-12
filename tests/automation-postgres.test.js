@@ -327,6 +327,7 @@ describe("Automation SQL regressions against real PostgreSQL", { skip }, () => {
       result.rows.map((row) => [row.tenant_id, row.automation_step, row.body]),
       [[TENANT_A, 0, "Tenant A delivery"], [TENANT_B, 0, "Tenant B delivery"]],
     );
+  });
 
   it("normalizes numeric-string inactivity delays and safely ignores legacy non-integer config", async () => {
     const workflow = await createWorkflow({
@@ -362,6 +363,5 @@ describe("Automation SQL regressions against real PostgreSQL", { skip }, () => {
       () => scheduleInactivityTriggers(10),
       "invalid legacy inactivity configuration must use a safe default, not break scheduler recovery",
     );
-  });
   });
 });
