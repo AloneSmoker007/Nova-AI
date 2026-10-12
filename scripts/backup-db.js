@@ -85,16 +85,32 @@ async function createBackup() {
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
+  // Attach process lifecycle handlers immediately after spawn. An ENOENT or
+  // other startup failure can emit "error" before a stream pipeline finishes;
+  // waiting until after pipeline() risks an unhandled EventEmitter error.
+  const childCompletion = new Promise((resolve) => {
+    child.once("error", (error) => resolve({ error }));
+    child.once("close", (code) => resolve({ code }));
+  });
+
   try {
     const output = fs.createWriteStream(tempPath, { flags: "wx", mode: 0o600 });
     output.write(MAGIC);
     output.write(iv);
-    await pipeline(child.stdout, cipher, output);
-    const exitCode = await new Promise((resolve, reject) => {
-      child.on("error", reject);
-      child.on("close", resolve);
-    });
-    if (exitCode !== 0) throw new Error(`pg_dump failed (${exitCode}): ${stderr.slice(-2000)}`);
+
+    let pipelineError = null;
+    try {
+      await pipeline(child.stdout, cipher, output);
+    } catch (error) {
+      pipelineError = error;
+      child.kill("SIGTERM");
+    }
+
+    const result = await childCompletion;
+    if (result.error) throw new Error(`pg_dump failed to start: ${result.error.message}`);
+    if (result.code !== 0) throw new Error(`pg_dump failed (${result.code}): ${stderr.slice(-2000)}`);
+    if (pipelineError) throw pipelineError;
+
     await fsp.appendFile(tempPath, cipher.getAuthTag(), { mode: 0o600 });
     await fsp.rename(tempPath, finalPath);
     const stat = await fsp.stat(finalPath);
