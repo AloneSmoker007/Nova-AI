@@ -33,7 +33,7 @@ const STORED_MESSAGE_TYPES = new Set([
 
 function cleanMessageText(value, max = 4096) {
   return typeof value === "string"
-    ? value.replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, " ").trim().slice(0, max)
+    ? value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim().slice(0, max)
     : "";
 }
 
