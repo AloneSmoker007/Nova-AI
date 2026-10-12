@@ -208,7 +208,7 @@ export async function persistOutboundMessage({
     await client.query(
       `
         UPDATE conversations
-        SET last_message_at = $2, updated_at = NOW()
+        SET last_message_at = GREATEST(conversations.last_message_at, $2), updated_at = NOW()
         WHERE tenant_id = $1 AND id = $3
       `,
       [tenantId, sentAt, conversationId],
