@@ -152,6 +152,27 @@ describe("appointment buffer enforcement (PostgreSQL)", { skip }, () => {
     );
     assert.equal(legacyRows.rowCount, 2, "both historical appointments remain untouched and grandfathered");
 
+    // Re-activating a previously cancelled legacy row is a new occupancy
+    // decision and must not bypass the overlap trigger via its old flag.
+    await dbPool.query(
+      "UPDATE appointments SET status = 'cancelled' WHERE tenant_id=$1 AND id=$2",
+      [tenantId, first.id],
+    );
+    await assert.rejects(
+      () => dbPool.query(
+        "UPDATE appointments SET status = 'pending' WHERE tenant_id=$1 AND id=$2",
+        [tenantId, first.id],
+      ),
+      /Appointment time is already booked/,
+      "reactivating an overlapping legacy appointment must be rejected",
+    );
+    const reactivated = await dbPool.query(
+      "SELECT status, enforce_overlap FROM appointments WHERE tenant_id=$1 AND id=$2",
+      [tenantId, first.id],
+    );
+    assert.equal(reactivated.rows[0].status, "cancelled", "failed reactivation must leave the old status unchanged");
+    assert.equal(reactivated.rows[0].enforce_overlap, false, "failed reactivation must not rewrite the grandfathered row");
+
     await assert.rejects(
       () => booking(tenantId, noBuffer.id, start, "New conflicting booking"),
       /Appointment time is already booked/,
