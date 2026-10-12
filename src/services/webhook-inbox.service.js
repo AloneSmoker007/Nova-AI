@@ -26,6 +26,84 @@ function normalizeError(error) {
   return value.slice(0, MAX_ERROR_LENGTH);
 }
 
+const STORED_MESSAGE_TYPES = new Set([
+  "text", "image", "video", "audio", "document", "sticker", "location",
+  "contacts", "interactive", "button", "order", "reaction", "unsupported",
+]);
+
+function cleanMessageText(value, max = 4096) {
+  return typeof value === "string"
+    ? value.replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, " ").trim().slice(0, max)
+    : "";
+}
+
+export function normalizeIncomingWebhookContent(message) {
+  const rawType = typeof message?.type === "string"
+    ? message.type.trim().toLowerCase()
+    : message?.text?.body
+      ? "text"
+      : "unsupported";
+  const messageType = STORED_MESSAGE_TYPES.has(rawType) ? rawType : "unsupported";
+
+  if (messageType === "text") {
+    const body = cleanMessageText(message?.text?.body);
+    return body
+      ? { messageType, body, isText: true }
+      : { messageType: "unsupported", body: "[Message content unavailable]", isText: false };
+  }
+
+  let body;
+  switch (messageType) {
+    case "image":
+      body = cleanMessageText(message?.image?.caption) || "[Image received]";
+      break;
+    case "video":
+      body = cleanMessageText(message?.video?.caption) || "[Video received]";
+      break;
+    case "document":
+      body = cleanMessageText(message?.document?.caption) || "[Document received]";
+      break;
+    case "audio":
+      body = "[Audio message received]";
+      break;
+    case "sticker":
+      body = "[Sticker received]";
+      break;
+    case "location":
+      body = "[Location shared]";
+      break;
+    case "contacts":
+      body = "[Contact card shared]";
+      break;
+    case "interactive": {
+      const title = cleanMessageText(
+        message?.interactive?.button_reply?.title || message?.interactive?.list_reply?.title,
+        500,
+      );
+      body = title ? `Selected option: ${title}` : "[Interactive response received]";
+      break;
+    }
+    case "button": {
+      const title = cleanMessageText(message?.button?.text || message?.button?.payload, 500);
+      body = title ? `Selected option: ${title}` : "[Button response received]";
+      break;
+    }
+    case "order":
+      body = "[Order received]";
+      break;
+    case "reaction": {
+      const emoji = cleanMessageText(message?.reaction?.emoji, 32);
+      body = emoji ? `Reaction received: ${emoji}` : "[Reaction received]";
+      break;
+    }
+    default:
+      body = "[Unsupported WhatsApp message received]";
+      break;
+  }
+
+  return { messageType, body: body.slice(0, 4096), isText: false };
+}
+
 function startLeaseHeartbeat(inboxId, tenantId, leaseToken) {
   let stopped = false;
   let timer = null;
@@ -72,7 +150,7 @@ function startLeaseHeartbeat(inboxId, tenantId, leaseToken) {
 export async function ingestWebhookMessage({ message, tenant }) {
   assertDatabase();
 
-  if (!message?.id || !message?.phoneNumberId || !message?.from || !message?.text?.body) {
+  if (!message?.id || !message?.phoneNumberId || !message?.from) {
     throw new Error("Invalid webhook message");
   }
 
@@ -88,9 +166,9 @@ export async function ingestWebhookMessage({ message, tenant }) {
   const phoneNumberId = message.phoneNumberId.trim();
   const whatsappMessageId = message.id.trim();
   const waId = message.from.trim();
-  const body = message.text.body.trim();
+  const { messageType, body } = normalizeIncomingWebhookContent(message);
 
-  if (!validateTenantId(tenantId) || !/^\d{5,30}$/.test(phoneNumberId) || !body) {
+  if (!validateTenantId(tenantId) || !/^\\d{5,30}$/.test(phoneNumberId) || !body) {
     throw new Error("Invalid webhook message data");
   }
 
@@ -106,7 +184,7 @@ export async function ingestWebhookMessage({ message, tenant }) {
     "INSERT INTO webhook_messages (" +
       "tenant_id, whatsapp_number_id, phone_number_id, whatsapp_message_id, " +
       "wa_id, profile_name, message_type, body, received_at, state" +
-      ") VALUES ($1, $2, $3, $4, $5, $6, 'text', $7, $8, 'RECEIVED') " +
+      ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'RECEIVED') " +
       "ON CONFLICT (tenant_id, whatsapp_message_id) DO UPDATE SET updated_at = NOW() " +
       "RETURNING id, tenant_id, whatsapp_number_id, phone_number_id, " +
       "whatsapp_message_id, wa_id, profile_name, message_type, body, received_at, " +
@@ -121,7 +199,8 @@ export async function ingestWebhookMessage({ message, tenant }) {
       typeof message.profileName === "string"
         ? message.profileName.trim().slice(0, 255) || null
         : null,
-      body.slice(0, 4096),
+      messageType,
+      body,
       receivedAt,
     ],
   );
