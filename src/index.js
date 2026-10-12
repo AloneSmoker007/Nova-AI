@@ -1322,14 +1322,14 @@ if (!IS_PRODUCTION) {
     requireAuth,
     requireRole("owner", "admin"),
     async (req, res, next) => {
-    try {
-      const { error, value } = geminiTestSchema.validate(req.body);
-      if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
-      const reply = await generateGeminiReply(value.message);
-      return res.status(200).json({ status: "ok", reply });
-    } catch (error) {
-      return next(error);
-    }
+      try {
+        const { error, value } = geminiTestSchema.validate(req.body);
+        if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
+        const reply = await generateGeminiReply(value.message);
+        return res.status(200).json({ status: "ok", reply });
+      } catch (error) {
+        return next(error);
+      }
     },
   );
 }
