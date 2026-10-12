@@ -40,6 +40,8 @@ import {
   markCompleted,
   findUndispatchedMessages,
   recoverExpiredLeases,
+  listDeadLetterMessages,
+  requeueDeadLetterMessage,
 } from "./services/webhook-inbox.service.js";
 import {
   claimDelivery,
@@ -1015,6 +1017,61 @@ app.get("/api/usage", requireAuth, async (req, res) => {
     return res.status(500).json({ status: "error", error: "Failed to fetch usage summary" });
   }
 });
+
+app.get(
+  "/api/webhook-inbox/dead-letters",
+  requireAuth,
+  requireRole("owner", "admin"),
+  async (req, res, next) => {
+    try {
+      const data = await listDeadLetterMessages(req.user.tenantId, req.query.limit);
+      return res.status(200).json({ status: "ok", data });
+    } catch (error) {
+      if (error.message.startsWith("Invalid")) {
+        return res.status(400).json({ status: "error", error: error.message });
+      }
+      return next(error);
+    }
+  },
+);
+
+app.post(
+  "/api/webhook-inbox/dead-letters/:inboxId/retry",
+  requireAuth,
+  requireRole("owner", "admin"),
+  async (req, res, next) => {
+    try {
+      const data = await requeueDeadLetterMessage(
+        req.params.inboxId,
+        req.user.tenantId,
+        req.user.id,
+        req.body?.reason,
+      );
+      if (!data) {
+        return res.status(409).json({
+          status: "error",
+          error: "Message is not eligible for manual retry or the retry limit was reached",
+        });
+      }
+
+      req.log.info(
+        {
+          tenantId: req.user.tenantId,
+          inboxId: data.id,
+          actorUserId: req.user.id,
+          manualRetryCount: data.manual_retry_count,
+        },
+        "Dead-letter webhook message manually requeued",
+      );
+      return res.status(202).json({ status: "ok", data });
+    } catch (error) {
+      if (error.message.startsWith("Invalid")) {
+        return res.status(400).json({ status: "error", error: error.message });
+      }
+      return next(error);
+    }
+  },
+);
 
 app.get("/api/conversations", requireAuth, async (req, res, next) => {
   try {
