@@ -343,3 +343,26 @@ test("OCR Gemini request has a hard timeout and cleans up its timer", () => {
     "deadline expiry must return a clear timeout error",
   );
 });
+
+test("terminal delivery recovery backfills outbound history without attempting a resend", () => {
+  const recovery = sliceBetween(
+    indexSource,
+    "async function recoverPendingDeliveries()",
+    "async function dispatchPendingInboxMessages()",
+  );
+  assert.ok(
+    recovery.includes("findDeliveriesMissingOutboundMessage(50)"),
+    "the recovery pass must scan terminal provider-correlated deliveries with no outbound row",
+  );
+  const backfill = sliceBetween(
+    recovery,
+    "const missingMessages = await findDeliveriesMissingOutboundMessage(50);",
+    "} catch (error) {\n    logger.error({ error: error.message }, \"WhatsApp delivery recovery pass failed\");",
+  );
+  assert.ok(backfill.includes("persistOutboundMessage("), "missing outbound history must be inserted idempotently");
+  assert.ok(backfill.includes("syncDeliveryToMessage("), "persisted message status must be reconciled to provider state");
+  assert.ok(
+    !backfill.includes("claimDelivery(") && !backfill.includes("sendWhatsAppMessage("),
+    "history repair must never claim or resend an already terminal delivery",
+  );
+});
