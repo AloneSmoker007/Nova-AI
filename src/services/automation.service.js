@@ -116,18 +116,45 @@ function normalizeStep(step, index, stepCount) {
 }
 
 export async function createWorkflow({ tenantId, createdBy, name, description = null, triggerType = "manual", triggerConfig = {}, definition = {} }) {
-  assertDb(); const t=tenant(tenantId);
+  assertDb();
+  const t = tenant(tenantId);
   if (!uuid(createdBy)) throw new Error("Invalid creator ID");
-  const n=text(name,120);
-  if (!["manual","message_received","conversation_created","inactivity"].includes(triggerType)) throw new Error("Invalid trigger type");
-  if (!triggerConfig || typeof triggerConfig !== "object" || Array.isArray(triggerConfig)) throw new Error("Invalid trigger configuration");
-  if (triggerType === "inactivity") { const after = Number(triggerConfig.afterSeconds); if (!Number.isInteger(after) || after < 60 || after > MAX_DELAY_SECONDS) throw new Error("Invalid inactivity delay"); }
-  const def=normalizeWorkflowDefinition(definition);
-  const r=await dbPool.query(`INSERT INTO automation_workflows
-    (tenant_id,name,description,trigger_type,trigger_config,definition,created_by)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
-    RETURNING *`,[t,n,typeof description==="string"?description.slice(0,2000):null,triggerType,triggerConfig,def,createdBy]);
-  return r.rows[0];
+  const n = text(name, 120);
+  if (!["manual", "message_received", "conversation_created", "inactivity"].includes(triggerType)) {
+    throw new Error("Invalid trigger type");
+  }
+  if (!triggerConfig || typeof triggerConfig !== "object" || Array.isArray(triggerConfig)) {
+    throw new Error("Invalid trigger configuration");
+  }
+
+  // Normalize the accepted value before persisting it. Number("1e2") is 100,
+  // but storing the original string makes PostgreSQL's later ::integer cast fail.
+  const normalizedTriggerConfig = { ...triggerConfig };
+  if (triggerType === "inactivity") {
+    const after = Number(triggerConfig.afterSeconds);
+    if (!Number.isInteger(after) || after < 60 || after > MAX_DELAY_SECONDS) {
+      throw new Error("Invalid inactivity delay");
+    }
+    normalizedTriggerConfig.afterSeconds = after;
+  }
+
+  const def = normalizeWorkflowDefinition(definition);
+  const result = await dbPool.query(
+    `INSERT INTO automation_workflows
+      (tenant_id, name, description, trigger_type, trigger_config, definition, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [
+      t,
+      n,
+      typeof description === "string" ? description.slice(0, 2000) : null,
+      triggerType,
+      normalizedTriggerConfig,
+      def,
+      createdBy,
+    ],
+  );
+  return result.rows[0];
 }
 export async function listWorkflows(tenantId) {
   assertDb(); const r=await dbPool.query("SELECT * FROM automation_workflows WHERE tenant_id=$1 ORDER BY created_at DESC",[tenant(tenantId)]); return r.rows;
@@ -184,26 +211,283 @@ async function executeWebhook(step,run,ctx,stepIndex){
     if(!response.ok) throw new Error(`Workflow webhook returned HTTP ${response.status}`);
   } finally { clearTimeout(timer); }
 }
-export async function scheduleInactivityTriggers(limit=100) {
+export async function scheduleInactivityTriggers(limit = 100) {
   assertDb();
-  const safe=Math.min(Math.max(Number(limit)||100,1),500);
-  const r=await dbPool.query(`SELECT w.id AS workflow_id,w.tenant_id,w.trigger_config,c.id AS conversation_id,c.contact_id,
-      FLOOR(EXTRACT(EPOCH FROM (NOW()-c.last_message_at))/GREATEST(COALESCE((w.trigger_config->>'afterSeconds')::integer,86400),1)) AS bucket
-    FROM automation_workflows w
-    JOIN conversations c ON c.tenant_id=w.tenant_id
-    WHERE w.status='active' AND w.trigger_type='inactivity'
-      AND c.status IN ('active','paused','human')
-      AND c.last_message_at <= NOW() - (GREATEST(COALESCE((w.trigger_config->>'afterSeconds')::integer,86400),1) * INTERVAL '1 second')
-    ORDER BY c.last_message_at ASC LIMIT $1`,[safe]);
-  let created=0;
-  for(const row of r.rows){
-    const key=`inactivity:${row.conversation_id}:${row.bucket}`;
-    const run=await startWorkflowRun({
-      tenantId:row.tenant_id,workflowId:row.workflow_id,
-      conversationId:row.conversation_id,contactId:row.contact_id,
-      context:{trigger:{type:"inactivity",bucket:Number(row.bucket)}},triggerKey:key,
+  const safe = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const result = await dbPool.query(
+    `SELECT
+       w.id AS workflow_id,
+       w.tenant_id,
+       w.trigger_config,
+       c.id AS conversation_id,
+       c.contact_id,
+       FLOOR(EXTRACT(EPOCH FROM (NOW() - c.last_message_at)) / delay.after_seconds) AS bucket
+     FROM automation_workflows AS w
+     JOIN conversations AS c ON c.tenant_id = w.tenant_id
+     CROSS JOIN LATERAL (
+       SELECT CASE
+         WHEN jsonb_typeof(w.trigger_config -> 'afterSeconds') = 'number'
+         THEN CASE
+           WHEN (w.trigger_config ->> 'afterSeconds') ~ '^[0-9]{1,7}
+
+export async function processDueWorkflowRuns(limit = 20) {
+  assertDb();
+  const safe = Math.min(Math.max(Number(limit) || 20, 1), 50);
+  const claimClient = await dbPool.connect();
+  let runs = [];
+
+  try {
+    const claimed = await claimClient.query(
+      `WITH picked AS (
+        SELECT id
+        FROM automation_runs
+        WHERE (
+          status IN ('queued', 'waiting')
+          AND (next_run_at IS NULL OR next_run_at <= NOW())
+        ) OR (
+          status = 'running'
+          AND (executor_lease_until IS NULL OR executor_lease_until < NOW())
+        )
+        ORDER BY next_run_at NULLS FIRST, created_at
+        FOR UPDATE SKIP LOCKED
+        LIMIT $1
+      )
+      UPDATE automation_runs AS run
+      SET status = 'running',
+          attempts = run.attempts + 1,
+          started_at = COALESCE(run.started_at, NOW()),
+          updated_at = NOW(),
+          executor_token = gen_random_uuid(),
+          executor_lease_until = NOW() + INTERVAL '15 minutes'
+      FROM picked
+      WHERE run.id = picked.id
+      RETURNING run.*`,
+      [safe],
+    );
+    runs = claimed.rows;
+  } finally {
+    claimClient.release();
+  }
+
+  for (const run of runs) {
+    try {
+      // A batch may sit while earlier runs execute. Confirm ownership and
+      // renew the lease before loading workflow data or performing side effects.
+      const initialLease = await dbPool.query(
+        `UPDATE automation_runs
+         SET executor_lease_until = NOW() + INTERVAL '15 minutes',
+             updated_at = NOW()
+         WHERE tenant_id = $1
+           AND id = $2
+           AND status = 'running'
+           AND executor_token = $3
+           AND executor_lease_until > NOW()
+         RETURNING id`,
+        [run.tenant_id, run.id, run.executor_token],
+      );
+      if (initialLease.rowCount !== 1) continue;
+
+      const wf = (
+        await dbPool.query(
+          "SELECT * FROM automation_workflows WHERE tenant_id=$1 AND id=$2 AND status='active'",
+          [run.tenant_id, run.workflow_id],
+        )
+      ).rows[0];
+      if (!wf) throw new Error("Workflow is no longer active");
+
+      const steps = normalizeWorkflowDefinition(wf.definition).steps;
+      let idx = run.current_step;
+      const ctx = run.context || {};
+      let executed = 0;
+      let lostLease = false;
+
+      while (idx < steps.length) {
+        if (++executed > MAX_STEPS) {
+          throw new Error("Workflow execution step limit exceeded");
+        }
+
+        // Do not start another action if this executor's lease expired or a
+        // newer executor replaced its token while the previous action awaited.
+        const renewedLease = await dbPool.query(
+          `UPDATE automation_runs
+           SET executor_lease_until = NOW() + INTERVAL '15 minutes',
+               updated_at = NOW()
+           WHERE tenant_id = $1
+             AND id = $2
+             AND status = 'running'
+             AND executor_token = $3
+             AND executor_lease_until > NOW()
+           RETURNING id`,
+          [run.tenant_id, run.id, run.executor_token],
+        );
+        if (renewedLease.rowCount !== 1) {
+          lostLease = true;
+          break;
+        }
+
+        const step = steps[idx];
+
+        if (step.action === "wait") {
+          const waiting = await dbPool.query(
+            `UPDATE automation_runs
+             SET status = 'waiting',
+                 current_step = $3,
+                 next_run_at = NOW() + ($5 * INTERVAL '1 second'),
+                 context = $4::jsonb,
+                 updated_at = NOW(),
+                 executor_token = NULL,
+                 executor_lease_until = NULL
+             WHERE tenant_id = $1
+               AND id = $2
+               AND status = 'running'
+               AND executor_token = $6
+               AND executor_lease_until > NOW()
+             RETURNING id`,
+            [
+              run.tenant_id,
+              run.id,
+              idx + 1,
+              JSON.stringify(ctx),
+              step.seconds,
+              run.executor_token,
+            ],
+          );
+          if (waiting.rowCount !== 1) lostLease = true;
+          break;
+        }
+
+        if (step.action === "condition") {
+          idx = condition(step, ctx) ? step.if_true : step.if_false;
+          continue;
+        }
+
+        if (step.action === "send_message") {
+          const client = await dbPool.connect();
+          try {
+            await executeSendMessage(client, run, step, idx);
+          } finally {
+            client.release();
+          }
+        } else if (step.action === "add_tag") {
+          const client = await dbPool.connect();
+          try {
+            await executeTag(client, run, step);
+          } finally {
+            client.release();
+          }
+        } else if (step.action === "webhook") {
+          await executeWebhook(step, run, ctx, idx);
+        }
+
+        idx++;
+        const advanced = await dbPool.query(
+          `UPDATE automation_runs
+           SET current_step = $3,
+               context = $4::jsonb,
+               updated_at = NOW(),
+               executor_lease_until = NOW() + INTERVAL '15 minutes'
+           WHERE tenant_id = $1
+             AND id = $2
+             AND status = 'running'
+             AND executor_token = $5
+             AND executor_lease_until > NOW()
+           RETURNING id`,
+          [run.tenant_id, run.id, idx, JSON.stringify(ctx), run.executor_token],
+        );
+        if (advanced.rowCount !== 1) {
+          lostLease = true;
+          break;
+        }
+      }
+
+      if (lostLease) continue;
+
+      if (idx >= steps.length) {
+        await dbPool.query(
+          `UPDATE automation_runs
+           SET status = 'completed',
+               current_step = $3,
+               next_run_at = NULL,
+               completed_at = NOW(),
+               updated_at = NOW(),
+               executor_token = NULL,
+               executor_lease_until = NULL
+           WHERE tenant_id = $1
+             AND id = $2
+             AND status = 'running'
+             AND executor_token = $4
+             AND executor_lease_until > NOW()
+           RETURNING id`,
+          [run.tenant_id, run.id, idx, run.executor_token],
+        );
+      }
+    } catch (error) {
+      const retry = run.attempts < MAX_RETRIES;
+      // Failure reporting is fenced too: stale executors must not requeue or
+      // fail a workflow that a newer executor already owns.
+      await dbPool.query(
+        `UPDATE automation_runs
+         SET status = $3,
+             next_run_at = CASE
+               WHEN $3 = 'queued'
+               THEN NOW() + (LEAST(300, POWER(2, GREATEST(attempts - 1, 0)) * 2) * INTERVAL '1 second')
+               ELSE NULL
+             END,
+             last_error = $4,
+             updated_at = NOW(),
+             executor_token = NULL,
+             executor_lease_until = NULL
+         WHERE tenant_id = $1
+           AND id = $2
+           AND status = 'running'
+           AND executor_token = $5
+           AND executor_lease_until > NOW()
+         RETURNING id`,
+        [
+          run.tenant_id,
+          run.id,
+          retry ? "queued" : "failed",
+          String(error.message || error).slice(0, 1000),
+          run.executor_token,
+        ],
+      );
+    }
+  }
+
+  return runs.length;
+}
+
+           THEN CASE
+             WHEN (w.trigger_config ->> 'afterSeconds')::integer BETWEEN 60 AND ${MAX_DELAY_SECONDS}
+             THEN (w.trigger_config ->> 'afterSeconds')::integer
+             ELSE 86400
+           END
+           ELSE 86400
+         END
+         ELSE 86400
+       END AS after_seconds
+     ) AS delay
+     WHERE w.status = 'active'
+       AND w.trigger_type = 'inactivity'
+       AND c.status IN ('active', 'paused', 'human')
+       AND c.last_message_at <= NOW() - (delay.after_seconds * INTERVAL '1 second')
+     ORDER BY c.last_message_at ASC
+     LIMIT $1`,
+    [safe],
+  );
+
+  let created = 0;
+  for (const row of result.rows) {
+    const key = `inactivity:${row.conversation_id}:${row.bucket}`;
+    const run = await startWorkflowRun({
+      tenantId: row.tenant_id,
+      workflowId: row.workflow_id,
+      conversationId: row.conversation_id,
+      contactId: row.contact_id,
+      context: { trigger: { type: "inactivity", bucket: Number(row.bucket) } },
+      triggerKey: key,
     });
-    if(run) created++;
+    if (run) created++;
   }
   return created;
 }
