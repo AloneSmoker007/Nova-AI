@@ -131,3 +131,8 @@ jobs:
       # This test resets the shared PostgreSQL schema, so keep it serialized.
       - name: Run inbound message idempotency integration tests
         run: node --test tests/inbound-message-persistence.test.js
+
+      # TASK-28 regression coverage: an active heartbeat must not lose its lease
+      # to recovery between a stale read and an UPDATE. This suite resets schema.
+      - name: Run webhook inbox lease recovery integration tests
+        run: node --test tests/webhook-inbox-recovery.test.js
