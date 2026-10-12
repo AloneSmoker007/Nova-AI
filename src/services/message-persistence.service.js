@@ -164,9 +164,9 @@ export async function persistOutboundMessage({
       );
 
       const deliveryState = deliveryResult.rows[0]?.state;
-      if (deliveryState === "delivered") messageStatus = "delivered";
-      if (deliveryState === "read") messageStatus = "read";
-      if (deliveryState === "failed") messageStatus = "failed";
+      if (deliveryState === "DELIVERED") messageStatus = "delivered";
+      if (deliveryState === "READ") messageStatus = "read";
+      if (deliveryState === "FAILED") messageStatus = "failed";
     }
 
     const result = await client.query(
