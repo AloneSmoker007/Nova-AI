@@ -25,6 +25,7 @@ describe("Automation SQL regressions against real PostgreSQL", { skip }, () => {
   let setWorkflowStatus;
   let startWorkflowRun;
   let processDueWorkflowRuns;
+  let scheduleInactivityTriggers;
 
   before(async () => {
     // Set this before importing the database/configuration modules.
@@ -36,6 +37,7 @@ describe("Automation SQL regressions against real PostgreSQL", { skip }, () => {
       setWorkflowStatus,
       startWorkflowRun,
       processDueWorkflowRuns,
+      scheduleInactivityTriggers,
     } = await import("../src/services/automation.service.js"));
 
     assert.ok(dbPool, "dbPool must use the integration database URL");
@@ -325,5 +327,41 @@ describe("Automation SQL regressions against real PostgreSQL", { skip }, () => {
       result.rows.map((row) => [row.tenant_id, row.automation_step, row.body]),
       [[TENANT_A, 0, "Tenant A delivery"], [TENANT_B, 0, "Tenant B delivery"]],
     );
+
+  it("normalizes numeric-string inactivity delays and safely ignores legacy non-integer config", async () => {
+    const workflow = await createWorkflow({
+      tenantId: TENANT_A,
+      createdBy: USER_A,
+      name: "inactivity-delay-normalization",
+      triggerType: "inactivity",
+      triggerConfig: { afterSeconds: "1e2" },
+      definition: { steps: [] },
+    });
+    await setWorkflowStatus(TENANT_A, workflow.id, "active");
+
+    const stored = await dbPool.query(
+      "SELECT trigger_config FROM automation_workflows WHERE tenant_id=$1 AND id=$2",
+      [TENANT_A, workflow.id],
+    );
+    assert.equal(
+      stored.rows[0].trigger_config.afterSeconds,
+      100,
+      "accepted numeric string must be persisted as a JSON number, not the original exponent string",
+    );
+
+    // Simulate an older/directly-mutated row. Scheduling must not throw a
+    // PostgreSQL integer-cast error if its legacy JSON value is not integer text.
+    await dbPool.query(
+      `UPDATE automation_workflows
+       SET trigger_config = jsonb_set(trigger_config, '{afterSeconds}', '"1e2"'::jsonb)
+       WHERE tenant_id=$1 AND id=$2`,
+      [TENANT_A, workflow.id],
+    );
+
+    await assert.doesNotReject(
+      () => scheduleInactivityTriggers(10),
+      "invalid legacy inactivity configuration must use a safe default, not break scheduler recovery",
+    );
+  });
   });
 });
