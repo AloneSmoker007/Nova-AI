@@ -373,6 +373,28 @@ export async function markDeliveryStatus({
             d.provider_message_id = $3
             OR ($4::uuid IS NOT NULL AND d.delivery_key = $4::uuid)
           )
+
+        UNION
+
+        SELECT d.id
+        FROM whatsapp_deliveries d
+        JOIN automation_runs ar
+          ON ar.id = d.automation_run_id
+         AND ar.tenant_id = d.tenant_id
+        JOIN conversations c
+          ON c.id = ar.conversation_id
+         AND c.tenant_id = ar.tenant_id
+         AND c.id = d.conversation_id
+        JOIN whatsapp_numbers wn
+          ON wn.id = c.whatsapp_number_id
+         AND wn.tenant_id = c.tenant_id
+        WHERE d.tenant_id = $1
+          AND d.automation_run_id IS NOT NULL
+          AND wn.phone_number_id = $2
+          AND (
+            d.provider_message_id = $3
+            OR ($4::uuid IS NOT NULL AND d.delivery_key = $4::uuid)
+          )
         LIMIT 1
       )
       UPDATE whatsapp_deliveries d
@@ -428,12 +450,22 @@ export async function findRecoverableDeliveries(limit = 50) {
     `
       SELECT id, tenant_id
       FROM whatsapp_deliveries
-      WHERE state = 'SENDING'
-        AND provider_message_id IS NULL
-        AND attempt_count < $2
-        AND (last_attempt_at IS NULL OR last_attempt_at < NOW() - ($1 * INTERVAL '1 second'))
-        AND (lease_until IS NULL OR lease_until < NOW())
-      ORDER BY last_attempt_at ASC
+      WHERE (
+        (
+          state = 'SENDING'
+          AND provider_message_id IS NULL
+          AND attempt_count < $2
+          AND (last_attempt_at IS NULL OR last_attempt_at < NOW() - ($1 * INTERVAL '1 second'))
+          AND (lease_until IS NULL OR lease_until < NOW())
+        )
+        OR (
+          state = 'PENDING'
+          AND automation_run_id IS NOT NULL
+          AND provider_message_id IS NULL
+          AND attempt_count < $2
+        )
+      )
+      ORDER BY COALESCE(last_attempt_at, created_at) ASC
       LIMIT $3
     `,
     [retryWindow, MAX_DELIVERY_ATTEMPTS, safeLimit],
