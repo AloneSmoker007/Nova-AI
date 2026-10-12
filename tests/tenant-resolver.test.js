@@ -420,7 +420,11 @@ describe("Tenant resolver schema fix (A-5.15A-X-001)", { skip }, () => {
     it("durably stores non-text inbound media and completes it without an AI auto-reply", async () => {
       const messageId = "wamid.TENANT-RESOLVER-IMAGE";
       const response = await postWebhook(PHONE_A, messageId, "image");
-      assert.equal(response.status, 200, "a valid signed image webhook must be accepted");
+      assert.equal(
+        response.status,
+        200,
+        `a valid signed image webhook must be accepted; got ${response.status}\\n${childOutput.join("")}`,
+      );
 
       const deadline = Date.now() + 10_000;
       let inbox = null;
