@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { buildCalendarLinks, buildIcs } = await import("../src/services/appointment.service.js");
+const { buildCalendarLinks, buildIcs, validateBusinessHourRange } = await import("../src/services/appointment.service.js");
 
 const appointment = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -58,4 +58,26 @@ test("escapes lone carriage returns so appointment notes cannot inject ICS prope
   assert.equal(lines.filter((line) => line.startsWith("X-ATTACH:")).length, 0);
   assert.equal(lines.filter((line) => line === "BEGIN:VEVENT").length, 1);
   assert.equal(lines.filter((line) => line.startsWith("SUMMARY:")).length, 1);
+});
+
+test("validates business-hour clock ranges before database writes", () => {
+  assert.equal(validateBusinessHourRange("09:00", "17:30"), true);
+  assert.equal(validateBusinessHourRange("23:00", "24:00"), true, "24:00 is a valid end-of-day boundary");
+
+  for (const [start, end] of [
+    ["99:99", "10:00"],
+    ["09:70", "10:00"],
+    ["24:00", "24:30"],
+    ["09:00", "24:01"],
+    ["17:30", "09:00"],
+    ["09:00", "09:00"],
+    [900, "17:00"],
+    ["09:00", null],
+  ]) {
+    assert.throws(
+      () => validateBusinessHourRange(start, end),
+      /Invalid business hours/,
+      `invalid business-hour range should be rejected: ${String(start)}–${String(end)}`,
+    );
+  }
 });
