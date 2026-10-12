@@ -111,6 +111,16 @@ const loginLimiter = rateLimit({
   message: { status: "error", error: "Too many login attempts. Please try again later." },
 });
 
+// Development-only Gemini diagnostics can incur provider cost. Keep the route
+// unavailable to anonymous users and tightly limit each source IP.
+const geminiTestLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: "error", error: "Too many AI diagnostic requests. Please try again later." },
+});
+
 app.use(express.json({
   limit: "100kb",
   verify: (req, res, buffer) => { req.rawBody = Buffer.from(buffer); },
@@ -1306,7 +1316,12 @@ app.put("/api/business-brain", requireAuth, requireRole("owner", "admin"), async
 
 const geminiTestSchema = Joi.object({ message: Joi.string().trim().min(1).max(4000).required() });
 if (!IS_PRODUCTION) {
-  app.post("/api/test/gemini", async (req, res, next) => {
+  app.post(
+    "/api/test/gemini",
+    geminiTestLimiter,
+    requireAuth,
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
     try {
       const { error, value } = geminiTestSchema.validate(req.body);
       if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
@@ -1315,7 +1330,8 @@ if (!IS_PRODUCTION) {
     } catch (error) {
       return next(error);
     }
-  });
+    },
+  );
 }
 
 // Register Task 16 routes before the terminal 404 middleware. Production starts via bootstrap.js,
