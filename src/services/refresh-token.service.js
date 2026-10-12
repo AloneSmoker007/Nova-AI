@@ -71,6 +71,16 @@ export async function rotateRefreshToken(rawToken) {
       return null;
     }
 
+    // Expiry takes precedence over replay detection. Old revoked token
+    // rows may remain until retention cleanup; replaying an expired token must
+    // not let anyone revoke the user's currently active sessions.
+    if (new Date(row.expires_at) <= new Date()) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    // A revoked token that is still within its validity window indicates
+    // possible token theft/reuse, so retain the existing all-sessions revocation.
     if (row.revoked_at) {
       logger.warn(
         { userId: row.user_id, tenantId: row.tenant_id },
@@ -85,11 +95,6 @@ export async function rotateRefreshToken(rawToken) {
       );
 
       await client.query("COMMIT");
-      return null;
-    }
-
-    if (new Date(row.expires_at) < new Date()) {
-      await client.query("ROLLBACK");
       return null;
     }
 
