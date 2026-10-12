@@ -57,8 +57,14 @@ function validateInboxId(inboxId) {
   return typeof inboxId === "string" && inboxId.trim() !== "";
 }
 
-export async function enqueueWhatsAppMessage({ inboxId }) {
-  if (!isQueueConfigured()) {
+// BullMQ job states that must keep their jobId dedupe (a live job is left
+// untouched). Anything else — completed, failed, unknown — must not suppress
+// re-enqueue of the same job id, because removeOnComplete/removeOnFail retain
+// terminal jobs and BullMQ's addJob dedupes silently on an existing jobId.
+const LIVE_JOB_STATES = new Set(["waiting", "active", "delayed", "prioritized", "waiting-children"]);
+
+export async function enqueueWhatsAppMessage({ inboxId, queue } = {}) {
+  if (!queue && !isQueueConfigured()) {
     throw new Error("Queue is not configured (REDIS_URL missing)");
   }
 
@@ -67,13 +73,29 @@ export async function enqueueWhatsAppMessage({ inboxId }) {
   }
 
   const normalizedInboxId = inboxId.trim();
-  if (!messageQueue) {
+  if (!messageQueue && !queue) {
     messageQueue = new Queue(QUEUE_NAME, {
       connection: getConnection(),
     });
   }
+  const targetQueue = queue ?? messageQueue;
 
-  await messageQueue.add(
+  // A retained terminal job (see removeOnComplete/removeOnFail below) with the
+  // same jobId would make the add() below a silent no-op and freeze durable
+  // re-dispatch of this inbox message until retention expires. Remove terminal
+  // jobs first so re-enqueue always works; live jobs keep their dedupe.
+  const existing = await targetQueue.getJob(normalizedInboxId);
+  if (existing) {
+    const state = await existing.getState();
+    if (LIVE_JOB_STATES.has(state)) return;
+    try {
+      await existing.remove();
+    } catch {
+      // Another dispatcher already removed it — safe to enqueue below.
+    }
+  }
+
+  await targetQueue.add(
     "process",
     { inboxId: normalizedInboxId },
     {
