@@ -103,15 +103,36 @@ export async function ingestWebhookMessage({ message, tenant }) {
   }
 
   const result = await dbPool.query(
-    "INSERT INTO webhook_messages (" +
-      "tenant_id, whatsapp_number_id, phone_number_id, whatsapp_message_id, " +
-      "wa_id, profile_name, message_type, body, received_at, state" +
-      ") VALUES ($1, $2, $3, $4, $5, $6, 'text', $7, $8, 'RECEIVED') " +
-      "ON CONFLICT (tenant_id, whatsapp_message_id) DO UPDATE SET updated_at = NOW() " +
-      "RETURNING id, tenant_id, whatsapp_number_id, phone_number_id, " +
-      "whatsapp_message_id, wa_id, profile_name, message_type, body, received_at, " +
-      "state, attempts, available_at, lease_until, lease_token, last_error, " +
-      "generated_response, provider_message_id",
+    `INSERT INTO webhook_messages (
+       tenant_id, whatsapp_number_id, phone_number_id, whatsapp_message_id,
+       wa_id, profile_name, message_type, body, received_at, state, completed_at
+     )
+     VALUES (
+       $1, $2, $3, $4, $5, $6, 'text', $7, $8,
+       CASE
+         -- Completed inbox rows are pruned after 30 days, but durable message
+         -- history can outlive them. Treat a repeated provider message ID as
+         -- already handled instead of creating a fresh AI/send job.
+         WHEN EXISTS (
+           SELECT 1 FROM messages
+           WHERE tenant_id = $1 AND whatsapp_message_id = $4
+         ) THEN 'COMPLETED'
+         ELSE 'RECEIVED'
+       END,
+       CASE
+         WHEN EXISTS (
+           SELECT 1 FROM messages
+           WHERE tenant_id = $1 AND whatsapp_message_id = $4
+         ) THEN NOW()
+         ELSE NULL
+       END
+     )
+     ON CONFLICT (tenant_id, whatsapp_message_id)
+     DO UPDATE SET updated_at = NOW()
+     RETURNING id, tenant_id, whatsapp_number_id, phone_number_id,
+       whatsapp_message_id, wa_id, profile_name, message_type, body, received_at,
+       state, attempts, available_at, lease_until, lease_token, last_error,
+       generated_response, provider_message_id, completed_at`,
     [
       tenantId,
       tenant.whatsappNumberId,
