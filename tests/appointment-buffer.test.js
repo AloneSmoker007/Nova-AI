@@ -146,9 +146,9 @@ describe("appointment buffer enforcement (PostgreSQL)", { skip }, () => {
       `SELECT id FROM appointments
        WHERE tenant_id = $1
          AND enforce_overlap = FALSE
-         AND starts_at < $3
-         AND occupied_until > $2`,
-      [tenantId, start, start],
+         AND starts_at = $2
+         AND ends_at = $3`,
+      [tenantId, start, first.ends_at],
     );
     assert.equal(legacyRows.rowCount, 2, "both historical appointments remain untouched and grandfathered");
 
