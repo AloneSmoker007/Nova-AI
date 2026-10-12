@@ -228,7 +228,41 @@ export async function scheduleInactivityTriggers(limit = 100) {
        SELECT CASE
          WHEN jsonb_typeof(w.trigger_config -> 'afterSeconds') = 'number'
          THEN CASE
-           WHEN (w.trigger_config ->> 'afterSeconds') ~ '^[0-9]{1,7}
+           WHEN (w.trigger_config ->> 'afterSeconds') ~ '^[0-9]{1,7}$'
+           THEN CASE
+             WHEN (w.trigger_config ->> 'afterSeconds')::integer BETWEEN 60 AND ${MAX_DELAY_SECONDS}
+             THEN (w.trigger_config ->> 'afterSeconds')::integer
+             ELSE 86400
+           END
+           ELSE 86400
+         END
+         ELSE 86400
+       END AS after_seconds
+     ) AS delay
+     WHERE w.status = 'active'
+       AND w.trigger_type = 'inactivity'
+       AND c.status IN ('active', 'paused', 'human')
+       AND c.last_message_at <= NOW() - (delay.after_seconds * INTERVAL '1 second')
+     ORDER BY c.last_message_at ASC
+     LIMIT $1`,
+    [safe],
+  );
+
+  let created = 0;
+  for (const row of result.rows) {
+    const key = `inactivity:${row.conversation_id}:${row.bucket}`;
+    const run = await startWorkflowRun({
+      tenantId: row.tenant_id,
+      workflowId: row.workflow_id,
+      conversationId: row.conversation_id,
+      contactId: row.contact_id,
+      context: { trigger: { type: "inactivity", bucket: Number(row.bucket) } },
+      triggerKey: key,
+    });
+    if (run) created++;
+  }
+  return created;
+}
 
 export async function processDueWorkflowRuns(limit = 20) {
   assertDb();
