@@ -125,3 +125,9 @@ jobs:
       # This suite resets public schema and also verifies expired-token retention.
       - name: Run refresh-token replay protection tests
         run: node --test tests/refresh-token-replay.test.js
+
+      # TASK-27 regression coverage: duplicate inbound message IDs return canonical
+      # IDs for retries and reject conflicting sender/number/body identities.
+      # This test resets the shared PostgreSQL schema, so keep it serialized.
+      - name: Run inbound message idempotency integration tests
+        run: node --test tests/inbound-message-persistence.test.js
