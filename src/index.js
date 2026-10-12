@@ -45,6 +45,7 @@ import {
   claimDelivery,
   deliveryStatusToMessageStatus,
   failExhaustedDeliveries,
+  findDeliveriesMissingOutboundMessage,
   findRecoverableDeliveries,
   getDelivery,
   markDeliveryFailed,
@@ -798,6 +799,31 @@ async function recoverPendingDeliveries() {
         logger.error(
           { error: error.message, deliveryId: row.id, tenantId: row.tenant_id },
           "Failed to recover WhatsApp delivery",
+        );
+      }
+    }
+
+    // Repair the durable conversation history after a successful provider send.
+    // If a worker crashed after persisting the delivery's provider ID but before
+    // inserting the outbound message row, backfill it idempotently; never send it
+    // again because these rows are already in a terminal delivery state.
+    const missingMessages = await findDeliveriesMissingOutboundMessage(50);
+    for (const row of missingMessages) {
+      try {
+        await persistOutboundMessage({
+          tenantId: row.tenant_id,
+          conversationId: row.conversation_id,
+          whatsappMessageId: row.provider_message_id,
+          messageType: "text",
+          body: row.body,
+          sentAt: row.last_attempt_at || row.created_at || new Date(),
+          deliveryId: row.id,
+        });
+        await syncDeliveryToMessage(row.id, row.tenant_id);
+      } catch (error) {
+        logger.error(
+          { error: error.message, deliveryId: row.id, tenantId: row.tenant_id },
+          "Failed to reconcile outbound message history from a terminal delivery",
         );
       }
     }
