@@ -125,3 +125,8 @@ jobs:
       # This suite resets public schema and also verifies expired-token retention.
       - name: Run refresh-token replay protection tests
         run: node --test tests/refresh-token-replay.test.js
+
+      # TASK-27 regression coverage: out-of-order inbound events cannot move a
+      # conversation's last_message_at backwards. This suite resets public schema.
+      - name: Run inbound message ordering integration tests
+        run: node --test tests/inbound-message-ordering.test.js
