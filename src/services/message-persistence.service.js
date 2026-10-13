@@ -95,8 +95,53 @@ export async function persistInboundMessage({
     );
 
     if (messageResult.rowCount === 0) {
+      // Resolve the canonical inbound row from the uniqueness conflict. Durable
+      // retries need its message ID to repair signal/quota state idempotently;
+      // never return IDs from tentative contact/conversation upserts above.
+      const existingResult = await client.query(
+        `SELECT
+           m.id AS message_id,
+           m.conversation_id,
+           m.direction,
+           m.message_type,
+           m."text" AS body,
+           c.contact_id,
+           c.whatsapp_number_id,
+           contact.wa_id
+         FROM messages AS m
+         JOIN conversations AS c
+           ON c.tenant_id = m.tenant_id
+          AND c.id = m.conversation_id
+         JOIN contacts AS contact
+           ON contact.tenant_id = c.tenant_id
+          AND contact.id = c.contact_id
+         WHERE m.tenant_id = $1
+           AND m.whatsapp_message_id = $2
+         LIMIT 1`,
+        [tenantId, whatsappMessageId],
+      );
+      const existing = existingResult.rows[0];
+      if (!existing) {
+        throw new Error("Duplicate inbound message could not be resolved");
+      }
+
+      const identityConflict =
+        existing.direction !== "inbound" ||
+        existing.whatsapp_number_id !== whatsappNumberId ||
+        existing.wa_id !== waId ||
+        existing.message_type !== messageType ||
+        existing.body !== body.slice(0, 4096);
+
+      // Discard contact/conversation changes attempted by this duplicate, so a
+      // reused provider ID cannot persist a new sender or attach it to history.
       await client.query("ROLLBACK");
-      return { duplicate: true, conversationId, contactId, messageId: null };
+      return {
+        duplicate: true,
+        identityConflict,
+        conversationId: existing.conversation_id,
+        contactId: existing.contact_id,
+        messageId: existing.message_id,
+      };
     }
 
     await client.query(
