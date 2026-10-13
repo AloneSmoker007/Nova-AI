@@ -262,10 +262,10 @@ test("copilot draft route reserves quota before any context work or Gemini call"
     route.indexOf("getConversationMessages") > reserveAt && route.indexOf("getBusinessBrain") > reserveAt,
     "context work must happen after the reservation",
   );
-  assert.ok(route.indexOf("generateGeminiReply") > reserveAt, "Gemini must be invoked after the reservation");
+  assert.ok(route.indexOf("generateCopilotDraftReply") > reserveAt, "dedicated Gemini Copilot generation must follow the reservation");
   assert.ok(route.includes("status(429)"), "blocked copilot drafts must return 429 without calling Gemini");
   assert.ok(
-    route.indexOf("releaseAiUsage({") > route.indexOf("generateGeminiReply") &&
+    route.indexOf("releaseAiUsage({") > route.indexOf("generateCopilotDraftReply") &&
       route.includes('eventKey: aiReservation.eventKey, type: "copilot_draft"'),
     "any post-reservation copilot failure must release its own reservation",
   );
@@ -389,4 +389,23 @@ test("conflicting duplicate inbound identities stop before AI memory, usage, or 
       .includes("await markCompleted(message.id, message.tenant_id, leaseToken, null)"),
     "the conflicting webhook must be completed safely rather than retried into side effects",
   );
+});
+
+
+test("Copilot uses the dedicated structured prompt after quota reservation", () => {
+  const route = sliceBetween(
+    indexSource,
+    'app.post("/api/conversations/:conversationId/copilot/draft"',
+    'app.put("/api/users/me/skills"',
+  );
+  const reservation = route.indexOf("reserveAiUsage(");
+  const context = route.indexOf("buildCopilotContext(");
+  const generation = route.indexOf("generateCopilotDraftReply(");
+
+  assert.ok(reservation >= 0, "Copilot must reserve quota");
+  assert.ok(context > reservation, "conversation history must load only after quota reservation");
+  assert.ok(generation > context, "dedicated Copilot generation must follow context construction");
+  assert.ok(route.includes("releaseAiUsage("), "provider/persistence failures must release the reservation");
+  assert.doesNotMatch(route, /buildCopilotPrompt\(/);
+  assert.doesNotMatch(route, /customInstructions:\s*\[brain\?\.customInstructions/);
 });

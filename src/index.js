@@ -9,7 +9,7 @@ import Joi from "joi";
 import { checkDatabaseReadiness, closeDatabaseConnection, isDatabaseConfigured, dbPool } from "./config/database.js";
 import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
-import { generateGeminiReply } from "./services/gemini.service.js";
+import { generateCopilotDraftReply, generateGeminiReply } from "./services/gemini.service.js";
 import {
   isAmbiguousWhatsAppSendError,
   sendWhatsAppMessage,
@@ -61,7 +61,7 @@ import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 import { registerInboundUsage, getUsageSummary, reserveAiUsage, releaseAiUsage } from "./services/usage.service.js";
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
-import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotPrompt, setUserSkills } from "./services/handoff.service.js";
+import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotContext, setUserSkills } from "./services/handoff.service.js";
 import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
 import { createAppointmentType, listAppointmentTypes, setBusinessHours, getBusinessHours, listAppointments, getAppointment, bookAppointment, updateAppointmentStatus, buildCalendarLinks, buildIcs } from "./services/appointment.service.js";
 import { startRetentionScheduler } from "./services/retention.service.js";
@@ -1193,10 +1193,13 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
       const messages = await getConversationMessages(req.user.tenantId, req.params.conversationId, { limit: 12, offset: 0 });
       const summary = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
       const brain = await getBusinessBrain(req.user.tenantId);
-      const prompt = buildCopilotPrompt({ summary: summary?.summary, lastMessages: messages, businessBrain: brain });
-      const draft = await generateGeminiReply("Create one concise human-agent draft reply now.", {
-        ...(brain || {}),
-        customInstructions: [brain?.customInstructions, prompt].filter(Boolean).join("\\n\\n"),
+      const copilotContext = buildCopilotContext({
+        summary: summary?.summary,
+        lastMessages: messages,
+      });
+      const draft = await generateCopilotDraftReply({
+        businessBrain: brain,
+        copilotContext,
       });
       saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
     } catch (error) {
