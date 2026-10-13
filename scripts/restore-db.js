@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 
@@ -67,21 +69,51 @@ async function restore() {
     start: MAGIC.length + IV_LENGTH,
     end: stat.size - TAG_LENGTH - 1,
   });
-  const pgRestore = spawn("pg_restore", ["--no-owner", "--no-acl"], {
-    env: postgresEnv(target),
-    stdio: ["pipe", "ignore", "pipe"],
-    windowsHide: true,
-  });
-  let stderr = "";
-  pgRestore.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  // AES-GCM authentication is not finalized until the encrypted stream ends.
+  // Never pipe unauthenticated plaintext into pg_restore: it can apply SQL
+  // while the decipher is still waiting to verify the final authentication tag.
+  // First decrypt completely to a private temporary file. pipeline() rejects
+  // on a bad tag, so pg_restore is never started for an unauthenticated backup.
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "nova-restore-"));
+  const verifiedDumpPath = path.join(tempDir, "verified.dump");
 
-  await pipeline(encrypted, decipher, pgRestore.stdin);
-  const exitCode = await new Promise((resolve, reject) => {
-    pgRestore.on("error", reject);
-    pgRestore.on("close", resolve);
-  });
-  if (exitCode !== 0) throw new Error(`pg_restore failed (${exitCode}): ${stderr.slice(-2000)}`);
-  console.log("Restore completed successfully.");
+  try {
+    await pipeline(
+      encrypted,
+      decipher,
+      fs.createWriteStream(verifiedDumpPath, { flags: "wx", mode: 0o600 }),
+    );
+
+    const pgRestore = spawn("pg_restore", ["--no-owner", "--no-acl"], {
+      env: postgresEnv(target),
+      stdio: ["pipe", "ignore", "pipe"],
+      windowsHide: true,
+    });
+    let stderr = "";
+    pgRestore.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
+    const restoreExit = new Promise((resolve) => {
+      pgRestore.once("error", (error) => resolve({ error }));
+      pgRestore.once("close", (code) => resolve({ code }));
+    });
+
+    try {
+      await pipeline(fs.createReadStream(verifiedDumpPath), pgRestore.stdin);
+    } catch (error) {
+      pgRestore.kill("SIGTERM");
+      await restoreExit;
+      throw error;
+    }
+
+    const result = await restoreExit;
+    if (result.error) throw new Error(`pg_restore failed to start: ${result.error.message}`);
+    if (result.code !== 0) throw new Error(`pg_restore failed (${result.code}): ${stderr.slice(-2000)}`);
+    console.log("Restore completed successfully.");
+  } finally {
+    // The dump is sensitive plaintext. Remove it on success and every failure,
+    // including GCM authentication failure and pg_restore errors.
+    await fsp.rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 restore().catch((error) => {
