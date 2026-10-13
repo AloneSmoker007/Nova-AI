@@ -265,11 +265,23 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
         continue;
       }
       const inboxMessage = await ingestWebhookMessage({ message, tenant });
-      await triggerWorkflows({
-        tenantId: tenant.tenantId,
-        triggerType: "message_received",
-        context: { message: { id: message.id, from: message.from, body: message.text?.body || "" }, inboxId: inboxMessage.id },
-      });
+      // The retained canonical-message guard may mark a replay COMPLETED on
+      // insertion. It must not launch automation side effects a second time.
+      if (inboxMessage.state !== "COMPLETED") {
+        await triggerWorkflows({
+          tenantId: tenant.tenantId,
+          triggerType: "message_received",
+          context: {
+            message: {
+              id: message.id,
+              from: message.from,
+              type: inboxMessage.message_type,
+              body: inboxMessage.body,
+            },
+            inboxId: inboxMessage.id,
+          },
+        });
+      }
     }
   } catch (error) {
     req.log.error({ error: error.message }, "Failed to durably process WhatsApp webhook");
@@ -331,8 +343,13 @@ function extractWebhookEvents(body) {
             continue;
           }
 
-          if (!message?.text?.body) continue;
-          messages.push({ ...message, phoneNumberId });
+          // Preserve supported non-text events too. The inbox stores type and
+          // caption/placeholder; binary media is not downloaded here.
+          messages.push({
+            ...message,
+            phoneNumberId,
+            profileName: value?.contacts?.find((contact) => contact?.wa_id === message.from)?.profile?.name,
+          });
         }
       }
 
@@ -411,6 +428,22 @@ async function processInboxMessage(inboxId, log = logger) {
         whatsappMessageId: message.whatsapp_message_id,
         occurredAt: message.received_at,
       });
+    }
+
+    // Non-text events are durable history for a human agent. Do not pass media
+    // placeholders into customer memory, Gemini, or the outbound auto-reply path.
+    if (message.message_type !== "text") {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.info(
+        {
+          inboxId: message.id,
+          tenantId: message.tenant_id,
+          conversationId: persistedInbound.conversationId,
+          messageType: message.message_type,
+        },
+        "Non-text inbound stored for human review; automatic AI reply skipped",
+      );
+      return;
     }
 
     // Memory persistence intentionally runs on every processing attempt, including
