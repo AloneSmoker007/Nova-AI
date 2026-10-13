@@ -12,6 +12,7 @@ describe("inbound message idempotency and identity (PostgreSQL)", { skip }, () =
   let dbPool;
   let runMigrations;
   let persistInboundMessage;
+  let persistOutboundMessage;
   let ingestWebhookMessage;
   let claimInboxMessage;
   let runRetentionCleanup;
@@ -20,7 +21,7 @@ describe("inbound message idempotency and identity (PostgreSQL)", { skip }, () =
     process.env.DATABASE_URL = integrationUrl;
     ({ runMigrations } = await import("../src/database/migrate.js"));
     ({ dbPool } = await import("../src/config/database.js"));
-    ({ persistInboundMessage } = await import("../src/services/message-persistence.service.js"));
+    ({ persistInboundMessage, persistOutboundMessage } = await import("../src/services/message-persistence.service.js"));
     ({ ingestWebhookMessage, claimInboxMessage } = await import("../src/services/webhook-inbox.service.js"));
     ({ runRetentionCleanup } = await import("../src/services/retention.service.js"));
 
@@ -233,6 +234,74 @@ describe("inbound message idempotency and identity (PostgreSQL)", { skip }, () =
     );
     assert.equal(state.rows[0].state, "COMPLETED");
     assert.ok(state.rows[0].completed_at);
+  });
+
+
+  it("keeps activity timestamps monotonic for late inbound, delayed outbound repair and duplicate replay", async () => {
+    const { tenantId, firstNumberId } = await seedTenantAndNumbers();
+    const waId = "1555" + String(Math.floor(Math.random() * 1_000_000_000)).padStart(9, "0");
+    const newestReceivedAt = new Date(Date.now() - 60 * 60 * 1000);
+    const olderReceivedAt = new Date(newestReceivedAt.getTime() - 30 * 60 * 1000);
+    const olderMessageId = "wamid-order-older-" + randomUUID();
+
+    const newest = await persistInboundMessage({
+      tenantId,
+      whatsappNumberId: firstNumberId,
+      waId,
+      profileName: "Ordering Test",
+      whatsappMessageId: "wamid-order-newest-" + randomUUID(),
+      body: "newest event first",
+      receivedAt: newestReceivedAt,
+    });
+    const older = await persistInboundMessage({
+      tenantId,
+      whatsappNumberId: firstNumberId,
+      waId,
+      profileName: "Ordering Test",
+      whatsappMessageId: olderMessageId,
+      body: "older event arrived late",
+      receivedAt: olderReceivedAt,
+    });
+    assert.equal(newest.duplicate, false);
+    assert.equal(older.duplicate, false);
+    assert.equal(older.conversationId, newest.conversationId);
+
+    await persistOutboundMessage({
+      tenantId,
+      conversationId: newest.conversationId,
+      whatsappMessageId: "wamid-order-outbound-" + randomUUID(),
+      body: "delayed outbound history repair",
+      sentAt: new Date(olderReceivedAt.getTime() - 60 * 1000),
+    });
+
+    const replay = await persistInboundMessage({
+      tenantId,
+      whatsappNumberId: firstNumberId,
+      waId,
+      profileName: "Ordering Test",
+      whatsappMessageId: olderMessageId,
+      body: "older event arrived late",
+      receivedAt: new Date(olderReceivedAt.getTime() - 60 * 60 * 1000),
+    });
+    assert.equal(replay.duplicate, true);
+    assert.equal(replay.messageId, older.messageId);
+
+    const conversation = await dbPool.query(
+      "SELECT last_message_at, unread_count FROM conversations WHERE tenant_id=$1 AND id=$2",
+      [tenantId, newest.conversationId],
+    );
+    assert.equal(
+      new Date(conversation.rows[0].last_message_at).getTime(),
+      newestReceivedAt.getTime(),
+      "late inbound and outbound history must not regress the newest activity timestamp",
+    );
+    assert.equal(conversation.rows[0].unread_count, 2, "a duplicate replay must not increment unread count");
+
+    const count = await dbPool.query(
+      "SELECT count(*)::int AS count FROM messages WHERE tenant_id=$1 AND conversation_id=$2",
+      [tenantId, newest.conversationId],
+    );
+    assert.equal(count.rows[0].count, 3, "two inbound provider IDs and one outbound provider ID remain unique");
   });
 
 });
