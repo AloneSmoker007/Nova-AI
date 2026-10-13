@@ -214,8 +214,27 @@ export async function applyPaymentWebhook({ tenantId, provider: providerName, pr
   try {
     await client.query("BEGIN");
 
+    const key = await client.query(
+      `INSERT INTO payment_webhook_event_keys (tenant_id, provider, event_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, provider, event_id) DO NOTHING
+       RETURNING id`,
+      [t, p, normalizedEventId],
+    );
+
+    if (key.rowCount === 0) {
+      await client.query("COMMIT");
+      return { duplicate: true };
+    }
+
+    // Keep detailed event metadata under its normal retention policy, while
+    // the compact identity key above remains to prevent replay after cleanup.
     const event = await client.query(
-      "INSERT INTO payment_webhook_events (tenant_id, provider, event_id, provider_payment_id, status) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tenant_id, provider, event_id) DO NOTHING RETURNING id",
+      `INSERT INTO payment_webhook_events
+         (tenant_id, provider, event_id, provider_payment_id, status)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (tenant_id, provider, event_id) DO NOTHING
+       RETURNING id`,
       [t, p, normalizedEventId, externalId, status],
     );
 
@@ -232,6 +251,12 @@ export async function applyPaymentWebhook({ tenantId, provider: providerName, pr
     if (!current.rows[0]) {
       await client.query(
         "DELETE FROM payment_webhook_events WHERE tenant_id=$1 AND provider=$2 AND event_id=$3",
+        [t, p, normalizedEventId],
+      );
+      // No matching payment: release the key too, allowing a legitimate
+      // provider retry after the payment record has been created.
+      await client.query(
+        "DELETE FROM payment_webhook_event_keys WHERE tenant_id=$1 AND provider=$2 AND event_id=$3",
         [t, p, normalizedEventId],
       );
       await client.query("COMMIT");
