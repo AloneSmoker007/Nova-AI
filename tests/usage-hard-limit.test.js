@@ -390,3 +390,22 @@ test("conflicting duplicate inbound identities stop before AI memory, usage, or 
     "the conflicting webhook must be completed safely rather than retried into side effects",
   );
 });
+
+
+test("Copilot uses the dedicated structured prompt after quota reservation", () => {
+  const route = sliceBetween(
+    indexSource,
+    'app.post("/api/conversations/:conversationId/copilot/draft"',
+    'app.put("/api/users/me/skills"',
+  );
+  const reservation = route.indexOf("reserveAiUsage(");
+  const context = route.indexOf("buildCopilotContext(");
+  const generation = route.indexOf("generateCopilotDraftReply(");
+
+  assert.ok(reservation >= 0, "Copilot must reserve quota");
+  assert.ok(context > reservation, "conversation history must load only after quota reservation");
+  assert.ok(generation > context, "dedicated Copilot generation must follow context construction");
+  assert.ok(route.includes("releaseAiUsage("), "provider/persistence failures must release the reservation");
+  assert.doesNotMatch(route, /buildCopilotPrompt\(/);
+  assert.doesNotMatch(route, /customInstructions:\s*\[brain\?\.customInstructions/);
+});
