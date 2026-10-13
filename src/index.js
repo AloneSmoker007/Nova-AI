@@ -388,6 +388,21 @@ async function processInboxMessage(inboxId, log = logger) {
       receivedAt: message.received_at,
     });
 
+    // Provider message IDs are tenant-scoped identities. Reject a conflicting
+    // duplicate before touching customer memory, AI usage, signals or replies.
+    if (persistedInbound.identityConflict) {
+      log.warn(
+        {
+          inboxId: message.id,
+          tenantId: message.tenant_id,
+          whatsappMessageId: message.whatsapp_message_id,
+        },
+        "Rejected conflicting duplicate WhatsApp message identity",
+      );
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      return;
+    }
+
     if (!persistedInbound.duplicate) {
       await registerInboundUsage({
         tenantId: message.tenant_id,
