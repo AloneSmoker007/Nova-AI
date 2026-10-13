@@ -132,6 +132,11 @@ jobs:
         run: node --test tests/inbound-message-persistence.test.js
 
       # TASK-28 regression coverage: prevent inbox recovery from clearing a lease renewed by a live worker.
-      # This suite resets public schema; keep it serialized and last in this job.
+      # This suite resets public schema; keep it serialized before the final dead-letter operations suite.
       - name: Run webhook inbox recovery integration tests
         run: node --test tests/webhook-inbox-recovery.test.js
+
+      # TASK-34 regression coverage: tenant-scoped dead-letter listing and audited manual retry.
+      # This suite also resets public schema, so run it serialized and last in this job.
+      - name: Run webhook dead-letter operations integration tests
+        run: node --test tests/webhook-dead-letter-operations.test.js

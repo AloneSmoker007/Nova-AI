@@ -31,6 +31,7 @@ const EXPECTED_COLUMN_LIST_SET_NULL = new Map([
   ["016_automation_workflows.sql", ["created_by"]],
   ["018_appointments.sql", ["contact_id", "conversation_id", "created_by"]],
   ["019_payments_ocr.sql", ["created_by"]],
+  ["028_webhook_dead_letter_operations.sql", ["last_manual_retry_by"]],
 ]);
 
 function stripLineComments(sql) {
