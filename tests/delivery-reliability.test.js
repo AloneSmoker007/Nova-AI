@@ -28,6 +28,7 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
   let svc = null;
   let dbPool = null;
   let runMigrations = null;
+  let persistOutboundMessage = null;
 
   before(async () => {
     // config/database.js reads DATABASE_URL when it is first imported.
@@ -36,6 +37,7 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
     ({ runMigrations } = await import("../src/database/migrate.js"));
     ({ dbPool } = await import("../src/config/database.js"));
     svc = await import("../src/services/whatsapp-delivery.service.js");
+    persistOutboundMessage = (await import("../src/services/message-persistence.service.js")).persistOutboundMessage;
 
     assert.ok(dbPool, "dbPool must be configured from MIGRATION_TEST_DATABASE_URL");
 
@@ -559,6 +561,94 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
     assert.equal(row.attempt_count, 2);
     assert.equal(row.provider_message_id, "wamid.recovered-1");
   });
+  it("backfills a missing outbound history row after provider acceptance without re-sending", async () => {
+    const { delivery, tenantId, phoneNumberId, conversationId } = await seedDelivery();
+    const providerMessageId = "wamid.history-recovery-" + randomUUID();
+    const claim = await svc.claimDelivery(delivery.id, tenantId);
+    assert.equal(claim.claimed, true);
+
+    await svc.markDeliveryRequestStarted(
+      delivery.id,
+      tenantId,
+      claim.leaseToken,
+      claim.delivery.attempt_count,
+    );
+    const sent = await svc.markDeliverySent(
+      delivery.id,
+      tenantId,
+      claim.leaseToken,
+      providerMessageId,
+      claim.delivery.attempt_count,
+    );
+    assert.equal(sent.state, "SENT");
+
+    // Simulate a delivered status callback arriving after provider acceptance,
+    // followed by a worker crash before persistOutboundMessage() ran.
+    const callback = await svc.markDeliveryStatus({
+      tenantId,
+      phoneNumberId,
+      providerMessageId,
+      callbackData: delivery.delivery_key,
+      status: "delivered",
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+    assert.equal(callback.state, "DELIVERED");
+
+    const missing = await svc.findDeliveriesMissingOutboundMessage(50);
+    assert.ok(
+      missing.some((row) => row.id === delivery.id && row.tenant_id === tenantId),
+      "terminal delivery without its outbound message must be eligible for history repair",
+    );
+
+    const inserted = await persistOutboundMessage({
+      tenantId,
+      conversationId,
+      whatsappMessageId: providerMessageId,
+      messageType: "text",
+      body: delivery.body,
+      sentAt: delivery.last_attempt_at || delivery.created_at || new Date(),
+      deliveryId: delivery.id,
+    });
+    assert.equal(inserted.duplicate, false);
+
+    await svc.syncDeliveryToMessage(delivery.id, tenantId);
+
+    const rows = await dbPool.query(
+      `SELECT id, direction, status, "text"
+       FROM messages
+       WHERE tenant_id = $1 AND whatsapp_message_id = $2`,
+      [tenantId, providerMessageId],
+    );
+    assert.equal(rows.rowCount, 1, "history reconciliation must create exactly one outbound row");
+    assert.equal(rows.rows[0].direction, "outbound");
+    assert.equal(rows.rows[0].status, "delivered", "uppercase delivery state must map to delivered message status");
+    assert.equal(rows.rows[0].text, delivery.body);
+
+    const afterRepair = await svc.findDeliveriesMissingOutboundMessage(50);
+    assert.ok(
+      !afterRepair.some((row) => row.id === delivery.id),
+      "a repaired delivery must leave the missing-history scan",
+    );
+
+    const duplicateInsert = await persistOutboundMessage({
+      tenantId,
+      conversationId,
+      whatsappMessageId: providerMessageId,
+      messageType: "text",
+      body: delivery.body,
+      deliveryId: delivery.id,
+    });
+    assert.equal(duplicateInsert.duplicate, true);
+    const count = await dbPool.query(
+      "SELECT count(*)::int AS count FROM messages WHERE tenant_id=$1 AND whatsapp_message_id=$2",
+      [tenantId, providerMessageId],
+    );
+    assert.equal(count.rows[0].count, 1, "repeated reconciliation must remain idempotent");
+    const finalDelivery = await svc.getDelivery(delivery.id, tenantId);
+    assert.equal(finalDelivery.state, "DELIVERED");
+    assert.equal(finalDelivery.attempt_count, 1, "history repair must not claim or resend the delivery");
+  });
+
   it("recovers PENDING automation deliveries that have no inbox message", async () => {
     const { delivery, automationDelivery, tenantId } = await seedAutomationDelivery();
     assert.equal(automationDelivery.inbox_message_id, null);

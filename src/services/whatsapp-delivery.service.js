@@ -518,6 +518,42 @@ export async function findRecoverableDeliveries(limit = 50) {
   return result.rows;
 }
 
+// Recover history persistence without re-sending messages already accepted by the provider.
+// This scans only terminal, provider-correlated deliveries whose outbound row is missing.
+export async function findDeliveriesMissingOutboundMessage(limit = 50) {
+  assertDatabase();
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+  const result = await dbPool.query(
+    `
+      SELECT
+        d.id,
+        d.tenant_id,
+        d.conversation_id,
+        d.provider_message_id,
+        d.body,
+        d.state,
+        d.last_attempt_at,
+        d.created_at
+      FROM whatsapp_deliveries d
+      WHERE d.provider_message_id IS NOT NULL
+        AND d.conversation_id IS NOT NULL
+        AND d.state IN ('SENT', 'DELIVERED', 'READ', 'FAILED')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM messages m
+          WHERE m.tenant_id = d.tenant_id
+            AND m.whatsapp_message_id = d.provider_message_id
+        )
+      ORDER BY COALESCE(d.last_attempt_at, d.created_at) ASC
+      LIMIT $1
+    `,
+    [safeLimit],
+  );
+
+  return result.rows;
+}
+
 export async function markExpiredAmbiguousDeliveries(limit = 50) {
   assertDatabase();
 
