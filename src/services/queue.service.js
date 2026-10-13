@@ -5,6 +5,49 @@ import { logger } from "../config/logger.js";
 const QUEUE_NAME = "whatsapp-messages";
 const MAX_ATTEMPTS = 1;
 const BACKOFF_MS = 2000;
+const DEFAULT_QUEUE_CONCURRENCY = 5;
+const DEFAULT_QUEUE_RATE_MAX = 20;
+const MAX_QUEUE_CONCURRENCY = 100;
+const MAX_QUEUE_RATE_MAX = 1000;
+
+function readBoundedQueueInteger(env, key, fallback, min, max) {
+  const raw = env[key];
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    logger.warn(
+      { configKey: key, min, max },
+      "Invalid numeric queue setting; using safe default",
+    );
+    return fallback;
+  }
+  return value;
+}
+
+export function getWorkerConfig(env = process.env) {
+  return {
+    concurrency: readBoundedQueueInteger(
+      env,
+      "QUEUE_CONCURRENCY",
+      DEFAULT_QUEUE_CONCURRENCY,
+      1,
+      MAX_QUEUE_CONCURRENCY,
+    ),
+    limiter: {
+      max: readBoundedQueueInteger(
+        env,
+        "QUEUE_RATE_MAX",
+        DEFAULT_QUEUE_RATE_MAX,
+        1,
+        MAX_QUEUE_RATE_MAX,
+      ),
+      duration: 1000,
+    },
+  };
+}
 
 let connection = null;
 let messageQueue = null;
@@ -121,11 +164,7 @@ export function startWorker(processor) {
     async (job) => processor(job.data, job),
     {
       connection: getConnection(),
-      concurrency: Number(process.env.QUEUE_CONCURRENCY || 5),
-      limiter: {
-        max: Number(process.env.QUEUE_RATE_MAX || 20),
-        duration: 1000,
-      },
+      ...getWorkerConfig(),
     },
   );
 
