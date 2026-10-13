@@ -262,10 +262,10 @@ test("copilot draft route reserves quota before any context work or Gemini call"
     route.indexOf("getConversationMessages") > reserveAt && route.indexOf("getBusinessBrain") > reserveAt,
     "context work must happen after the reservation",
   );
-  assert.ok(route.indexOf("generateGeminiReply") > reserveAt, "Gemini must be invoked after the reservation");
+  assert.ok(route.indexOf("generateCopilotDraftReply") > reserveAt, "dedicated Gemini Copilot generation must follow the reservation");
   assert.ok(route.includes("status(429)"), "blocked copilot drafts must return 429 without calling Gemini");
   assert.ok(
-    route.indexOf("releaseAiUsage({") > route.indexOf("generateGeminiReply") &&
+    route.indexOf("releaseAiUsage({") > route.indexOf("generateCopilotDraftReply") &&
       route.includes('eventKey: aiReservation.eventKey, type: "copilot_draft"'),
     "any post-reservation copilot failure must release its own reservation",
   );
