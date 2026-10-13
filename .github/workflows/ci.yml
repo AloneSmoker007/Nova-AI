@@ -133,7 +133,5 @@ jobs:
 
       # TASK-28 regression coverage: prevent inbox recovery from clearing a lease renewed by a live worker.
       # This suite resets public schema; keep it serialized and last in this job.
-
-
       - name: Run webhook inbox recovery integration tests
         run: node --test tests/webhook-inbox-recovery.test.js
