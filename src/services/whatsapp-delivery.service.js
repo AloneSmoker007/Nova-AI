@@ -168,6 +168,7 @@ export async function claimDelivery(deliveryId, tenantId) {
         lease_token = $3::uuid,
         lease_until = NOW() + ($4 * INTERVAL '1 second'),
         last_attempt_at = NOW(),
+        provider_request_started_at = NULL,
         last_error = NULL,
         updated_at = NOW()
       WHERE id = $1
@@ -180,6 +181,7 @@ export async function claimDelivery(deliveryId, tenantId) {
             AND (last_attempt_at IS NULL OR last_attempt_at < NOW() - ($5 * INTERVAL '1 second'))
             AND (lease_until IS NULL OR lease_until < NOW())
             AND provider_message_id IS NULL
+            AND provider_request_started_at IS NULL
           )
         )
       RETURNING *
@@ -203,6 +205,9 @@ export async function claimDelivery(deliveryId, tenantId) {
   if (["SENT", "DELIVERED", "READ"].includes(current.state)) {
     return { claimed: false, reason: "completed" };
   }
+  if (current.state === "UNKNOWN") {
+    return { claimed: false, reason: "unknown" };
+  }
   if (current.state === "FAILED") {
     return { claimed: false, reason: "failed" };
   }
@@ -211,6 +216,44 @@ export async function claimDelivery(deliveryId, tenantId) {
   }
 
   return { claimed: false, reason: "in_flight" };
+}
+
+export async function markDeliveryRequestStarted(deliveryId, tenantId, leaseToken, attemptCount) {
+  assertDatabase();
+
+  if (
+    !validateUuid(deliveryId) ||
+    !validateTenantId(tenantId) ||
+    !validateUuid(leaseToken) ||
+    !Number.isInteger(attemptCount) ||
+    attemptCount < 1
+  ) {
+    throw new Error("Invalid WhatsApp delivery request-start data");
+  }
+
+  const result = await dbPool.query(
+    `
+      UPDATE whatsapp_deliveries
+      SET
+        provider_request_started_at = NOW(),
+        updated_at = NOW()
+      WHERE id = $1
+        AND tenant_id = $2
+        AND lease_token = $3::uuid
+        AND state = 'SENDING'
+        AND attempt_count = $4
+        AND lease_until > NOW()
+        AND provider_request_started_at IS NULL
+      RETURNING *
+    `,
+    [deliveryId.trim(), tenantId.trim(), leaseToken.trim(), attemptCount],
+  );
+
+  if (result.rowCount !== 1) {
+    throw new Error("WhatsApp delivery lease is no longer valid");
+  }
+
+  return result.rows[0];
 }
 
 export async function markDeliverySent(
@@ -274,7 +317,7 @@ export async function markDeliveryUnknown(deliveryId, tenantId, leaseToken, erro
     `
       UPDATE whatsapp_deliveries
       SET
-        state = 'SENDING',
+        state = 'UNKNOWN',
         lease_token = NULL,
         lease_until = NULL,
         last_error = $4,
@@ -403,20 +446,20 @@ export async function markDeliveryStatus({
         state = CASE
           WHEN d.state = 'READ' THEN 'READ'
           WHEN d.state = 'FAILED' THEN 'FAILED'
-          WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING') THEN 'FAILED'
+          WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'UNKNOWN') THEN 'FAILED'
           WHEN $5 = 'read' THEN 'READ'
-          WHEN $5 = 'delivered' AND d.state IN ('PENDING', 'SENDING', 'SENT') THEN 'DELIVERED'
-          WHEN $5 = 'sent' AND d.state IN ('PENDING', 'SENDING') THEN 'SENT'
+          WHEN $5 = 'delivered' AND d.state IN ('PENDING', 'SENDING', 'SENT', 'UNKNOWN') THEN 'DELIVERED'
+          WHEN $5 = 'sent' AND d.state IN ('PENDING', 'SENDING', 'UNKNOWN') THEN 'SENT'
           ELSE d.state
         END,
         status_at = CASE
           WHEN d.status_at IS NULL OR $6::timestamptz >= d.status_at THEN $6::timestamptz
           ELSE d.status_at
         END,
-        error_code = CASE WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'FAILED') THEN $7 ELSE d.error_code END,
-        error_title = CASE WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'FAILED') THEN $8 ELSE d.error_title END,
-        error_details = CASE WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'FAILED') THEN $9 ELSE d.error_details END,
-        last_error = CASE WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'FAILED') THEN COALESCE($9, $8) ELSE d.last_error END,
+        error_code = CASE WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'FAILED', 'UNKNOWN') THEN $7 ELSE d.error_code END,
+        error_title = CASE WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'FAILED', 'UNKNOWN') THEN $8 ELSE d.error_title END,
+        error_details = CASE WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'FAILED', 'UNKNOWN') THEN $9 ELSE d.error_details END,
+        last_error = CASE WHEN $5 = 'failed' AND d.state IN ('PENDING', 'SENDING', 'FAILED', 'UNKNOWN') THEN COALESCE($9, $8) ELSE d.last_error END,
         lease_token = NULL,
         lease_until = NULL,
         updated_at = NOW()
@@ -457,6 +500,7 @@ export async function findRecoverableDeliveries(limit = 50) {
           AND attempt_count < $2
           AND (last_attempt_at IS NULL OR last_attempt_at < NOW() - ($1 * INTERVAL '1 second'))
           AND (lease_until IS NULL OR lease_until < NOW())
+          AND provider_request_started_at IS NULL
         )
         OR (
           state = 'PENDING'
@@ -474,16 +518,56 @@ export async function findRecoverableDeliveries(limit = 50) {
   return result.rows;
 }
 
+export async function markExpiredAmbiguousDeliveries(limit = 50) {
+  assertDatabase();
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+  const result = await dbPool.query(
+    `
+      WITH expired AS (
+        SELECT id
+        FROM whatsapp_deliveries
+        WHERE state = 'SENDING'
+          AND provider_message_id IS NULL
+          AND provider_request_started_at IS NOT NULL
+          AND (lease_until IS NULL OR lease_until < NOW())
+        ORDER BY COALESCE(last_attempt_at, created_at) ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT $1
+      )
+      UPDATE whatsapp_deliveries AS delivery
+      SET
+        state = 'UNKNOWN',
+        lease_token = NULL,
+        lease_until = NULL,
+        last_error = COALESCE(
+          delivery.last_error,
+          'Provider request started but no definitive send result was persisted'
+        ),
+        updated_at = NOW()
+      FROM expired
+      WHERE delivery.id = expired.id
+        AND delivery.state = 'SENDING'
+        AND delivery.provider_request_started_at IS NOT NULL
+        AND (delivery.lease_until IS NULL OR delivery.lease_until < NOW())
+      RETURNING delivery.id, delivery.tenant_id
+    `,
+    [safeLimit],
+  );
+
+  return result.rows;
+}
+
 export async function failExhaustedDeliveries(limit = 50) {
   assertDatabase();
 
   const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
 
-  // Finalize deliveries that hit MAX_DELIVERY_ATTEMPTS while nobody holds a
-  // live lease. They can never be claimed again (the claim gate enforces the
-  // cap), so this only moves them to the terminal FAILED state. Rows with a
-  // live lease are skipped: the fenced attempt_count CAS keeps the current
-  // owner authoritative.
+  // Finalize only safe pre-send retries that hit MAX_DELIVERY_ATTEMPTS.
+  // A row whose provider request started is ambiguous on lease expiry and must
+  // remain UNKNOWN rather than being mislabeled FAILED or automatically resent.
+  // Rows with a live lease are skipped: the fenced attempt_count CAS keeps the
+  // current owner authoritative.
   const result = await dbPool.query(
     `
       UPDATE whatsapp_deliveries
@@ -498,6 +582,7 @@ export async function failExhaustedDeliveries(limit = 50) {
         FROM whatsapp_deliveries
         WHERE state = 'SENDING'
           AND provider_message_id IS NULL
+          AND provider_request_started_at IS NULL
           AND attempt_count >= $1
           AND (lease_until IS NULL OR lease_until < NOW())
         ORDER BY last_attempt_at ASC
