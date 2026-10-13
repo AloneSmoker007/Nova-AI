@@ -484,9 +484,11 @@ async function processInboxMessage(inboxId, log = logger) {
         }
 
         const advancedContext = buildAdvancedAiContext({ signal, memories, businessBrain: brain });
+        // Keep derived signals and saved customer memory in a distinct data
+        // field; never merge runtime/customer context into owner instructions.
         const aiBrain = brain
-          ? { ...brain, customInstructions: [brain.customInstructions, advancedContext].filter(Boolean).join("\\n\\n") }
-          : { customInstructions: advancedContext };
+          ? { ...brain, advancedContext }
+          : { advancedContext };
 
         reply = await generateGeminiReply(message.body, aiBrain);
         reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
