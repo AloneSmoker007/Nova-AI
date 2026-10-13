@@ -51,3 +51,18 @@ test("restore authenticates the entire encrypted dump before pg_restore can star
     "unauthenticated plaintext must never be piped directly into pg_restore",
   );
 });
+
+test("backup handles pg_dump spawn errors before waiting on stream completion", async () => {
+  const source = await fs.readFile(new URL("../scripts/backup-db.js", import.meta.url), "utf8");
+  const activeSpawn = source.lastIndexOf('const child = spawn("pg_dump"');
+  const errorListener = source.indexOf('child.once("error", (error) => resolve({ error }))', activeSpawn);
+  const streamPipeline = source.indexOf("await pipeline(child.stdout, cipher, output)", activeSpawn);
+  const resultCheck = source.indexOf('if (result.error) throw new Error(`pg_dump failed to start:', activeSpawn);
+  const partialCleanup = source.indexOf('await fsp.rm(tempPath, { force: true })', activeSpawn);
+
+  assert.ok(activeSpawn >= 0, "the active backup path must launch pg_dump");
+  assert.ok(errorListener > activeSpawn, "the child process error handler must be attached immediately");
+  assert.ok(streamPipeline > errorListener, "spawn errors must be observed before the pipeline is awaited");
+  assert.ok(resultCheck > streamPipeline, "a failed spawn must produce a controlled error");
+  assert.ok(partialCleanup > resultCheck, "the failed backup path must remove its partial output");
+});
