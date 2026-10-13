@@ -119,3 +119,8 @@ jobs:
       # This suite resets public schema; keep it serialized and last in this job.
       - name: Run appointment buffer integration tests
         run: node --test tests/appointment-buffer.test.js
+
+      # TASK-25 regression coverage: expired token replay and refresh-token retention.
+      # The test resets public schema, so run it serialized and last in this job.
+      - name: Run refresh token replay integration tests
+        run: node --test tests/refresh-token-replay.test.js
