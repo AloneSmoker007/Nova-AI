@@ -5,9 +5,29 @@ import { logger } from "./logger.js";
 const { Pool } = pg;
 
 const isProduction = process.env.NODE_ENV === "production";
+const DEFAULT_DB_POOL_MAX = 10;
+const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
+const DEFAULT_CONNECTION_TIMEOUT_MS = 5_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-function readSslCa() {
-  const caPath = process.env.DATABASE_SSL_CA;
+function readBoundedIntegerEnv(env, key, fallback, min, max) {
+  const raw = env[key];
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    logger.warn(
+      { configKey: key, min, max },
+      "Invalid numeric database setting; using safe default",
+    );
+    return fallback;
+  }
+  return value;
+}
+
+function readSslCa(caPath = process.env.DATABASE_SSL_CA) {
   if (!caPath) return null;
 
   try {
@@ -19,12 +39,12 @@ function readSslCa() {
   }
 }
 
-function getPoolConfig() {
-  if (!process.env.DATABASE_URL) {
+export function getPoolConfig(env = process.env) {
+  if (!env.DATABASE_URL) {
     return null;
   }
 
-  const sslCa = readSslCa();
+  const sslCa = readSslCa(env.DATABASE_SSL_CA);
   const sslConfig = isProduction
     ? sslCa
       ? { ca: sslCa, rejectUnauthorized: true }
@@ -34,11 +54,21 @@ function getPoolConfig() {
       : undefined;
 
   return {
-    connectionString: process.env.DATABASE_URL,
-    max: Number(process.env.DB_POOL_MAX || 10),
-    idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 30_000),
-    connectionTimeoutMillis: Number(
-      process.env.DB_CONNECTION_TIMEOUT_MS || 5_000,
+    connectionString: env.DATABASE_URL,
+    max: readBoundedIntegerEnv(env, "DB_POOL_MAX", DEFAULT_DB_POOL_MAX, 1, 100),
+    idleTimeoutMillis: readBoundedIntegerEnv(
+      env,
+      "DB_IDLE_TIMEOUT_MS",
+      DEFAULT_IDLE_TIMEOUT_MS,
+      0,
+      MAX_TIMER_DELAY_MS,
+    ),
+    connectionTimeoutMillis: readBoundedIntegerEnv(
+      env,
+      "DB_CONNECTION_TIMEOUT_MS",
+      DEFAULT_CONNECTION_TIMEOUT_MS,
+      0,
+      MAX_TIMER_DELAY_MS,
     ),
     allowExitOnIdle: false,
     ...(sslConfig ? { ssl: sslConfig } : {}),
