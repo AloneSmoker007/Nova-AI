@@ -69,9 +69,10 @@ import { getDashboardSummary } from "./services/dashboard.service.js";
 import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
 import { registerTask16Routes } from "./task16.routes.js";
+import { getServerPort } from "./config/server.js";
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = getServerPort();
 const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PRODUCTION = NODE_ENV === "production";
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
