@@ -40,6 +40,7 @@ export function getRetentionConfig() {
     usageEventsDays: getDays("RETENTION_USAGE_EVENTS_DAYS", 365),
     ocrDocumentsDays: getDays("RETENTION_OCR_DOCUMENTS_DAYS", DEFAULT_RETENTION_DAYS),
     paymentEventsDays: getDays("RETENTION_PAYMENT_EVENTS_DAYS", DEFAULT_RETENTION_DAYS),
+    expiredRefreshTokensDays: getDays("RETENTION_EXPIRED_REFRESH_TOKENS_DAYS", 30),
     cleanupIntervalMs: getCleanupIntervalMs(),
   };
 }
@@ -59,6 +60,7 @@ export async function runRetentionCleanup() {
     ["usageEvents", `DELETE FROM usage_events WHERE created_at < NOW() - ($1 * INTERVAL '1 day')`, config.usageEventsDays],
     ["ocrDocuments", `DELETE FROM ocr_documents WHERE created_at < NOW() - ($1 * INTERVAL '1 day')`, config.ocrDocumentsDays],
     ["paymentEvents", `DELETE FROM payment_webhook_events WHERE received_at < NOW() - ($1 * INTERVAL '1 day')`, config.paymentEventsDays],
+    ["expiredRefreshTokens", `DELETE FROM refresh_tokens WHERE expires_at < NOW() - ($1 * INTERVAL '1 day')`, config.expiredRefreshTokensDays],
   ];
 
   for (const [name, sql, days] of queries) {
