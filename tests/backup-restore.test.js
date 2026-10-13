@@ -75,6 +75,7 @@ test("restore uses an all-or-nothing transaction and stops at the first SQL erro
   const end = source.indexOf("]", start);
   assert.ok(end > start, "pg_restore argument list must be closed");
   const args = source.slice(start, end + 1);
+  assert.match(args, /"--dbname", restoreEnv\.PGDATABASE/, "restore must target the configured database instead of writing SQL to stdout");
   assert.match(args, /"--single-transaction"/, "restore must be atomic");
   assert.match(args, /"--exit-on-error"/, "restore must not continue after a SQL error");
   assert.match(args, /"--no-owner"/);
