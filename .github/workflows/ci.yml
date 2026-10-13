@@ -125,9 +125,9 @@ jobs:
       - name: Run refresh token replay integration tests
         run: node --test tests/refresh-token-replay.test.js
 
-      # TASK-27 regression coverage: duplicate inbound provider IDs resolve canonical rows,
-      # while identity collisions roll back all tentative contact/conversation changes.
-      # This PostgreSQL suite resets public schema; keep it serialized and last in this job.
+      # TASK-27 and TASK-29 regression coverage: canonical duplicate IDs, identity collisions,
+      # and provider replay after completed-inbox retention cleanup. This suite resets public schema;
+      # keep it serialized before the final inbox lease-recovery integration suite.
       - name: Run inbound message persistence integration tests
         run: node --test tests/inbound-message-persistence.test.js
 
