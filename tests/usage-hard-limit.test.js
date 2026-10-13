@@ -305,3 +305,35 @@ test("the dev-only Gemini test route stays out of production builds", () => {
   );
 });
 
+test("OCR Gemini request has a hard timeout and cleans up its timer", () => {
+  const extraction = sliceBetween(
+    ocrSource,
+    "export async function extractTextFromDocument",
+    "export async function listOcrDocuments",
+  );
+
+  assert.ok(
+    ocrSource.includes("const OCR_REQUEST_TIMEOUT_MS = 30_000;"),
+    "OCR request deadline must remain explicitly bounded at 30 seconds",
+  );
+  assert.ok(
+    extraction.includes("httpOptions: { timeout: OCR_REQUEST_TIMEOUT_MS }"),
+    "the Gemini SDK request must receive a timeout in milliseconds",
+  );
+  assert.ok(
+    extraction.includes("abortSignal: timeoutController.signal"),
+    "a client abort signal must also enforce the overall deadline",
+  );
+  assert.ok(
+    extraction.includes("setTimeout(() => timeoutController.abort(), OCR_REQUEST_TIMEOUT_MS)"),
+    "the abort signal must be triggered when the deadline expires",
+  );
+  assert.ok(
+    extraction.includes("clearTimeout(timeoutId)"),
+    "the timeout timer must be cleaned up on both success and failure",
+  );
+  assert.ok(
+    extraction.includes('throw new Error("OCR request timed out")'),
+    "deadline expiry must return a clear timeout error",
+  );
+});
