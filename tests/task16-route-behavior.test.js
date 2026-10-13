@@ -151,6 +151,25 @@ test("POST /api/ocr/extract reaches requireAuth (401), not the catch-all 404", a
   assert.doesNotMatch(res.body, /Route not found/, "must not be answered by the terminal 404");
 });
 
+test("development Gemini diagnostics reject anonymous calls and rate-limit repeated probes", async () => {
+  const send = () => request("POST", "/api/test/gemini", { message: "diagnostic test" });
+
+  const first = await send();
+  assert.equal(first.status, 401, `anonymous diagnostic call must be denied, got ${first.status} ${first.body}`);
+  assert.match(first.body, /Authentication required/);
+
+  // The dedicated limiter allows five requests per source IP in 15 minutes.
+  // Auth middleware then rejects each of those requests before Gemini is called.
+  for (let attempt = 1; attempt < 5; attempt += 1) {
+    const denied = await send();
+    assert.equal(denied.status, 401, `anonymous diagnostic call ${attempt + 1} must be denied`);
+  }
+
+  const limited = await send();
+  assert.equal(limited.status, 429, `sixth diagnostic call must be rate-limited, got ${limited.status} ${limited.body}`);
+  assert.match(limited.body, /Too many AI diagnostic requests/);
+});
+
 test("the terminal 404 still handles genuinely unknown routes", async () => {
   const res = await request("GET", "/__definitely_not_a_real_route__");
   assert.equal(res.status, 404);
