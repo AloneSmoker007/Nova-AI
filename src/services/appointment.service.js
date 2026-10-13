@@ -17,11 +17,28 @@ export async function createAppointmentType({ tenantId, name, description=null, 
 }
 export async function listAppointmentTypes(tenantId) { tenantId=validTenant(tenantId); const r=await dbPool.query("SELECT * FROM appointment_types WHERE tenant_id=$1 AND active=true ORDER BY name",[tenantId]); return r.rows; }
 
+export function validateBusinessHourRange(startTime, endTime) {
+  const validStart =
+    typeof startTime === "string" &&
+    /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(startTime);
+  const validEnd =
+    typeof endTime === "string" &&
+    (/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(endTime) || endTime === "24:00");
+
+  if (!validStart || !validEnd || startTime >= endTime) {
+    throw new Error("Invalid business hours");
+  }
+  return true;
+}
+
 export async function setBusinessHours(tenantId,hours) {
   tenantId=validTenant(tenantId); if(!Array.isArray(hours)||hours.length>14) throw new Error("Invalid business hours");
   const c=await dbPool.connect(); try { await c.query("BEGIN"); await c.query("DELETE FROM business_hours WHERE tenant_id=$1",[tenantId]);
-    for(const h of hours){ if(!Number.isInteger(h?.weekday)||h.weekday<0||h.weekday>6||!/^[0-9]{2}:[0-9]{2}$/.test(h.startTime)||!/^[0-9]{2}:[0-9]{2}$/.test(h.endTime)||h.startTime>=h.endTime) throw new Error("Invalid business hours");
-      await c.query("INSERT INTO business_hours (tenant_id,weekday,start_time,end_time,timezone) VALUES ($1,$2,$3,$4,$5)",[tenantId,h.weekday,h.startTime,h.endTime,timezone(h.timezone||"UTC")]); }
+    for(const h of hours){
+      if(!Number.isInteger(h?.weekday)||h.weekday<0||h.weekday>6) throw new Error("Invalid business hours");
+      validateBusinessHourRange(h.startTime, h.endTime);
+      await c.query("INSERT INTO business_hours (tenant_id,weekday,start_time,end_time,timezone) VALUES ($1,$2,$3,$4,$5)",[tenantId,h.weekday,h.startTime,h.endTime,timezone(h.timezone||"UTC")]);
+    }
     await c.query("COMMIT"); return getBusinessHours(tenantId); } catch(e){ await c.query("ROLLBACK"); throw e; } finally { c.release(); }
 }
 export async function getBusinessHours(tenantId) { tenantId=validTenant(tenantId); const r=await dbPool.query("SELECT * FROM business_hours WHERE tenant_id=$1 AND active=true ORDER BY weekday,start_time",[tenantId]); return r.rows; }
