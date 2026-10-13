@@ -319,15 +319,31 @@ export async function recoverExpiredLeases(limit = 100) {
 
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 100);
   const result = await dbPool.query(
-    "UPDATE webhook_messages SET " +
-      "state = CASE WHEN attempts >= $1 THEN 'DEAD_LETTER' ELSE 'RETRY_WAIT' END, " +
-      "available_at = CASE WHEN attempts >= $1 THEN available_at ELSE NOW() END, " +
-      "lease_until = NULL, lease_token = NULL, " +
-      "last_error = COALESCE(last_error, 'Processing lease expired'), updated_at = NOW() " +
-      "WHERE id IN (SELECT id FROM webhook_messages " +
-      "WHERE state = 'PROCESSING' AND lease_until < NOW() " +
-      "ORDER BY lease_until ASC LIMIT $2) " +
-      "RETURNING id, tenant_id",
+    `WITH expired AS (
+       SELECT id, tenant_id, lease_token, lease_until
+       FROM webhook_messages
+       WHERE state = 'PROCESSING'
+         AND lease_until < NOW()
+       ORDER BY lease_until ASC
+       LIMIT $2
+       FOR UPDATE SKIP LOCKED
+     )
+     UPDATE webhook_messages AS inbox
+     SET
+       state = CASE WHEN inbox.attempts >= $1 THEN 'DEAD_LETTER' ELSE 'RETRY_WAIT' END,
+       available_at = CASE WHEN inbox.attempts >= $1 THEN inbox.available_at ELSE NOW() END,
+       lease_until = NULL,
+       lease_token = NULL,
+       last_error = COALESCE(inbox.last_error, 'Processing lease expired'),
+       updated_at = NOW()
+     FROM expired
+     WHERE inbox.id = expired.id
+       AND inbox.tenant_id = expired.tenant_id
+       AND inbox.lease_token IS NOT DISTINCT FROM expired.lease_token
+       AND inbox.lease_until IS NOT DISTINCT FROM expired.lease_until
+       AND inbox.state = 'PROCESSING'
+       AND inbox.lease_until < NOW()
+     RETURNING inbox.id, inbox.tenant_id`,
     [MAX_ATTEMPTS, safeLimit],
   );
 
