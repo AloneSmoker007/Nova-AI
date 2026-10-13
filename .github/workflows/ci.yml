@@ -125,9 +125,9 @@ jobs:
       - name: Run refresh token replay integration tests
         run: node --test tests/refresh-token-replay.test.js
 
-      # TASK-27 and TASK-29 regression coverage: canonical duplicate IDs, identity collisions,
-      # and provider replay after completed-inbox retention cleanup. This suite resets public schema;
-      # keep it serialized before the final inbox lease-recovery integration suite.
+      # TASK-27/TASK-29/TASK-30 coverage: canonical inbound IDs, post-retention replay,
+      # and monotonic activity timestamps. This suite resets public schema; keep it serialized
+      # before the final inbox lease-recovery integration suite.
       - name: Run inbound message persistence integration tests
         run: node --test tests/inbound-message-persistence.test.js
 
