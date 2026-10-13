@@ -121,12 +121,21 @@ export async function createWorkflow({ tenantId, createdBy, name, description = 
   const n=text(name,120);
   if (!["manual","message_received","conversation_created","inactivity"].includes(triggerType)) throw new Error("Invalid trigger type");
   if (!triggerConfig || typeof triggerConfig !== "object" || Array.isArray(triggerConfig)) throw new Error("Invalid trigger configuration");
-  if (triggerType === "inactivity") { const after = Number(triggerConfig.afterSeconds); if (!Number.isInteger(after) || after < 60 || after > MAX_DELAY_SECONDS) throw new Error("Invalid inactivity delay"); }
+  const normalizedTriggerConfig = { ...triggerConfig };
+  if (triggerType === "inactivity") {
+    const after = Number(triggerConfig.afterSeconds);
+    if (!Number.isInteger(after) || after < 60 || after > MAX_DELAY_SECONDS) {
+      throw new Error("Invalid inactivity delay");
+    }
+    // Persist the numeric value we validated. For example, Number("1e2") is
+    // 100, but PostgreSQL cannot cast the original JSON string "1e2" to int.
+    normalizedTriggerConfig.afterSeconds = after;
+  }
   const def=normalizeWorkflowDefinition(definition);
   const r=await dbPool.query(`INSERT INTO automation_workflows
     (tenant_id,name,description,trigger_type,trigger_config,definition,created_by)
     VALUES ($1,$2,$3,$4,$5,$6,$7)
-    RETURNING *`,[t,n,typeof description==="string"?description.slice(0,2000):null,triggerType,triggerConfig,def,createdBy]);
+    RETURNING *`,[t,n,typeof description==="string"?description.slice(0,2000):null,triggerType,normalizedTriggerConfig,def,createdBy]);
   return r.rows[0];
 }
 export async function listWorkflows(tenantId) {
@@ -184,26 +193,54 @@ async function executeWebhook(step,run,ctx,stepIndex){
     if(!response.ok) throw new Error(`Workflow webhook returned HTTP ${response.status}`);
   } finally { clearTimeout(timer); }
 }
-export async function scheduleInactivityTriggers(limit=100) {
+export async function scheduleInactivityTriggers(limit = 100) {
   assertDb();
-  const safe=Math.min(Math.max(Number(limit)||100,1),500);
-  const r=await dbPool.query(`SELECT w.id AS workflow_id,w.tenant_id,w.trigger_config,c.id AS conversation_id,c.contact_id,
-      FLOOR(EXTRACT(EPOCH FROM (NOW()-c.last_message_at))/GREATEST(COALESCE((w.trigger_config->>'afterSeconds')::integer,86400),1)) AS bucket
-    FROM automation_workflows w
-    JOIN conversations c ON c.tenant_id=w.tenant_id
-    WHERE w.status='active' AND w.trigger_type='inactivity'
-      AND c.status IN ('active','paused','human')
-      AND c.last_message_at <= NOW() - (GREATEST(COALESCE((w.trigger_config->>'afterSeconds')::integer,86400),1) * INTERVAL '1 second')
-    ORDER BY c.last_message_at ASC LIMIT $1`,[safe]);
-  let created=0;
-  for(const row of r.rows){
-    const key=`inactivity:${row.conversation_id}:${row.bucket}`;
-    const run=await startWorkflowRun({
-      tenantId:row.tenant_id,workflowId:row.workflow_id,
-      conversationId:row.conversation_id,contactId:row.contact_id,
-      context:{trigger:{type:"inactivity",bucket:Number(row.bucket)}},triggerKey:key,
+  const safe = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const result = await dbPool.query(
+    `SELECT
+       w.id AS workflow_id,
+       w.tenant_id,
+       w.trigger_config,
+       c.id AS conversation_id,
+       c.contact_id,
+       FLOOR(EXTRACT(EPOCH FROM (NOW() - c.last_message_at)) / delay.after_seconds) AS bucket
+     FROM automation_workflows AS w
+     JOIN conversations AS c ON c.tenant_id = w.tenant_id
+     CROSS JOIN LATERAL (
+       SELECT CASE
+         WHEN jsonb_typeof(w.trigger_config -> 'afterSeconds') IN ('number', 'string')
+         THEN CASE
+           WHEN (w.trigger_config ->> 'afterSeconds') ~ '^[0-9]{1,7}$'
+           THEN CASE
+             WHEN (w.trigger_config ->> 'afterSeconds')::integer BETWEEN 60 AND ${MAX_DELAY_SECONDS}
+             THEN (w.trigger_config ->> 'afterSeconds')::integer
+             ELSE 86400
+           END
+           ELSE 86400
+         END
+         ELSE 86400
+       END AS after_seconds
+     ) AS delay
+     WHERE w.status = 'active'
+       AND w.trigger_type = 'inactivity'
+       AND c.status IN ('active', 'paused', 'human')
+       AND c.last_message_at <= NOW() - (delay.after_seconds * INTERVAL '1 second')
+     ORDER BY c.last_message_at ASC
+     LIMIT $1`,
+    [safe],
+  );
+  let created = 0;
+  for (const row of result.rows) {
+    const key = `inactivity:${row.conversation_id}:${row.bucket}`;
+    const run = await startWorkflowRun({
+      tenantId: row.tenant_id,
+      workflowId: row.workflow_id,
+      conversationId: row.conversation_id,
+      contactId: row.contact_id,
+      context: { trigger: { type: "inactivity", bucket: Number(row.bucket) } },
+      triggerKey: key,
     });
-    if(run) created++;
+    if (run) created++;
   }
   return created;
 }
