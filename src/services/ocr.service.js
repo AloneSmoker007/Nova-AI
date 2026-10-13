@@ -4,6 +4,7 @@ import { releaseAiUsage, reserveAiUsage } from "./usage.service.js";
 
 const MAX_TEXT = 20_000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const OCR_REQUEST_TIMEOUT_MS = 30_000;
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
@@ -60,16 +61,30 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
   try {
     const ai = getClient();
     const base64 = buffer.toString("base64");
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: [{
-        role: "user",
-        parts: [
-          { text: "Extract all readable text from this document. Preserve line breaks where useful. Do not summarize, translate, infer, or add missing text. Return only the extracted text." },
-          { inlineData: { mimeType, data: base64 } },
-        ],
-      }],
-    });
+    let response;
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), OCR_REQUEST_TIMEOUT_MS);
+    try {
+      response = await ai.models.generateContent({
+        model: MODEL,
+        config: {
+          abortSignal: timeoutController.signal,
+          httpOptions: { timeout: OCR_REQUEST_TIMEOUT_MS },
+        },
+        contents: [{
+          role: "user",
+          parts: [
+            { text: "Extract all readable text from this document. Preserve line breaks where useful. Do not summarize, translate, infer, or add missing text. Return only the extracted text." },
+            { inlineData: { mimeType, data: base64 } },
+          ],
+        }],
+      });
+    } catch (error) {
+      if (timeoutController.signal.aborted) throw new Error("OCR request timed out");
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const extracted = typeof response?.text === "string" ? response.text.trim().slice(0, MAX_TEXT) : "";
     const r = await dbPool.query(
