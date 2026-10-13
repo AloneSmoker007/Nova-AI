@@ -114,3 +114,8 @@ jobs:
       # advance a run; this integration suite resets public schema too.
       - name: Run automation executor fencing integration tests
         run: node --test tests/automation-executor-fencing.test.js
+
+      # TASK-23 regression coverage: buffered appointment occupancy and concurrent overlap enforcement.
+      # This suite resets public schema; keep it serialized and last in this job.
+      - name: Run appointment buffer integration tests
+        run: node --test tests/appointment-buffer.test.js
