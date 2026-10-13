@@ -366,3 +366,27 @@ test("terminal delivery recovery backfills outbound history without attempting a
     "history repair must never claim or resend an already terminal delivery",
   );
 });
+
+
+test("conflicting duplicate inbound identities stop before AI memory, usage, or provider work", () => {
+  const processor = sliceBetween(
+    indexSource,
+    "async function processInboxMessage(",
+    "async function recoverPendingDeliveries()",
+  );
+  const identityGuard = processor.indexOf("if (persistedInbound.identityConflict)");
+  assert.ok(identityGuard >= 0, "duplicate identity conflicts need an explicit guard");
+  assert.ok(
+    identityGuard < processor.indexOf("syncCustomerMemoryFromMessage("),
+    "a conflicting duplicate must not write to the original contact's AI memory",
+  );
+  assert.ok(
+    identityGuard < processor.indexOf("reserveAiUsage("),
+    "a conflicting duplicate must not reserve AI usage or trigger generation",
+  );
+  assert.ok(
+    processor.slice(identityGuard, processor.indexOf("if (!persistedInbound.duplicate)"))
+      .includes("await markCompleted(message.id, message.tenant_id, leaseToken, null)"),
+    "the conflicting webhook must be completed safely rather than retried into side effects",
+  );
+});
