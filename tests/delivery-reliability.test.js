@@ -167,15 +167,8 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
         break;
       }
       claims += 1;
-      // Simulated ambiguous send: the worker dies with an unknown outcome and
-      // the delivery subsystem owns the retry.
-      await svc.markDeliveryUnknown(
-        delivery.id,
-        tenantId,
-        claim.leaseToken,
-        new Error("simulated ambiguous send"),
-        claim.delivery.attempt_count,
-      );
+      // Simulate a crash before the outbound request-start marker is persisted.
+      // This is the only stale SENDING case recovery may safely retry.
       await warpStale(delivery.id);
     }
 
@@ -417,19 +410,79 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
     assert.equal(requeue.reason, "completed");
   });
 
+  it("an explicitly ambiguous send becomes UNKNOWN, is not resent, and can reconcile from a provider callback", async () => {
+    const { delivery, tenantId, phoneNumberId } = await seedDelivery();
+    const claim = await svc.claimDelivery(delivery.id, tenantId);
+    assert.equal(claim.claimed, true);
+
+    await svc.markDeliveryRequestStarted(
+      delivery.id,
+      tenantId,
+      claim.leaseToken,
+      claim.delivery.attempt_count,
+    );
+    const unknown = await svc.markDeliveryUnknown(
+      delivery.id,
+      tenantId,
+      claim.leaseToken,
+      new Error("provider response timed out after request started"),
+      claim.delivery.attempt_count,
+    );
+    assert.equal(unknown.state, "UNKNOWN");
+    assert.ok(unknown.provider_request_started_at, "the external request-start marker must remain for audit");
+
+    const retry = await svc.claimDelivery(delivery.id, tenantId);
+    assert.equal(retry.claimed, false);
+    assert.equal(retry.reason, "unknown", "an ambiguous send must not be auto-submitted again");
+    const recoverable = await svc.findRecoverableDeliveries(50);
+    assert.ok(!recoverable.some((row) => row.id === delivery.id));
+
+    const reconciled = await svc.markDeliveryStatus({
+      tenantId,
+      phoneNumberId,
+      providerMessageId: "wamid.unknown-reconciled",
+      callbackData: delivery.delivery_key,
+      status: "delivered",
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+    assert.ok(reconciled, "the provider's callback must still resolve the UNKNOWN delivery key");
+    assert.equal(reconciled.state, "DELIVERED");
+    assert.equal(reconciled.provider_message_id, "wamid.unknown-reconciled");
+  });
+
+  it("a crashed worker after request-start is finalized UNKNOWN, never re-enqueued for send", async () => {
+    const { delivery, tenantId } = await seedDelivery();
+    const claim = await svc.claimDelivery(delivery.id, tenantId);
+    assert.equal(claim.claimed, true);
+    await svc.markDeliveryRequestStarted(
+      delivery.id,
+      tenantId,
+      claim.leaseToken,
+      claim.delivery.attempt_count,
+    );
+    await warpStale(delivery.id);
+
+    const finalized = await svc.markExpiredAmbiguousDeliveries(50);
+    assert.ok(finalized.some((row) => row.id === delivery.id));
+    const row = await svc.getDelivery(delivery.id, tenantId);
+    assert.equal(row.state, "UNKNOWN");
+    assert.equal(row.lease_token, null);
+    assert.ok(row.provider_request_started_at);
+
+    const recoverable = await svc.findRecoverableDeliveries(50);
+    assert.ok(!recoverable.some((row) => row.id === delivery.id));
+    const retry = await svc.claimDelivery(delivery.id, tenantId);
+    assert.equal(retry.claimed, false);
+    assert.equal(retry.reason, "unknown");
+  });
+
   it("an exhausted delivery is finalized as FAILED and leaves the recovery scan", async () => {
     const { delivery, tenantId } = await seedDelivery();
 
     for (let i = 0; i < 5; i++) {
       const claim = await svc.claimDelivery(delivery.id, tenantId);
       assert.equal(claim.claimed, true);
-      await svc.markDeliveryUnknown(
-        delivery.id,
-        tenantId,
-        claim.leaseToken,
-        new Error("simulated ambiguous send"),
-        claim.delivery.attempt_count,
-      );
+      // No request-start marker: retry remains safe after a worker crash.
       await warpStale(delivery.id);
     }
 
