@@ -178,7 +178,7 @@ export async function ingestWebhookMessage({ message, tenant }) {
   const phoneNumberId = message.phoneNumberId.trim();
   const whatsappMessageId = message.id.trim();
   const waId = message.from.trim();
-  const body = message.text.body.trim();
+  const { messageType, body } = normalizeIncomingWebhookContent(message);
 
   if (!validateTenantId(tenantId) || !/^\d{5,30}$/.test(phoneNumberId) || !body) {
     throw new Error("Invalid webhook message data");
