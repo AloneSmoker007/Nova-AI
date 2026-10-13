@@ -71,6 +71,14 @@ function normalizeWebhookBody(value) {
   return value;
 }
 
+
+export function serializeConfiguredWebhookBody(step) {
+  const value = step && Object.prototype.hasOwnProperty.call(step, "body")
+    ? step.body
+    : {};
+  return JSON.stringify(normalizeWebhookBody(value));
+}
+
 export function normalizeWorkflowDefinition(definition) {
   if (!definition || typeof definition !== "object" || Array.isArray(definition)) throw new Error("Invalid workflow definition");
   const steps = Array.isArray(definition.steps) ? definition.steps : [];
@@ -184,14 +192,28 @@ async function executeTag(client,run,step){
   await client.query(`INSERT INTO conversation_tags(tenant_id,conversation_id,tag)
     SELECT $1,c.id,$3 FROM conversations c WHERE c.tenant_id=$1 AND c.id=$2 ON CONFLICT DO NOTHING`,[run.tenant_id,run.conversation_id,step.tag]);
 }
-async function executeWebhook(step,run,ctx,stepIndex){
-  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),10_000);
+async function executeWebhook(step, run, stepIndex) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
   try {
-    const body=JSON.stringify({runId:run.id,workflowId:run.workflow_id,step:stepIndex,context:ctx});
-    if(body.length>MAX_WEBHOOK_BODY) throw new Error("Webhook payload too large");
-    const response=await fetch(step.url,{method:step.method,headers:{"content-type":"application/json","idempotency-key":run.id+":"+stepIndex},body,signal:controller.signal,redirect:"error"});
-    if(!response.ok) throw new Error(`Workflow webhook returned HTTP ${response.status}`);
-  } finally { clearTimeout(timer); }
+    // Only send the JSON body explicitly configured and validated for this
+    // workflow step. Run context can contain customer messages, phone numbers
+    // and summaries, so it must not be implicitly disclosed to an endpoint.
+    const body = serializeConfiguredWebhookBody(step);
+    const response = await fetch(step.url, {
+      method: step.method,
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": run.id + ":" + stepIndex,
+      },
+      body,
+      signal: controller.signal,
+      redirect: "error",
+    });
+    if (!response.ok) throw new Error(`Workflow webhook returned HTTP ${response.status}`);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 export async function scheduleInactivityTriggers(limit = 100) {
   assertDb();
@@ -391,7 +413,7 @@ export async function processDueWorkflowRuns(limit = 20) {
             client.release();
           }
         } else if (step.action === "webhook") {
-          await executeWebhook(step, run, ctx, idx);
+          await executeWebhook(step, run, idx);
         }
 
         idx++;

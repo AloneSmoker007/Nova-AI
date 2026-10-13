@@ -373,4 +373,79 @@ describe("Automation SQL regressions against real PostgreSQL", { skip }, () => {
     );
   });
 
+
+  it("posts only the configured webhook body and never the run's private customer context", async () => {
+    const originalAllowlist = process.env.AUTOMATION_WEBHOOK_ALLOWLIST;
+    const originalFetch = globalThis.fetch;
+    const configuredBody = {
+      event: "support.ticket.updated",
+      caseId: "CASE-301",
+      fields: { priority: "normal" },
+    };
+    const privateContextText = "PRIVATE_CUSTOMER_MESSAGE_MUST_NOT_LEAVE_NOVA";
+    const observedRequests = [];
+
+    process.env.AUTOMATION_WEBHOOK_ALLOWLIST = "example.com";
+    globalThis.fetch = async (url, options) => {
+      observedRequests.push({ url: String(url), options });
+      return { ok: true, status: 204 };
+    };
+
+    try {
+      const workflow = await makeWorkflow({
+        name: "configured-webhook-body-only",
+        steps: [{
+          action: "webhook",
+          url: "https://example.com/hook",
+          method: "POST",
+          body: configuredBody,
+        }],
+      });
+      const run = await startWorkflowRun({
+        tenantId: TENANT_A,
+        workflowId: workflow.id,
+        conversationId: CONVERSATION_A,
+        contactId: CONTACT_A,
+        context: {
+          message: {
+            id: "wamid.webhook-payload-test",
+            from: "15551230001",
+            body: privateContextText,
+          },
+          internalSummary: privateContextText,
+        },
+      });
+      assert.ok(run, "an active webhook workflow must queue a run");
+
+      await processDueWorkflowRuns(20);
+
+      const webhookRequests = observedRequests.filter((item) => item.url === "https://example.com/hook");
+      assert.equal(webhookRequests.length, 1, "the configured workflow should make one outbound request");
+      const sent = webhookRequests[0].options;
+      assert.deepEqual(
+        JSON.parse(sent.body),
+        configuredBody,
+        "outgoing JSON must match exactly what the workflow step configured",
+      );
+      assert.ok(
+        !sent.body.includes(privateContextText),
+        "customer message content from the run context must not be sent implicitly",
+      );
+      assert.equal(sent.headers["idempotency-key"], `${run.id}:0`);
+      assert.equal(sent.redirect, "error", "webhook redirects must remain disabled");
+      assert.ok(sent.signal instanceof AbortSignal, "the webhook request must retain its abort signal");
+
+      const finalRun = await dbPool.query(
+        "SELECT status, last_error FROM automation_runs WHERE tenant_id=$1 AND id=$2",
+        [TENANT_A, run.id],
+      );
+      assert.equal(finalRun.rows[0].status, "completed");
+      assert.equal(finalRun.rows[0].last_error, null);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalAllowlist === undefined) delete process.env.AUTOMATION_WEBHOOK_ALLOWLIST;
+      else process.env.AUTOMATION_WEBHOOK_ALLOWLIST = originalAllowlist;
+    }
+  });
+
 });
