@@ -130,47 +130,85 @@ export function buildBusinessContext(brain) {
   }
 
   // Bound the serialized reference payload without ever slicing JSON mid-value.
-  const collections = ["products", "faqs", "rules"];
-  const maps = ["persona", "salesGuardrails", "languageConfig", "hours"];
+  // Shrink oversized free-text fields explicitly before dropping structured facts.
+  // Each setter updates the exact field being shortened; do not confuse dynamic
+  // customer context with owner-authored custom instructions.
+  const trimTargetKeys = ["products", "faqs", "rules", "persona", "salesGuardrails", "languageConfig", "hours"];
+  let trimTargetCursor = 0;
   while (JSON.stringify(businessContext).length > MAX_CONTEXT_LENGTH) {
-    const collection = collections.find((key) => businessContext[key].length > 0);
-    if (collection) {
-      businessContext[collection].pop();
-      continue;
-    }
-
-    let removedMapEntry = false;
-    for (const map of maps) {
-      const keys = Object.keys(businessContext[map]);
-      if (keys.length > 0) {
-        delete businessContext[map][keys[keys.length - 1]];
-        removedMapEntry = true;
-        break;
-      }
-    }
-    if (removedMapEntry) continue;
-
-    const shrink = [
-      [businessContext.advancedContext, null],
-      [businessContext.customInstructions, null],
-      [businessContext.business, "description"],
-      [businessContext.business, "contact"],
-      [businessContext.business, "location"],
-      [businessContext.business, "name"],
-      [businessContext.business, "category"],
+    const shrinkFields = [
+      {
+        get: () => businessContext.advancedContext,
+        set: (value) => { businessContext.advancedContext = value; },
+      },
+      {
+        get: () => businessContext.customInstructions,
+        set: (value) => { businessContext.customInstructions = value; },
+      },
+      {
+        get: () => businessContext.business.description,
+        set: (value) => { businessContext.business.description = value; },
+      },
+      {
+        get: () => businessContext.business.contact,
+        set: (value) => { businessContext.business.contact = value; },
+      },
+      {
+        get: () => businessContext.business.location,
+        set: (value) => { businessContext.business.location = value; },
+      },
+      {
+        get: () => businessContext.business.name,
+        set: (value) => { businessContext.business.name = value; },
+      },
+      {
+        get: () => businessContext.business.category,
+        set: (value) => { businessContext.business.category = value; },
+      },
     ];
+
     let shortened = false;
-    for (const [parent, key] of shrink) {
-      const value = key === null ? parent : parent[key];
+    for (const field of shrinkFields) {
+      const value = field.get();
       if (typeof value === "string" && value.length > 32) {
-        const next = value.slice(0, Math.floor(value.length / 2));
-        if (key === null) businessContext.customInstructions = next;
-        else parent[key] = next;
+        field.set(value.slice(0, Math.floor(value.length / 2)));
         shortened = true;
         break;
       }
     }
-    if (!shortened) return { configured: true, contextTruncated: true };
+    if (shortened) continue;
+
+    // Trim collection entries and map entries round-robin. This keeps a
+    // representative subset of products, FAQs, rules, persona and guardrails
+    // instead of deleting one whole category before touching the next.
+    let trimmedEntry = false;
+    for (let offset = 0; offset < trimTargetKeys.length; offset += 1) {
+      const index = (trimTargetCursor + offset) % trimTargetKeys.length;
+      const key = trimTargetKeys[index];
+      const value = businessContext[key];
+
+      if (Array.isArray(value) && value.length > 0) {
+        value.pop();
+        trimTargetCursor = (index + 1) % trimTargetKeys.length;
+        trimmedEntry = true;
+        break;
+      }
+
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const keys = Object.keys(value);
+        if (keys.length > 0) {
+          delete value[keys[keys.length - 1]];
+          trimTargetCursor = (index + 1) % trimTargetKeys.length;
+          trimmedEntry = true;
+          break;
+        }
+      }
+    }
+    if (trimmedEntry) continue;
+
+    // All supported fields are already at their minimum sizes. Fail closed
+    // with a valid, small payload rather than spin forever or corrupt fields.
+    return { configured: true, contextTruncated: true };
   }
 
   return businessContext;
