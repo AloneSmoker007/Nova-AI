@@ -98,3 +98,9 @@ jobs:
       # the shared test schema, so it runs as a separate serialized step.
       - name: Run payment webhook tenant-isolation integration tests
         run: node --test tests/payment-webhook-tenant-isolation.test.js
+
+      # TASK-04 regression coverage: outbound WhatsApp delivery retries,
+      # attempt caps, lease fencing and monotonic state transitions.
+      # Run in its own serialized step because the suite resets public schema.
+      - name: Run WhatsApp delivery reliability integration tests
+        run: node --test tests/delivery-reliability.test.js
