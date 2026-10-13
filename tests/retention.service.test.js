@@ -8,6 +8,7 @@ test("retention policy enforces bounded configuration", async () => {
     usage: process.env.RETENTION_USAGE_EVENTS_DAYS,
     ocr: process.env.RETENTION_OCR_DOCUMENTS_DAYS,
     payments: process.env.RETENTION_PAYMENT_EVENTS_DAYS,
+    expiredRefreshTokens: process.env.RETENTION_EXPIRED_REFRESH_TOKENS_DAYS,
   };
   try {
     process.env.RETENTION_DELETED_MESSAGES_DAYS = "90";
@@ -15,11 +16,13 @@ test("retention policy enforces bounded configuration", async () => {
     process.env.RETENTION_USAGE_EVENTS_DAYS = "365";
     process.env.RETENTION_OCR_DOCUMENTS_DAYS = "90";
     process.env.RETENTION_PAYMENT_EVENTS_DAYS = "90";
+    process.env.RETENTION_EXPIRED_REFRESH_TOKENS_DAYS = "30";
     const { getRetentionConfig } = await import("../src/services/retention.service.js");
     const config = getRetentionConfig();
     assert.equal(config.deletedMessagesDays, 90);
     assert.equal(config.webhookCompletedDays, 30);
     assert.equal(config.usageEventsDays, 365);
+    assert.equal(config.expiredRefreshTokensDays, 30);
   } finally {
     for (const [key, value] of Object.entries({
       RETENTION_DELETED_MESSAGES_DAYS: original.deleted,
@@ -27,6 +30,7 @@ test("retention policy enforces bounded configuration", async () => {
       RETENTION_USAGE_EVENTS_DAYS: original.usage,
       RETENTION_OCR_DOCUMENTS_DAYS: original.ocr,
       RETENTION_PAYMENT_EVENTS_DAYS: original.payments,
+      RETENTION_EXPIRED_REFRESH_TOKENS_DAYS: original.expiredRefreshTokens,
     })) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
