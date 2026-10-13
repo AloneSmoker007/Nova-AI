@@ -84,7 +84,7 @@ async function restore() {
       fs.createWriteStream(verifiedDumpPath, { flags: "wx", mode: 0o600 }),
     );
 
-    const pgRestore = spawn("pg_restore", ["--no-owner", "--no-acl"], {
+    const pgRestore = spawn("pg_restore", ["--single-transaction", "--exit-on-error", "--no-owner", "--no-acl"], {
       env: postgresEnv(target),
       stdio: ["pipe", "ignore", "pipe"],
       windowsHide: true,
