@@ -47,6 +47,7 @@ test("business context remains valid JSON within the configured context budget",
     businessName: "A".repeat(1000),
     description: "B".repeat(5000),
     customInstructions: "C".repeat(5000),
+    advancedContext: "MEMORY_CONTEXT-".repeat(1200),
     products: Array.from({ length: 50 }, (_, i) => ({
       name: "product-" + i + "N".repeat(200),
       price: "P".repeat(100),
@@ -64,6 +65,16 @@ test("business context remains valid JSON within the configured context budget",
 
   assert.ok(JSON.stringify(context).length <= 12_000);
   assert.equal(context.configured, true);
+  assert.notEqual(context.contextTruncated, true, "bounded dynamic context should be shortened, not discarded");
+  assert.ok(
+    context.customInstructions.startsWith("C"),
+    "shrinking dynamic customer context must not overwrite owner-authored instructions",
+  );
+  assert.ok(
+    context.advancedContext.startsWith("MEMORY_CONTEXT-") && context.advancedContext.length < 12_000,
+    "oversized saved-memory context must be shortened in its own field",
+  );
+  assert.ok(context.products.length > 0, "retain structured product facts where the size budget allows");
 });
 
 test("saved customer memory cannot break out of its structured prompt delimiters", () => {
