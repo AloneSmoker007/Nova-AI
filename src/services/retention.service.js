@@ -5,6 +5,10 @@ const DEFAULT_RETENTION_DAYS = 90;
 const MIN_RETENTION_DAYS = 7;
 const MAX_RETENTION_DAYS = 3650;
 const DEFAULT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const MIN_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+// Node timers cannot safely represent intervals above signed 32-bit milliseconds;
+// larger values (or NaN/Infinity) can be treated as ~1ms and cause a tight loop.
+const MAX_CLEANUP_INTERVAL_MS = 2_147_483_647;
 
 function getDays(envName, fallback) {
   const value = Number(process.env[envName] ?? fallback);
@@ -14,6 +18,21 @@ function getDays(envName, fallback) {
   return value;
 }
 
+function getCleanupIntervalMs() {
+  const raw = process.env.RETENTION_CLEANUP_INTERVAL_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_CLEANUP_INTERVAL_MS;
+
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+    return DEFAULT_CLEANUP_INTERVAL_MS;
+  }
+
+  return Math.min(
+    Math.max(value, MIN_CLEANUP_INTERVAL_MS),
+    MAX_CLEANUP_INTERVAL_MS,
+  );
+}
+
 export function getRetentionConfig() {
   return {
     deletedMessagesDays: getDays("RETENTION_DELETED_MESSAGES_DAYS", DEFAULT_RETENTION_DAYS),
@@ -21,10 +40,7 @@ export function getRetentionConfig() {
     usageEventsDays: getDays("RETENTION_USAGE_EVENTS_DAYS", 365),
     ocrDocumentsDays: getDays("RETENTION_OCR_DOCUMENTS_DAYS", DEFAULT_RETENTION_DAYS),
     paymentEventsDays: getDays("RETENTION_PAYMENT_EVENTS_DAYS", DEFAULT_RETENTION_DAYS),
-    cleanupIntervalMs: Math.max(
-      60 * 60 * 1000,
-      Number(process.env.RETENTION_CLEANUP_INTERVAL_MS ?? DEFAULT_CLEANUP_INTERVAL_MS),
-    ),
+    cleanupIntervalMs: getCleanupIntervalMs(),
   };
 }
 
