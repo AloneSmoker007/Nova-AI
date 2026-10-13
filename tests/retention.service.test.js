@@ -40,3 +40,35 @@ test("retention policy rejects unsafe values", async () => {
   assert.throws(() => getRetentionConfig(), /between 7 and 3650/);
   delete process.env.RETENTION_DELETED_MESSAGES_DAYS;
 });
+
+test("retention cleanup interval safely handles invalid and out-of-range timer values", async () => {
+  const original = process.env.RETENTION_CLEANUP_INTERVAL_MS;
+  const { getRetentionConfig } = await import("../src/services/retention.service.js");
+
+  try {
+    for (const invalid of ["not-a-number", "NaN", "Infinity", "1.5"]) {
+      process.env.RETENTION_CLEANUP_INTERVAL_MS = invalid;
+      assert.equal(
+        getRetentionConfig().cleanupIntervalMs,
+        24 * 60 * 60 * 1000,
+        `invalid interval ${invalid} must fall back to the daily default`,
+      );
+    }
+
+    process.env.RETENTION_CLEANUP_INTERVAL_MS = "1";
+    assert.equal(getRetentionConfig().cleanupIntervalMs, 60 * 60 * 1000);
+
+    process.env.RETENTION_CLEANUP_INTERVAL_MS = String(3 * 24 * 60 * 60 * 1000);
+    assert.equal(getRetentionConfig().cleanupIntervalMs, 3 * 24 * 60 * 60 * 1000);
+
+    process.env.RETENTION_CLEANUP_INTERVAL_MS = String(Number.MAX_SAFE_INTEGER);
+    assert.equal(
+      getRetentionConfig().cleanupIntervalMs,
+      2_147_483_647,
+      "intervals must not exceed the platform timer maximum",
+    );
+  } finally {
+    if (original === undefined) delete process.env.RETENTION_CLEANUP_INTERVAL_MS;
+    else process.env.RETENTION_CLEANUP_INTERVAL_MS = original;
+  }
+});
