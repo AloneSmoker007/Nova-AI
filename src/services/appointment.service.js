@@ -6,7 +6,22 @@ const TZ = /^[A-Za-z_]+\/[A-Za-z0-9_+.-]+$/;
 
 function validTenant(value) { if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new Error("Invalid tenant"); return value; }
 function text(value, max) { if (typeof value !== "string" || !value.trim() || value.length > max) throw new Error("Invalid value"); return value.trim(); }
-function timezone(value) { const zone = text(value || "UTC", 64); if (zone !== "UTC" && !TZ.test(zone)) throw new Error("Invalid timezone"); try { new Intl.DateTimeFormat("en-US", { timeZone: zone }).format(); } catch { throw new Error("Invalid timezone"); } return zone; }
+function timezone(value) {
+  const zone = text(value || "UTC", 64);
+  // The runtime's IANA timezone database is the source of truth. Do not require
+  // exactly one slash: valid identifiers such as America/Argentina/Buenos_Aires
+  // and America/Indiana/Indianapolis contain multiple path segments.
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: zone }).format();
+  } catch {
+    throw new Error("Invalid timezone");
+  }
+  return zone;
+}
+
+export function validateAppointmentTimezone(value) {
+  return timezone(value);
+}
 function date(value) { if (typeof value !== "string" || !ISO.test(value)) throw new Error("Invalid appointment time"); const d = new Date(value); if (Number.isNaN(d.getTime())) throw new Error("Invalid appointment time"); return d; }
 function int(value,min,max) { if (!Number.isInteger(value) || value < min || value > max) throw new Error("Invalid duration"); return value; }
 
