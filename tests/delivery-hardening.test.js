@@ -14,6 +14,7 @@ test("delivery status mapping preserves provider lifecycle", () => {
   assert.equal(deliveryStatusToMessageStatus("READ"), "read");
   assert.equal(deliveryStatusToMessageStatus("FAILED"), "failed");
   assert.equal(deliveryStatusToMessageStatus("SENDING"), null);
+  assert.equal(deliveryStatusToMessageStatus("UNKNOWN"), null, "uncertain provider outcomes must not be presented as failed/sent");
 });
 
 test("ambiguous WhatsApp errors are isolated from definitive failures", () => {
