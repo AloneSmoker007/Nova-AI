@@ -1,5 +1,6 @@
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
 import { logger } from "../config/logger.js";
+import { reconcileExpiredAiUsageReservations } from "./usage.service.js";
 
 const DEFAULT_RETENTION_DAYS = 90;
 const MIN_RETENTION_DAYS = 7;
@@ -75,6 +76,10 @@ export async function runRetentionCleanup() {
     const result = await dbPool.query(sql, [days]);
     results[name] = result.rowCount;
   }
+
+  const reservations = await reconcileExpiredAiUsageReservations();
+  results.aiReservationsFinalized = reservations.committed;
+  results.aiReservationsReleased = reservations.released;
 
   logger.info({ results, config }, "Retention cleanup completed");
   return results;
