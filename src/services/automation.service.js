@@ -241,11 +241,11 @@ async function executeWebhook(step, run, stepIndex) {
       effect.endpoint_host !== endpointHost ||
       effect.request_sha256 !== requestFingerprint
     ) {
-      if (effect.status === "in_flight") {
+      if (["in_flight", "retry_authorized"].includes(effect.status)) {
         await dbPool.query(
           `UPDATE automation_webhook_effects
            SET status='unknown', last_error_code='definition_changed'
-           WHERE id=$1 AND status='in_flight'`,
+           WHERE id=$1 AND status IN ('in_flight', 'retry_authorized')`,
           [effect.id],
         );
       }
