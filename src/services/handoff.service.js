@@ -65,7 +65,8 @@ async function buildConversationSummary(client, tenantId, conversationId) {
      WHERE tenant_id = $1 AND conversation_id = $2
        AND deleted_at IS NULL
      ORDER BY created_at DESC
-     LIMIT 30`,
+     LIMIT 30
+     FOR SHARE`,
     [tenantId, conversationId],
   );
   const lines = result.rows.reverse().map((row) => {
