@@ -274,6 +274,41 @@ export async function persistOutboundMessage({
   }
 }
 
+async function purgeDeletedMessageAiArtifacts(client, tenantId, contactId, conversationId, messageId) {
+  // Memory rows from older releases lack provenance. On deletion, clear those
+  // legacy inferred rows for this contact as well; new memory is source-linked.
+  await client.query(
+    `DELETE FROM contact_ai_memory
+     WHERE tenant_id=$1 AND contact_id=$2
+       AND (source_message_id=$3 OR (source='conversation' AND source_message_id IS NULL))`,
+    [tenantId, contactId, messageId],
+  );
+  await client.query(
+    "DELETE FROM conversation_ai_signals WHERE tenant_id=$1 AND message_id=$2",
+    [tenantId, messageId],
+  );
+  // Summaries/drafts may combine multiple turns, so invalidate conversation
+  // artifacts rather than risk resurfacing any content from the deleted turn.
+  await client.query(
+    "DELETE FROM conversation_ai_summaries WHERE tenant_id=$1 AND conversation_id=$2",
+    [tenantId, conversationId],
+  );
+  await client.query(
+    "DELETE FROM ai_copilot_drafts WHERE tenant_id=$1 AND conversation_id=$2",
+    [tenantId, conversationId],
+  );
+}
+
+export async function isInboundMessageDeleted(tenantId, messageId) {
+  assertDatabase();
+  if (!tenantId || !messageId) throw new Error("Missing message deletion identifiers");
+  const result = await dbPool.query(
+    "SELECT deleted_at FROM messages WHERE tenant_id=$1 AND id=$2",
+    [tenantId, messageId],
+  );
+  return !result.rows[0] || Boolean(result.rows[0].deleted_at);
+}
+
 export async function persistDeletedInboundMessage({
   tenantId,
   whatsappNumberId,
