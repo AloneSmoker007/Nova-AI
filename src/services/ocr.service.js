@@ -90,9 +90,9 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
 
     const extracted = typeof response?.text === "string" ? response.text.trim().slice(0, MAX_TEXT) : "";
     const r = await dbPool.query(
-      `INSERT INTO ocr_documents (tenant_id,filename,mime_type,extracted_text,model,created_by)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [t, filename.trim(), mimeType, extracted, MODEL, createdBy],
+      `INSERT INTO ocr_documents (tenant_id,filename,mime_type,extracted_text,model,created_by,usage_event_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [t, filename.trim(), mimeType, extracted, MODEL, createdBy, aiReservation.eventKey],
     );
     if (aiReservation.reservationToken) {
       try {
