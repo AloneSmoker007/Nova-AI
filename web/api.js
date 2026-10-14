@@ -1,4 +1,4 @@
-const NovaAPI=(()=>{
+window.NovaAPI=(()=>{
   const KEY="nova_access_token"; const REFRESH="nova_refresh_token";
   const get=k=>localStorage.getItem(k); const set=(k,v)=>v?localStorage.setItem(k,v):localStorage.removeItem(k);
   const json=value=>JSON.stringify(value);
