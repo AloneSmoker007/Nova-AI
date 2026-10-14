@@ -64,7 +64,7 @@ import { requireRole } from "./middleware/require-role.js";
 import { registerInboundUsage, getUsageSummary, reserveAiUsage, releaseAiUsage } from "./services/usage.service.js";
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
 import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotContext, setUserSkills } from "./services/handoff.service.js";
-import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
+import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers, listUnknownWorkflowWebhookEffects, resolveUnknownWorkflowWebhookEffect } from "./services/automation.service.js";
 import { createAppointmentType, listAppointmentTypes, setBusinessHours, getBusinessHours, listAppointments, getAppointment, bookAppointment, updateAppointmentStatus, buildCalendarLinks, buildIcs } from "./services/appointment.service.js";
 import { startRetentionScheduler } from "./services/retention.service.js";
 import { getDashboardSummary } from "./services/dashboard.service.js";
@@ -1346,6 +1346,34 @@ app.post("/api/automations/:workflowId/run", requireAuth, requireRole("owner", "
 
 app.get("/api/automations/health", requireAuth, requireRole("owner", "admin"), async (req, res) => {
   return res.status(200).json({ status: "ok", scheduler: "enabled" });
+});
+
+app.get("/api/automations/webhook-effects/unknown", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const data = await listUnknownWorkflowWebhookEffects(req.user.tenantId, req.query.limit);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.post("/api/automations/webhook-effects/:effectId/resolve", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const data = await resolveUnknownWorkflowWebhookEffect({
+      tenantId: req.user.tenantId,
+      effectId: req.params.effectId,
+      resolvedBy: req.user.id,
+      outcome: req.body?.outcome,
+      reason: req.body?.reason,
+    });
+    if (!data) return res.status(409).json({ status: "error", error: "Webhook effect is not awaiting reconciliation" });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message });
+    if (error.message.includes("no longer eligible")) return res.status(409).json({ status: "error", error: error.message });
+    return next(error);
+  }
 });
 
 app.get("/api/appointments/types", requireAuth, async (req, res, next) => {
