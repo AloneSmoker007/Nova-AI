@@ -16,7 +16,7 @@ import {
 } from "./services/whatsapp.service.js";
 import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
-import { persistInboundMessage, persistOutboundMessage, persistDeletedInboundMessage } from "./services/message-persistence.service.js";
+import { persistInboundMessage, persistOutboundMessage, persistDeletedInboundMessage, isInboundMessageDeleted } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
 import { analyzeCustomerMessage, buildAdvancedAiContext, getCustomerMemory, rememberCustomerPreference, recordAiSignal, syncCustomerMemoryFromMessage } from "./services/advanced-ai.service.js";
 import { loginUser, getUserById, generateToken } from "./services/auth.service.js";
@@ -431,6 +431,17 @@ async function processInboxMessage(inboxId, log = logger) {
       return;
     }
 
+    // A delete notification can race with a queued/retried inbound job. Never
+    // let a previously deleted message recreate memory, signals or an AI reply.
+    if (persistedInbound.deleted || await isInboundMessageDeleted(message.tenant_id, persistedInbound.messageId)) {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.info(
+        { inboxId: message.id, tenantId: message.tenant_id, whatsappMessageId: message.whatsapp_message_id },
+        "Skipped deleted inbound message",
+      );
+      return;
+    }
+
     if (!persistedInbound.duplicate) {
       await registerInboundUsage({
         tenantId: message.tenant_id,
@@ -571,6 +582,22 @@ async function processInboxMessage(inboxId, log = logger) {
           : { advancedContext };
 
         reply = await generateGeminiReply(message.body, aiBrain);
+
+        // Recheck after the provider call. If Meta's deletion webhook landed
+        // while Gemini was generating, release only this reservation and do
+        // not persist or send the generated text.
+        if (await isInboundMessageDeleted(message.tenant_id, persistedInbound.messageId)) {
+          await releaseAiUsage({
+            tenantId: message.tenant_id,
+            messageId: persistedInbound.messageId,
+            whatsappMessageId: message.whatsapp_message_id,
+            eventKey: aiReservation.eventKey,
+            reservationToken: aiReservation.reservationToken,
+          });
+          await markCompleted(message.id, message.tenant_id, leaseToken, null);
+          return;
+        }
+
         reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
 
         // Persisting the generated response is the durable success boundary.
@@ -610,6 +637,15 @@ async function processInboxMessage(inboxId, log = logger) {
         }
         throw aiError;
       }
+    }
+
+    if (await isInboundMessageDeleted(message.tenant_id, persistedInbound.messageId)) {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.info(
+        { inboxId: message.id, tenantId: message.tenant_id, whatsappMessageId: message.whatsapp_message_id },
+        "Skipped reply after inbound message deletion",
+      );
+      return;
     }
 
     if (message.provider_message_id) {
