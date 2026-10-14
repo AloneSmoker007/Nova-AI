@@ -23,7 +23,17 @@ function sanitizeMemoryValue(value) {
     .split("")
     .map((ch) => {
       const code = ch.charCodeAt(0);
-      if (code <= 0x08 || code === 0x0B || code === 0x0C || (code >= 0x0E && code <= 0x1F) || code === 0x7F) {
+      if (
+        code <= 0x08 ||
+        code === 0x0B ||
+        code === 0x0C ||
+        (code >= 0x0E && code <= 0x1F) ||
+        code === 0x7F ||
+        code === 0x200B ||
+        code === 0xFEFF ||
+        (code >= 0x202A && code <= 0x202E) ||
+        (code >= 0x2066 && code <= 0x2069)
+      ) {
         return " ";
       }
       return ch;
