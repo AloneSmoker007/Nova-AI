@@ -263,7 +263,26 @@ export async function applyPaymentWebhook({ tenantId, provider: providerName, pr
       return null;
     }
 
-    validateTransition(current.rows[0].status, status);
+    try {
+      validateTransition(current.rows[0].status, status);
+    } catch (transitionError) {
+      if (transitionError.message !== "Invalid payment status transition") throw transitionError;
+
+      // This is a correctly signed, unique provider event, but its requested
+      // state change is illegal for our payment state machine. Record and
+      // acknowledge the rejection durably so providers do not retry forever
+      // and the same event cannot be replayed after detail-event retention.
+      await client.query(
+        `UPDATE payment_webhook_events
+         SET processed_at=NOW(),
+             processing_result='rejected',
+             rejection_reason='invalid_transition'
+         WHERE tenant_id=$1 AND provider=$2 AND event_id=$3`,
+        [t, p, normalizedEventId],
+      );
+      await client.query("COMMIT");
+      return { rejected: true, reason: "invalid_transition" };
+    }
 
     const updated = await client.query(
       `UPDATE payments SET
@@ -276,7 +295,9 @@ export async function applyPaymentWebhook({ tenantId, provider: providerName, pr
     );
 
     await client.query(
-      "UPDATE payment_webhook_events SET processed_at=NOW() WHERE tenant_id=$1 AND provider=$2 AND event_id=$3",
+      `UPDATE payment_webhook_events
+       SET processed_at=NOW(), processing_result='applied', rejection_reason=NULL
+       WHERE tenant_id=$1 AND provider=$2 AND event_id=$3`,
       [t, p, normalizedEventId],
     );
 
