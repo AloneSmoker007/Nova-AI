@@ -171,6 +171,21 @@ describe("inbound message idempotency and identity (PostgreSQL)", { skip }, () =
        VALUES ($1, $2, $3) RETURNING id`,
       [tenantId, phoneNumberId, "+15550000003"],
     );
+    // Establish the compact provider replay key through the real webhook path,
+    // then persist the canonical customer-facing message.
+    const initialWebhook = await ingestWebhookMessage({
+      message: {
+        id: whatsappMessageId,
+        phoneNumberId,
+        from: waId,
+        profileName: "Retention Test",
+        text: { body },
+        timestamp: String(Math.floor(Date.now() / 1000)),
+      },
+      tenant: { tenantId, whatsappNumberId: number.rows[0].id, phoneNumberId },
+    });
+    assert.equal(initialWebhook.state, "RECEIVED");
+
     await persistInboundMessage({
       tenantId,
       whatsappNumberId: number.rows[0].id,
@@ -185,13 +200,13 @@ describe("inbound message idempotency and identity (PostgreSQL)", { skip }, () =
     // Simulate the previously completed inbox item after 31 days. Canonical
     // messages are deliberately retained after the inbox's 30-day retention.
     await dbPool.query(
-      `INSERT INTO webhook_messages (
-         tenant_id, whatsapp_number_id, phone_number_id, whatsapp_message_id,
-         wa_id, body, received_at, state, completed_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, NOW() - INTERVAL '31 days',
-               'COMPLETED', NOW() - INTERVAL '31 days')`,
-      [tenantId, number.rows[0].id, phoneNumberId, whatsappMessageId, waId, body],
+      `UPDATE webhook_messages
+       SET received_at=NOW()-INTERVAL '31 days',
+           state='COMPLETED',
+           completed_at=NOW()-INTERVAL '31 days',
+           updated_at=NOW()-INTERVAL '31 days'
+       WHERE tenant_id=$1 AND whatsapp_message_id=$2`,
+      [tenantId, whatsappMessageId],
     );
 
     const previousRetention = process.env.RETENTION_WEBHOOK_COMPLETED_DAYS;
