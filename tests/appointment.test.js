@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { buildCalendarLinks, buildIcs, validateBusinessHourRange, validateAppointmentTimezone } = await import("../src/services/appointment.service.js");
+const { buildCalendarLinks, buildIcs, rollbackPreservingError, validateBusinessHourRange, validateAppointmentTimezone } = await import("../src/services/appointment.service.js");
 
 const appointment = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -102,4 +102,20 @@ test("accepts valid IANA time zones with multiple path segments and aliases", ()
       `invalid timezone should be rejected: ${zone}`,
     );
   }
+});
+
+
+test("rollback failure never masks the original appointment booking error", async () => {
+  const originalError = Object.assign(new Error("Appointment time is already booked"), { code: "23P01" });
+  const statements = [];
+  const client = {
+    async query(sql) {
+      statements.push(sql);
+      if (sql === "ROLLBACK") throw new Error("connection lost while rolling back");
+    },
+  };
+
+  const preserved = await rollbackPreservingError(client, originalError);
+  assert.strictEqual(preserved, originalError);
+  assert.deepEqual(statements, ["ROLLBACK"]);
 });
