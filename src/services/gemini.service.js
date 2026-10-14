@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { GoogleGenAI } from "@google/genai";
 import { logger } from "../config/logger.js";
-import { inspectGeneratedAiOutput, SAFE_AI_FALLBACK } from "./ai-output-safety.service.js";
+import { enforceGeneratedAiOutput } from "./ai-output-safety.service.js";
 
 const MAX_MESSAGE_LENGTH = 8000;
 const MAX_CONTEXT_LENGTH = 12_000;
@@ -297,16 +297,15 @@ async function generateFromPrompt(prompt) {
 
   // Enforce deterministic high-confidence leak/output checks before any caller
   // can persist a response, prepare an outbound delivery, or surface a draft.
-  const decision = inspectGeneratedAiOutput(text, MAX_RESPONSE_LENGTH);
+  const decision = enforceGeneratedAiOutput(text, MAX_RESPONSE_LENGTH);
   if (!decision.safe) {
     logger.warn(
       { reason: decision.reason },
       "Gemini output rejected by deterministic safety gate",
     );
-    return SAFE_AI_FALLBACK;
   }
 
-  return text;
+  return decision.text;
 }
 
 export async function generateGeminiReply(message, businessBrain = null) {
