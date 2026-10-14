@@ -29,7 +29,7 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
     ({ dbPool } = await import("../src/config/database.js"));
     ({ generateToken } = await import("../src/services/auth.service.js"));
     ({ requireAuth } = await import("../src/middleware/auth.js"));
-    ({ issueRefreshToken, revokeRefreshToken, hashToken } = await import("../src/services/refresh-token.service.js"));
+    ({ issueRefreshToken, revokeRefreshToken } = await import("../src/services/refresh-token.service.js"));
 
     assert.ok(dbPool, "dbPool must use the integration database URL");
     await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
@@ -116,11 +116,12 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
     assert.equal((await authenticate(freshAccessToken)).nextCalled, true);
     assert.equal(await revokeRefreshToken(refreshToken1), false, "revoked refresh token must not authorize logout again");
 
-    const freshTokenRow = await dbPool.query(
-      "SELECT revoked_at FROM refresh_tokens WHERE token_hash=$1",
-      [hashToken(freshRefreshToken)],
+    assert.equal(typeof freshRefreshToken, "string");
+    const activeSessions = await dbPool.query(
+      "SELECT count(*)::int AS count FROM refresh_tokens WHERE user_id=$1 AND tenant_id=$2 AND revoked_at IS NULL",
+      [user.id, user.tenant_id],
     );
-    assert.equal(freshTokenRow.rows[0].revoked_at, null, "replaying an old revoked token must not revoke a newer session");
+    assert.equal(activeSessions.rows[0].count, 1, "replaying an old revoked token must not revoke a newer session");
     assert.equal((await authenticate(freshAccessToken)).nextCalled, true);
     const finalVersion = await dbPool.query(
       "SELECT token_version FROM users WHERE id=$1 AND tenant_id=$2",
