@@ -287,29 +287,52 @@ export async function recordAiSignal(tenantId, conversationId, messageId, signal
   if (!validId(tenantId) || !validId(conversationId) || !validId(messageId)) {
     throw new Error("Invalid AI signal identifiers");
   }
-  const result = await dbPool.query(
-    `INSERT INTO conversation_ai_signals
-      (tenant_id, conversation_id, message_id, intent, sentiment, priority, detected_language,
-       preferred_language, negotiation_requested, competitor_comparison_requested)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-     ON CONFLICT (tenant_id, message_id) WHERE message_id IS NOT NULL DO UPDATE SET
-       conversation_id = EXCLUDED.conversation_id,
-       intent = EXCLUDED.intent,
-       sentiment = EXCLUDED.sentiment,
-       priority = EXCLUDED.priority,
-       detected_language = EXCLUDED.detected_language,
-       preferred_language = EXCLUDED.preferred_language,
-       negotiation_requested = EXCLUDED.negotiation_requested,
-       competitor_comparison_requested = EXCLUDED.competitor_comparison_requested
-     RETURNING id, intent, sentiment, priority, detected_language, preferred_language,
-               negotiation_requested, competitor_comparison_requested, created_at`,
-    [
-      tenantId, conversationId, messageId, signal.intent, signal.sentiment, signal.priority,
-      signal.detectedLanguage, signal.preferredLanguage, signal.negotiationRequested,
-      signal.competitorComparisonRequested,
-    ],
-  );
-  return result.rows[0];
+
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+    const source = await client.query(
+      `SELECT deleted_at
+       FROM messages
+       WHERE tenant_id=$1 AND id=$2 AND conversation_id=$3
+       FOR UPDATE`,
+      [tenantId, messageId, conversationId],
+    );
+    if (!source.rows[0] || source.rows[0].deleted_at) {
+      await client.query("COMMIT");
+      return null;
+    }
+
+    const result = await client.query(
+      `INSERT INTO conversation_ai_signals
+        (tenant_id, conversation_id, message_id, intent, sentiment, priority, detected_language,
+         preferred_language, negotiation_requested, competitor_comparison_requested)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ON CONFLICT (tenant_id, message_id) WHERE message_id IS NOT NULL DO UPDATE SET
+         conversation_id = EXCLUDED.conversation_id,
+         intent = EXCLUDED.intent,
+         sentiment = EXCLUDED.sentiment,
+         priority = EXCLUDED.priority,
+         detected_language = EXCLUDED.detected_language,
+         preferred_language = EXCLUDED.preferred_language,
+         negotiation_requested = EXCLUDED.negotiation_requested,
+         competitor_comparison_requested = EXCLUDED.competitor_comparison_requested
+       RETURNING id, intent, sentiment, priority, detected_language, preferred_language,
+                 negotiation_requested, competitor_comparison_requested, created_at`,
+      [
+        tenantId, conversationId, messageId, signal.intent, signal.sentiment, signal.priority,
+        signal.detectedLanguage, signal.preferredLanguage, signal.negotiationRequested,
+        signal.competitorComparisonRequested,
+      ],
+    );
+    await client.query("COMMIT");
+    return result.rows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export function buildAdvancedAiContext({ signal, memories = [], businessBrain = null } = {}) {
