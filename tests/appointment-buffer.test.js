@@ -180,8 +180,6 @@ describe("appointment buffer enforcement (PostgreSQL)", { skip }, () => {
     );
   });
 
-});
-
 
   it("allows valid appointment status transitions but prevents terminal-state resurrection", async () => {
     const { tenantId, noBuffer } = await seedTenantAndTypes();
@@ -226,3 +224,5 @@ describe("appointment buffer enforcement (PostgreSQL)", { skip }, () => {
     const repeated = await appointmentService.updateAppointmentStatus(tenantId, cancelledAppointment.id, "cancelled");
     assert.equal(repeated.status, "cancelled");
   });
+
+});
