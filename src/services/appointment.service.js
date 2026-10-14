@@ -90,7 +90,60 @@ export async function rollbackPreservingError(client, originalError) {
   }
   return originalError;
 }
-export async function updateAppointmentStatus(tenantId,id,status){ tenantId=validTenant(tenantId); id=text(id,64); if(!["pending","confirmed","cancelled","completed","no_show"].includes(status)) throw new Error("Invalid appointment status"); const r=await dbPool.query("UPDATE appointments SET status=$3,updated_at=NOW() WHERE tenant_id=$1 AND id=$2 RETURNING *",[tenantId,id,status]); return r.rows[0]||null; }
+export async function updateAppointmentStatus(tenantId, id, status) {
+  tenantId = validTenant(tenantId);
+  id = text(id, 64);
+  if (!["pending", "confirmed", "cancelled", "completed", "no_show"].includes(status)) {
+    throw new Error("Invalid appointment status");
+  }
+
+  // Lock the row before checking the transition so concurrent requests cannot
+  // both make decisions from the same stale status.
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+    const currentResult = await client.query(
+      "SELECT * FROM appointments WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+      [tenantId, id],
+    );
+    const current = currentResult.rows[0];
+    if (!current) {
+      await client.query("COMMIT");
+      return null;
+    }
+
+    // Treat repeated requests for the current status as idempotent, but never
+    // allow completed/cancelled/no-show appointments to become active again.
+    if (current.status === status) {
+      await client.query("COMMIT");
+      return current;
+    }
+
+    const allowedTransitions = {
+      pending: ["confirmed", "cancelled"],
+      confirmed: ["completed", "cancelled", "no_show"],
+    };
+    if (!allowedTransitions[current.status]?.includes(status)) {
+      throw new Error(`Invalid appointment status transition: ${current.status} -> ${status}`);
+    }
+
+    const updated = await client.query(
+      "UPDATE appointments SET status=$3,updated_at=NOW() WHERE tenant_id=$1 AND id=$2 AND status=$4 RETURNING *",
+      [tenantId, id, status, current.status],
+    );
+    if (!updated.rows[0]) {
+      throw new Error("Invalid appointment status transition: status changed concurrently; reload and retry");
+    }
+    await client.query("COMMIT");
+    return updated.rows[0];
+  } catch (error) {
+    const originalError = await rollbackPreservingError(client, error);
+    if (originalError.code === "23P01") throw new Error("Appointment time is already booked");
+    throw originalError;
+  } finally {
+    client.release();
+  }
+}
 
 function utc(d){return d.toISOString().replace(/[-:]/g,"").replace(/\.\d{3}/,"");}
 function esc(v){return String(v).replace(/\\/g,"\\\\").replace(/;/g,"\\;").replace(/,/g,"\\,").replace(/\r\n|\r|\n/g,"\\n");}

@@ -180,4 +180,49 @@ describe("appointment buffer enforcement (PostgreSQL)", { skip }, () => {
     );
   });
 
+
+  it("allows valid appointment status transitions but prevents terminal-state resurrection", async () => {
+    const { tenantId, noBuffer } = await seedTenantAndTypes();
+    const start = new Date(Date.now() + 144 * 60 * 60 * 1000);
+    start.setUTCMinutes(0, 0, 0);
+
+    const completedAppointment = await booking(tenantId, noBuffer.id, start, "Status transition completed");
+    const confirmed = await appointmentService.updateAppointmentStatus(tenantId, completedAppointment.id, "confirmed");
+    assert.equal(confirmed.status, "confirmed");
+    const completed = await appointmentService.updateAppointmentStatus(tenantId, completedAppointment.id, "completed");
+    assert.equal(completed.status, "completed");
+
+    await assert.rejects(
+      () => appointmentService.updateAppointmentStatus(tenantId, completedAppointment.id, "pending"),
+      /Invalid appointment status transition: completed -> pending/,
+    );
+    const afterRejectedResurrection = await dbPool.query(
+      "SELECT status FROM appointments WHERE tenant_id=$1 AND id=$2",
+      [tenantId, completedAppointment.id],
+    );
+    assert.equal(afterRejectedResurrection.rows[0].status, "completed");
+
+    const cancelledAppointment = await booking(
+      tenantId,
+      noBuffer.id,
+      new Date(start.getTime() + 60 * 60 * 1000),
+      "Status transition cancelled",
+    );
+    const cancelled = await appointmentService.updateAppointmentStatus(tenantId, cancelledAppointment.id, "cancelled");
+    assert.equal(cancelled.status, "cancelled");
+    await assert.rejects(
+      () => appointmentService.updateAppointmentStatus(tenantId, cancelledAppointment.id, "confirmed"),
+      /Invalid appointment status transition: cancelled -> confirmed/,
+    );
+    const afterCancelledResurrection = await dbPool.query(
+      "SELECT status FROM appointments WHERE tenant_id=$1 AND id=$2",
+      [tenantId, cancelledAppointment.id],
+    );
+    assert.equal(afterCancelledResurrection.rows[0].status, "cancelled");
+
+    // Retries that request the current state are safe and idempotent.
+    const repeated = await appointmentService.updateAppointmentStatus(tenantId, cancelledAppointment.id, "cancelled");
+    assert.equal(repeated.status, "cancelled");
+  });
+
 });
