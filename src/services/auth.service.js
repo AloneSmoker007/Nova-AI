@@ -4,7 +4,7 @@ import { dbPool, isDatabaseConfigured } from "../config/database.js";
 
 const BCRYPT_ROUNDS = 12;
 const JWT_ALGORITHM = "HS256";
-const DEFAULT_EXPIRES_IN = "24h";
+const DEFAULT_EXPIRES_IN = "15m";
 
 // Valid 60-character bcrypt hash at cost 12.
 // Used only to keep bcrypt timing similar for unknown emails.
