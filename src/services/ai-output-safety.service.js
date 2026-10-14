@@ -49,3 +49,11 @@ export function inspectGeneratedAiOutput(value, maxLength = 4096) {
 
   return { safe: true, reason: null };
 }
+
+export function enforceGeneratedAiOutput(value, maxLength = 4096) {
+  const decision = inspectGeneratedAiOutput(value, maxLength);
+  if (!decision.safe) {
+    return { ...decision, text: SAFE_AI_FALLBACK };
+  }
+  return { ...decision, text: value.trim() };
+}
