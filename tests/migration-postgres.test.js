@@ -15,9 +15,10 @@ const skip = integrationUrl
   ? false
   : "Set MIGRATION_TEST_DATABASE_URL (and MIGRATION_TEST_ALLOW_RESET=1) to run this test";
 
-describe("PostgreSQL migration chain 001-021", { skip }, () => {
+describe("PostgreSQL migration chain and checksum integrity", { skip }, () => {
   let runMigrations = null;
   let compareMigrationFilenames = null;
+  let migrationChecksum = null;
   let dbPool = null;
   let expectedFilenames = [];
 
@@ -25,7 +26,7 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
     // config/database.js reads DATABASE_URL when it is first imported.
     process.env.DATABASE_URL = integrationUrl;
 
-    ({ runMigrations, compareMigrationFilenames } = await import(
+    ({ runMigrations, compareMigrationFilenames, migrationChecksum } = await import(
       "../src/database/migrate.js"
     ));
     ({ dbPool } = await import("../src/config/database.js"));
@@ -38,7 +39,7 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
       .map((entry) => entry.name)
       .sort(compareMigrationFilenames);
 
-    assert.ok(expectedFilenames.length >= 21, "expected the full 001-021 chain on disk");
+    assert.ok(expectedFilenames.length >= 30, "expected the complete current migration chain on disk");
 
     if (allowReset) {
       await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
@@ -64,11 +65,21 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
     assert.equal(result.configured, true);
     assert.deepEqual(result.applied, expectedFilenames);
 
-    const recorded = await dbPool.query("SELECT filename FROM schema_migrations ORDER BY id ASC");
+    const recorded = await dbPool.query("SELECT filename, checksum FROM schema_migrations ORDER BY id ASC");
     assert.deepEqual(
       recorded.rows.map((row) => row.filename),
       expectedFilenames,
     );
+
+    for (let index = 0; index < expectedFilenames.length; index += 1) {
+      const filename = expectedFilenames[index];
+      const sql = await fs.readFile(path.join(migrationsDirectory, filename), "utf8");
+      assert.equal(
+        recorded.rows[index].checksum,
+        migrationChecksum(sql),
+        `recorded checksum must match the applied file: ${filename}`,
+      );
+    }
   });
 
   it("is a no-op when the migration chain is run a second time", async () => {
@@ -78,6 +89,35 @@ describe("PostgreSQL migration chain 001-021", { skip }, () => {
 
     const recorded = await dbPool.query("SELECT count(*)::int AS count FROM schema_migrations");
     assert.equal(recorded.rows[0].count, expectedFilenames.length);
+  });
+
+  it("fails closed on edited applied migrations and backfills legacy null checksums", async () => {
+    const filename = expectedFilenames[0];
+    const sql = await fs.readFile(path.join(migrationsDirectory, filename), "utf8");
+    const expectedChecksum = migrationChecksum(sql);
+
+    await dbPool.query("UPDATE schema_migrations SET checksum=$2 WHERE filename=$1", [
+      filename,
+      "0".repeat(64),
+    ]);
+    await assert.rejects(
+      runMigrations(),
+      new RegExp("Migration checksum drift detected for " + filename),
+    );
+
+    // Restore the baseline record, then simulate a pre-checksum database row.
+    await dbPool.query("UPDATE schema_migrations SET checksum=$2 WHERE filename=$1", [
+      filename,
+      expectedChecksum,
+    ]);
+    await dbPool.query("UPDATE schema_migrations SET checksum=NULL WHERE filename=$1", [filename]);
+
+    const result = await runMigrations();
+    assert.deepEqual(result.applied, []);
+    const backfilled = await dbPool.query("SELECT checksum FROM schema_migrations WHERE filename=$1", [
+      filename,
+    ]);
+    assert.equal(backfilled.rows[0].checksum, expectedChecksum);
   });
 
   it("creates uq_users_tenant_id exactly once", async () => {
