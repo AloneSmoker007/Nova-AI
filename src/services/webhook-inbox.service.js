@@ -235,12 +235,12 @@ export async function ingestWebhookMessage({ message, tenant }) {
          ELSE NULL
        END
      )
-     ON CONFLICT (tenant_id, whatsapp_message_id)
-     DO UPDATE SET updated_at = NOW()
+     ON CONFLICT (tenant_id, whatsapp_message_id) DO NOTHING
      RETURNING id, tenant_id, whatsapp_number_id, phone_number_id,
        whatsapp_message_id, wa_id, profile_name, message_type, body, received_at,
        state, attempts, available_at, lease_until, lease_token, last_error,
-       generated_response, provider_message_id, completed_at`,
+       generated_response, provider_message_id, completed_at,
+       TRUE AS is_new_delivery`,
     [
       tenantId,
       tenant.whatsappNumberId,
@@ -256,7 +256,24 @@ export async function ingestWebhookMessage({ message, tenant }) {
     ],
   );
 
-  return result.rows[0];
+  if (result.rowCount === 1) return result.rows[0];
+
+  // The INSERT may conflict with a currently RECEIVED/PROCESSING row. Read it
+  // in a second statement so PostgreSQL gets a fresh snapshot even when the
+  // ON CONFLICT waited for a concurrent delivery to commit.
+  const existing = await dbPool.query(
+    `SELECT id, tenant_id, whatsapp_number_id, phone_number_id,
+            whatsapp_message_id, wa_id, profile_name, message_type, body, received_at,
+            state, attempts, available_at, lease_until, lease_token, last_error,
+            generated_response, provider_message_id, completed_at,
+            FALSE AS is_new_delivery
+     FROM webhook_messages
+     WHERE tenant_id=$1 AND whatsapp_message_id=$2
+     LIMIT 1`,
+    [tenantId, whatsappMessageId],
+  );
+  if (!existing.rows[0]) throw new Error("Duplicate webhook inbox record could not be resolved");
+  return existing.rows[0];
 }
 
 export async function getInboxMessage(inboxId, tenantId) {
