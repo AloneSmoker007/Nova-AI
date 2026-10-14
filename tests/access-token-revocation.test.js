@@ -21,6 +21,7 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
   let requireAuth;
   let issueRefreshToken;
   let revokeRefreshToken;
+  let hashToken;
 
   before(async () => {
     process.env.DATABASE_URL = integrationUrl;
@@ -28,7 +29,7 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
     ({ dbPool } = await import("../src/config/database.js"));
     ({ generateToken } = await import("../src/services/auth.service.js"));
     ({ requireAuth } = await import("../src/middleware/auth.js"));
-    ({ issueRefreshToken, revokeRefreshToken } = await import("../src/services/refresh-token.service.js"));
+    ({ issueRefreshToken, revokeRefreshToken, hashToken } = await import("../src/services/refresh-token.service.js"));
 
     assert.ok(dbPool, "dbPool must use the integration database URL");
     await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
@@ -103,6 +104,29 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
 
     assert.equal(await revokeRefreshToken("unknown-" + randomUUID()), false);
     assert.equal(typeof refreshToken2, "string");
+
+    // Start a fresh session, then replay the now-revoked token from the
+    // previous session. That replay must not invalidate this later session.
+    const freshRefreshToken = await issueRefreshToken(user.id, user.tenant_id);
+    const freshUserResult = await dbPool.query(
+      "SELECT id, tenant_id, role, status, token_version FROM users WHERE id=$1 AND tenant_id=$2",
+      [user.id, user.tenant_id],
+    );
+    const freshAccessToken = generateToken(freshUserResult.rows[0]);
+    assert.equal((await authenticate(freshAccessToken)).nextCalled, true);
+    assert.equal(await revokeRefreshToken(refreshToken1), false, "revoked refresh token must not authorize logout again");
+
+    const freshTokenRow = await dbPool.query(
+      "SELECT revoked_at FROM refresh_tokens WHERE token_hash=$1",
+      [hashToken(freshRefreshToken)],
+    );
+    assert.equal(freshTokenRow.rows[0].revoked_at, null, "replaying an old revoked token must not revoke a newer session");
+    assert.equal((await authenticate(freshAccessToken)).nextCalled, true);
+    const finalVersion = await dbPool.query(
+      "SELECT token_version FROM users WHERE id=$1 AND tenant_id=$2",
+      [user.id, user.tenant_id],
+    );
+    assert.equal(finalVersion.rows[0].token_version, 1);
   });
 
   it("role and password changes bump the token version and reject old access JWTs", async () => {
