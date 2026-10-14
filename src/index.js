@@ -72,6 +72,7 @@ import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
 import { registerTask16Routes } from "./task16.routes.js";
 import { getServerPort } from "./config/server.js";
+import { getTrustProxySetting } from "./config/trust-proxy.js";
 
 const app = express();
 const PORT = getServerPort();
@@ -99,7 +100,7 @@ if (missingEnvVars.length > 0) {
 const httpLogger = createHttpLogger(logger);
 
 app.disable("x-powered-by");
-app.set("trust proxy", 1);
+app.set("trust proxy", getTrustProxySetting());
 app.use(helmet());
 app.use(compression());
 app.use(httpLogger);
