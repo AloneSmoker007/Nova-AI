@@ -84,8 +84,17 @@ async function restore() {
       fs.createWriteStream(verifiedDumpPath, { flags: "wx", mode: 0o600 }),
     );
 
-    const pgRestore = spawn("pg_restore", ["--no-owner", "--no-acl"], {
-      env: postgresEnv(target),
+    const restoreEnv = postgresEnv(target);
+    // Without --dbname, pg_restore emits SQL to stdout instead of applying it.
+    // Pass only the decoded database name here; the URL/password stay in env.
+    const pgRestore = spawn("pg_restore", [
+      "--dbname", restoreEnv.PGDATABASE,
+      "--single-transaction",
+      "--exit-on-error",
+      "--no-owner",
+      "--no-acl",
+    ], {
+      env: restoreEnv,
       stdio: ["pipe", "ignore", "pipe"],
       windowsHide: true,
     });

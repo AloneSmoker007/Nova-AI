@@ -66,3 +66,18 @@ test("backup handles pg_dump spawn errors before waiting on stream completion", 
   assert.ok(resultCheck > streamPipeline, "a failed spawn must produce a controlled error");
   assert.ok(partialCleanup > resultCheck, "the failed backup path must remove its partial output");
 });
+
+
+test("restore uses an all-or-nothing transaction and stops at the first SQL error", async () => {
+  const source = await fs.readFile(new URL("../scripts/restore-db.js", import.meta.url), "utf8");
+  const start = source.indexOf('spawn("pg_restore", [');
+  assert.ok(start >= 0, "restore must invoke pg_restore with explicit safety options");
+  const end = source.indexOf("]", start);
+  assert.ok(end > start, "pg_restore argument list must be closed");
+  const args = source.slice(start, end + 1);
+  assert.match(args, /"--dbname", restoreEnv\.PGDATABASE/, "restore must target the configured database instead of writing SQL to stdout");
+  assert.match(args, /"--single-transaction"/, "restore must be atomic");
+  assert.match(args, /"--exit-on-error"/, "restore must not continue after a SQL error");
+  assert.match(args, /"--no-owner"/);
+  assert.match(args, /"--no-acl"/);
+});
