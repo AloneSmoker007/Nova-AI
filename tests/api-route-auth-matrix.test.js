@@ -101,5 +101,26 @@ test("privileged data/configuration endpoints retain owner/admin guards", () => 
       middleware.length >= 3,
       `${key} must contain auth, role guard, and route handler middleware`,
     );
+
+    // Exercise the registered post-auth middleware with a low-privilege role.
+    // A route that has only requireAuth will invoke its handler instead of
+    // returning the standard 403, so this catches accidental guard removal.
+    let statusCode = null;
+    let responseBody = null;
+    let nextCalled = false;
+    const response = {
+      status(code) { statusCode = code; return this; },
+      json(body) { responseBody = body; return this; },
+    };
+    const result = middleware[1](
+      { user: { id: "33333333-3333-4333-8333-333333333333", tenantId: "11111111-1111-4111-8111-111111111111", role: "agent" }, params: {}, query: {}, body: {} },
+      response,
+      () => { nextCalled = true; },
+    );
+    if (result && typeof result.then === "function") await result;
+
+    assert.equal(statusCode, 403, `${key} must deny a low-privilege agent`);
+    assert.equal(responseBody?.error, "Insufficient permissions", `${key} must use the expected role-denial response`);
+    assert.equal(nextCalled, false, `${key} must stop before running its handler`);
   }
 });
