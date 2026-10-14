@@ -144,7 +144,7 @@ export async function revokeRefreshToken(rawToken) {
   try {
     await client.query("BEGIN");
     const result = await client.query(
-      `SELECT user_id, tenant_id
+      `SELECT user_id, tenant_id, revoked_at, expires_at
        FROM refresh_tokens
        WHERE token_hash = $1
        FOR UPDATE`,
@@ -152,7 +152,9 @@ export async function revokeRefreshToken(rawToken) {
     );
     const row = result.rows[0];
 
-    if (!row) {
+    // A replayed/expired token is not valid logout authority. In particular,
+    // never let an old stolen refresh token terminate sessions created later.
+    if (!row || row.revoked_at || new Date(row.expires_at).getTime() <= Date.now()) {
       await client.query("COMMIT");
       return false;
     }
