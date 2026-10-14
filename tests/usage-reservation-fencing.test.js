@@ -17,6 +17,7 @@ describe("AI usage reservation ownership and orphan reconciliation (PostgreSQL)"
   let commitAiUsage;
   let releaseAiUsage;
   let reconcileExpiredAiUsageReservations;
+  let saveCopilotDraft;
 
   before(async () => {
     process.env.DATABASE_URL = integrationUrl;
@@ -30,6 +31,7 @@ describe("AI usage reservation ownership and orphan reconciliation (PostgreSQL)"
       releaseAiUsage,
       reconcileExpiredAiUsageReservations,
     } = await import("../src/services/usage.service.js"));
+    ({ saveCopilotDraft } = await import("../src/services/handoff.service.js"));
 
     assert.ok(dbPool, "dbPool must use the migration test database URL");
     await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
@@ -172,6 +174,82 @@ describe("AI usage reservation ownership and orphan reconciliation (PostgreSQL)"
     assert.equal(retry.duplicate, true);
     assert.equal(retry.committed, true);
     assert.equal(retry.reservationToken, undefined);
+  });
+
+  it("reconciles persisted Copilot/OCR outcomes and releases orphaned reservations", async () => {
+    const seed = await seedMessage();
+    const userId = randomUUID();
+    await dbPool.query(
+      `INSERT INTO users (id, tenant_id, email, password_hash, role, status)
+       VALUES ($1, $2, $3, $4, 'owner', 'active')`,
+      [userId, seed.tenantId, `usage-reconcile-${userId}@example.test`, "test-only-password-hash"],
+    );
+
+    const copilot = await reserveAiUsage({
+      tenantId: seed.tenantId,
+      conversationId: seed.message.conversationId,
+      type: "copilot_draft",
+    });
+    const ocr = await reserveAiUsage({ tenantId: seed.tenantId, type: "ocr_document" });
+    assert.ok(copilot.reservationToken);
+    assert.ok(ocr.reservationToken);
+
+    await saveCopilotDraft(
+      seed.tenantId,
+      seed.message.conversationId,
+      userId,
+      "Recovered persisted draft",
+      copilot.eventKey,
+    );
+    await dbPool.query(
+      `INSERT INTO ocr_documents
+         (tenant_id, filename, mime_type, extracted_text, model, created_by, usage_event_key)
+       VALUES ($1, $2, 'application/pdf', $3, 'test-model', $4, $5)`,
+      [seed.tenantId, "usage-reconcile.pdf", "Recognized text", userId, ocr.eventKey],
+    );
+    await dbPool.query(
+      `UPDATE usage_events
+       SET reservation_lease_until=NOW()-INTERVAL '1 second'
+       WHERE tenant_id=$1 AND event_key IN ($2, $3)`,
+      [seed.tenantId, copilot.eventKey, ocr.eventKey],
+    );
+
+    const finalized = await reconcileExpiredAiUsageReservations();
+    assert.ok(finalized.committed >= 2);
+
+    const committedRows = await dbPool.query(
+      `SELECT event_key, reservation_status, reservation_token, reservation_lease_until
+       FROM usage_events
+       WHERE tenant_id=$1 AND event_key IN ($2, $3)
+       ORDER BY event_key`,
+      [seed.tenantId, copilot.eventKey, ocr.eventKey],
+    );
+    assert.equal(committedRows.rowCount, 2);
+    assert.ok(committedRows.rows.every((row) =>
+      row.reservation_status === "committed" &&
+      row.reservation_token === null &&
+      row.reservation_lease_until === null
+    ));
+
+    const orphanCopilot = await reserveAiUsage({
+      tenantId: seed.tenantId,
+      conversationId: seed.message.conversationId,
+      type: "copilot_draft",
+    });
+    const orphanOcr = await reserveAiUsage({ tenantId: seed.tenantId, type: "ocr_document" });
+    await dbPool.query(
+      `UPDATE usage_events
+       SET reservation_lease_until=NOW()-INTERVAL '1 second'
+       WHERE tenant_id=$1 AND event_key IN ($2, $3)`,
+      [seed.tenantId, orphanCopilot.eventKey, orphanOcr.eventKey],
+    );
+    const released = await reconcileExpiredAiUsageReservations();
+    assert.ok(released.released >= 2);
+    const orphanRows = await dbPool.query(
+      "SELECT count(*)::int AS count FROM usage_events WHERE tenant_id=$1 AND event_key IN ($2, $3)",
+      [seed.tenantId, orphanCopilot.eventKey, orphanOcr.eventKey],
+    );
+    assert.equal(orphanRows.rows[0].count, 0);
   });
 
   it("releases expired AI reservations only when the durable message reached DEAD_LETTER without a response", async () => {
