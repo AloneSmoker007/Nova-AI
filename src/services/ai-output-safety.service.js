@@ -17,7 +17,26 @@ const CREDENTIAL_ASSIGNMENT =
 const INSTRUCTION_DISCLOSURE =
   /\b(?:here(?:'s| is)|below is|my|the)\s+(?:the\s+)?(?:hidden\s+)?(?:system prompt|system instructions|developer instructions)\b/i;
 const INTERNAL_MEMORY_MARKUP = /<\/?(?:customer_memory|memory)(?:\s|>|\/)/i;
-const UNSAFE_INVISIBLE_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202A-\u202E\u2066-\u2069\u200B\uFEFF]/;
+
+function hasUnsafeInvisibleControls(value) {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint <= 0x08 ||
+      codePoint === 0x0b ||
+      codePoint === 0x0c ||
+      (codePoint >= 0x0e && codePoint <= 0x1f) ||
+      codePoint === 0x7f ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069) ||
+      codePoint === 0x200b ||
+      codePoint === 0xfeff
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export function inspectGeneratedAiOutput(value, maxLength = 4096) {
   if (typeof value !== "string" || value.trim() === "") {
@@ -29,7 +48,7 @@ export function inspectGeneratedAiOutput(value, maxLength = 4096) {
     return { safe: false, reason: "response_too_long" };
   }
 
-  if (UNSAFE_INVISIBLE_CONTROLS.test(output)) {
+  if (hasUnsafeInvisibleControls(output)) {
     return { safe: false, reason: "control_or_bidi_character" };
   }
 
