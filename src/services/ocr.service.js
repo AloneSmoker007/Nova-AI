@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { dbPool } from "../config/database.js";
-import { releaseAiUsage, reserveAiUsage } from "./usage.service.js";
+import { logger } from "../config/logger.js";
+import { commitAiUsage, releaseAiUsage, reserveAiUsage } from "./usage.service.js";
 
 const MAX_TEXT = 20_000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -56,6 +57,7 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
   // tenant's shared monthly AI limit before any provider call. The validation
   // failures above throw before reserving, so rejected uploads consume nothing.
   const aiReservation = await reserveAiUsage({ tenantId: t, type: "ocr_document" });
+  if (aiReservation.inProgress) throw new Error("OCR reservation is already active; retry later");
   if (!aiReservation.allowed) throw new Error("AI usage hard limit reached");
 
   try {
@@ -92,12 +94,27 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
       [t, filename.trim(), mimeType, extracted, MODEL, createdBy],
     );
+    if (aiReservation.reservationToken) {
+      try {
+        await commitAiUsage({
+          tenantId: t,
+          eventKey: aiReservation.eventKey,
+          reservationToken: aiReservation.reservationToken,
+          type: "ocr_document",
+        });
+      } catch (commitError) {
+        logger.warn(
+          { tenantId: t, error: commitError.message },
+          "OCR result saved but reservation finalization will be reconciled",
+        );
+      }
+    }
     return r.rows[0];
   } catch (error) {
     // Any post-reservation failure (provider or persistence) must not leave a
     // reservation behind; failed attempts consume no quota.
     try {
-      await releaseAiUsage({ tenantId: t, eventKey: aiReservation.eventKey, type: "ocr_document" });
+      await releaseAiUsage({ tenantId: t, eventKey: aiReservation.eventKey, reservationToken: aiReservation.reservationToken, type: "ocr_document" });
     } catch {
       // Release failure leaves a bounded orphan (one unit); nothing else to do.
     }
