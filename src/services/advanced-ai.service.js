@@ -181,43 +181,105 @@ export async function getCustomerMemory(tenantId, contactId) {
   return result.rows;
 }
 
-export async function rememberCustomerPreference(tenantId, contactId, key, value, confidence = 0.7) {
+export async function rememberCustomerPreference(
+  tenantId,
+  contactId,
+  key,
+  value,
+  confidence = 0.7,
+  sourceMessageId = null,
+  queryable = dbPool,
+) {
   assertDatabase();
   if (!validId(tenantId) || !validId(contactId)) throw new Error("Invalid tenant or contact ID");
+  if (sourceMessageId !== null && !validId(sourceMessageId)) throw new Error("Invalid source message ID");
+
   const memoryKey = normalizeText(key, MAX_MEMORY_KEY).toLowerCase();
   const memoryValue = sanitizeMemoryValue(value);
   const score = Number(confidence);
   if (!memoryKey || !memoryValue || !Number.isFinite(score) || score < 0 || score > 1) {
     throw new Error("Invalid customer memory");
   }
-  const result = await dbPool.query(
-    `INSERT INTO contact_ai_memory (tenant_id, contact_id, memory_key, memory_value, confidence, source)
-     VALUES ($1, $2, $3, $4, $5, 'conversation')
+
+  // The same transaction that locks a source message writes its derived memory.
+  // A concurrent deletion either waits and purges this row, or the source lock
+  // observes the already-deleted message and prevents the write entirely.
+  const result = await queryable.query(
+    `INSERT INTO contact_ai_memory
+       (tenant_id, contact_id, memory_key, memory_value, confidence, source, source_message_id)
+     SELECT $1, $2, $3, $4, $5,
+            CASE WHEN $6::uuid IS NULL THEN 'manual' ELSE 'conversation' END,
+            $6::uuid
+     WHERE $6::uuid IS NULL OR EXISTS (
+       SELECT 1 FROM messages
+       WHERE tenant_id=$1 AND id=$6::uuid AND deleted_at IS NULL
+     )
      ON CONFLICT (tenant_id, contact_id, memory_key) DO UPDATE SET
        memory_value = EXCLUDED.memory_value,
        confidence = EXCLUDED.confidence,
+       source = EXCLUDED.source,
+       source_message_id = EXCLUDED.source_message_id,
        last_confirmed_at = NOW(),
        updated_at = NOW()
-     RETURNING memory_key, memory_value, confidence`,
-    [tenantId, contactId, memoryKey, memoryValue, score],
+     RETURNING memory_key, memory_value, confidence, source, source_message_id`,
+    [tenantId, contactId, memoryKey, memoryValue, score, sourceMessageId],
   );
-  return result.rows[0];
+  return result.rows[0] || null;
 }
 
-export async function syncCustomerMemoryFromMessage({ tenantId, contactId, messageText }) {
+export async function syncCustomerMemoryFromMessage({
+  tenantId,
+  contactId,
+  messageText,
+  sourceMessageId = null,
+}) {
   if (!validId(tenantId) || !validId(contactId)) {
     throw new Error("Invalid tenant or contact ID");
   }
+  if (!validId(sourceMessageId)) return [];
   const safeText = normalizeText(messageText, 2000);
   if (!safeText) return [];
 
   const candidates = extractCustomerPreferencesFromText(safeText);
-  const saved = [];
-  for (const candidate of candidates) {
-    const row = await rememberCustomerPreference(tenantId, contactId, candidate.key, candidate.value, candidate.confidence);
-    if (row) saved.push(row);
+  if (!candidates.length) return [];
+
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+    const source = await client.query(
+      `SELECT c.contact_id, m.deleted_at
+       FROM messages m
+       JOIN conversations c ON c.tenant_id=m.tenant_id AND c.id=m.conversation_id
+       WHERE m.tenant_id=$1 AND m.id=$2
+       FOR UPDATE OF m`,
+      [tenantId, sourceMessageId],
+    );
+    if (!source.rows[0] || source.rows[0].deleted_at || source.rows[0].contact_id !== contactId) {
+      await client.query("COMMIT");
+      return [];
+    }
+
+    const saved = [];
+    for (const candidate of candidates) {
+      const row = await rememberCustomerPreference(
+        tenantId,
+        contactId,
+        candidate.key,
+        candidate.value,
+        candidate.confidence,
+        sourceMessageId,
+        client,
+      );
+      if (row) saved.push(row);
+    }
+    await client.query("COMMIT");
+    return saved;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
-  return saved;
 }
 
 export async function recordAiSignal(tenantId, conversationId, messageId, signal) {
