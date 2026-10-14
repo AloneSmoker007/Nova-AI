@@ -395,9 +395,9 @@ export async function reconcileExpiredAiUsageReservations(limit = 100) {
   try {
     await client.query("BEGIN");
 
-    // A persisted generated response is already a successful billable result;
-    // finalize it if the worker died after saving the reply but before commit.
-    const finalized = await client.query(
+    // A saved inbound reply is the durable success boundary, including a crash
+    // between writing the reply and committing its usage reservation.
+    const inboundCommitted = await client.query(
       `WITH stale AS (
          SELECT u.id
          FROM usage_events u
@@ -422,10 +422,9 @@ export async function reconcileExpiredAiUsageReservations(limit = 100) {
       [safeLimit],
     );
 
-    // A dead-lettered message with no persisted generated response can never
-    // use its AI reservation again. Release only expired reservations tied to
-    // that exact durable inbox record.
-    const released = await client.query(
+    // A dead-lettered inbound item cannot retry; only an expired reservation
+    // whose own message has no saved response is released.
+    const inboundReleased = await client.query(
       `WITH stale AS (
          SELECT u.id
          FROM usage_events u
@@ -448,8 +447,106 @@ export async function reconcileExpiredAiUsageReservations(limit = 100) {
       [safeLimit],
     );
 
+    // Copilot drafts and OCR results persist their reservation event key, so a
+    // crash after their insert is recognized as success and charged once.
+    const copilotCommitted = await client.query(
+      `WITH stale AS (
+         SELECT u.id
+         FROM usage_events u
+         JOIN ai_copilot_drafts d
+           ON d.tenant_id=u.tenant_id AND d.usage_event_key=u.event_key
+         WHERE u.event_type='copilot_draft'
+           AND u.reservation_status='reserved'
+           AND u.reservation_lease_until < NOW()
+         ORDER BY u.reservation_lease_until
+         LIMIT $1
+         FOR UPDATE OF u SKIP LOCKED
+       )
+       UPDATE usage_events u
+       SET reservation_status='committed',
+           reservation_token=NULL,
+           reservation_lease_until=NULL
+       FROM stale
+       WHERE u.id=stale.id
+       RETURNING u.id`,
+      [safeLimit],
+    );
+
+    const ocrCommitted = await client.query(
+      `WITH stale AS (
+         SELECT u.id
+         FROM usage_events u
+         JOIN ocr_documents d
+           ON d.tenant_id=u.tenant_id AND d.usage_event_key=u.event_key
+         WHERE u.event_type='ocr_document'
+           AND u.reservation_status='reserved'
+           AND u.reservation_lease_until < NOW()
+         ORDER BY u.reservation_lease_until
+         LIMIT $1
+         FOR UPDATE OF u SKIP LOCKED
+       )
+       UPDATE usage_events u
+       SET reservation_status='committed',
+           reservation_token=NULL,
+           reservation_lease_until=NULL
+       FROM stale
+       WHERE u.id=stale.id
+       RETURNING u.id`,
+      [safeLimit],
+    );
+
+    // Expired non-inbound reservations without a corresponding durable result
+    // are abandoned attempts. Their five-minute lease greatly exceeds Gemini's
+    // 30-second timeout, so reclaim only after that ownership lease expires.
+    const orphanedCopilot = await client.query(
+      `WITH stale AS (
+         SELECT u.id
+         FROM usage_events u
+         WHERE u.event_type='copilot_draft'
+           AND u.reservation_status='reserved'
+           AND u.reservation_lease_until < NOW()
+           AND NOT EXISTS (
+             SELECT 1 FROM ai_copilot_drafts d
+             WHERE d.tenant_id=u.tenant_id AND d.usage_event_key=u.event_key
+           )
+         ORDER BY u.reservation_lease_until
+         LIMIT $1
+         FOR UPDATE OF u SKIP LOCKED
+       )
+       DELETE FROM usage_events u USING stale
+       WHERE u.id=stale.id
+       RETURNING u.id`,
+      [safeLimit],
+    );
+
+    const orphanedOcr = await client.query(
+      `WITH stale AS (
+         SELECT u.id
+         FROM usage_events u
+         WHERE u.event_type='ocr_document'
+           AND u.reservation_status='reserved'
+           AND u.reservation_lease_until < NOW()
+           AND NOT EXISTS (
+             SELECT 1 FROM ocr_documents d
+             WHERE d.tenant_id=u.tenant_id AND d.usage_event_key=u.event_key
+           )
+         ORDER BY u.reservation_lease_until
+         LIMIT $1
+         FOR UPDATE OF u SKIP LOCKED
+       )
+       DELETE FROM usage_events u USING stale
+       WHERE u.id=stale.id
+       RETURNING u.id`,
+      [safeLimit],
+    );
+
     await client.query("COMMIT");
-    return { committed: finalized.rowCount, released: released.rowCount };
+    return {
+      committed:
+        inboundCommitted.rowCount + copilotCommitted.rowCount + ocrCommitted.rowCount,
+      released:
+        inboundReleased.rowCount + orphanedCopilot.rowCount + orphanedOcr.rowCount,
+    };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
