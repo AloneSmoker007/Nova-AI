@@ -155,7 +155,7 @@ describe("inbound message idempotency and identity (PostgreSQL)", { skip }, () =
     assert.equal(counts.rows[0].messages, 1, "the canonical message row must remain unique and unchanged");
   });
 
-  it("does not requeue a canonical provider message after completed inbox retention cleanup", async () => {
+  it("does not requeue a provider message after inbox and canonical-message retention", async () => {
     const tenantId = randomUUID();
     const phoneNumberId = "1" + String(Date.now()).slice(-9);
     const waId = "15551234567";
@@ -209,6 +209,21 @@ describe("inbound message idempotency and identity (PostgreSQL)", { skip }, () =
       [tenantId, whatsappMessageId],
     );
     assert.equal(oldRow.rowCount, 0, "retention must remove the old inbox payload while leaving canonical message history");
+
+    const durableKey = await dbPool.query(
+      `SELECT tenant_id, whatsapp_message_id, phone_number_id
+       FROM inbound_webhook_replay_keys
+       WHERE tenant_id=$1 AND whatsapp_message_id=$2`,
+      [tenantId, whatsappMessageId],
+    );
+    assert.equal(durableKey.rowCount, 1, "compact provider replay key must survive full inbox cleanup");
+
+    // Simulate later canonical-message retention/deletion. The compact key is
+    // the remaining replay barrier and prevents a second AI response.
+    await dbPool.query(
+      "DELETE FROM messages WHERE tenant_id=$1 AND whatsapp_message_id=$2",
+      [tenantId, whatsappMessageId],
+    );
 
     const replay = await ingestWebhookMessage({
       message: {
