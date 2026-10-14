@@ -136,6 +136,11 @@ jobs:
       - name: Run refresh token replay integration tests
         run: node --test tests/refresh-token-replay.test.js
 
+      # Final-gate auth regression: issued access JWTs must fail after logout,
+      # role change, password change, and refresh-token reuse.
+      - name: Run access-token revocation integration tests
+        run: node --test tests/access-token-revocation.test.js
+
       # TASK-27/TASK-29/TASK-30 coverage: canonical inbound IDs, post-retention replay,
       # and monotonic activity timestamps. This suite resets public schema; keep it serialized
       # before the final inbox lease-recovery integration suite.
