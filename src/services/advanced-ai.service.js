@@ -17,7 +17,7 @@ function normalizeText(value, max) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
-function sanitizeMemoryValue(value) {
+export function sanitizeMemoryValue(value) {
   const raw = String(value ?? "");
   const cleaned = raw
     .split("")
