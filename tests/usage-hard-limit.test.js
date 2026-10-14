@@ -169,12 +169,12 @@ test("failed AI generations release the reservation so retries are not double-bi
 test("reservation is idempotent for durable-inbox retries and race-safe per tenant", () => {
   const reserve = sliceBetween(usageSource, "export async function reserveAiUsage", "export async function releaseAiUsage");
   assert.ok(
-    reserve.includes("SELECT id FROM usage_events") && reserve.includes("LIMIT 1"),
+    reserve.includes("SELECT id, reservation_status, reservation_lease_until") && reserve.includes("LIMIT 1"),
     "an existing reservation must short-circuit as a duplicate",
   );
   assert.ok(
-    reserve.includes("{ allowed: true, duplicate: true }"),
-    "duplicate reservations must allow generation without double-counting",
+    reserve.includes("inProgress: true") && reserve.includes("reservationToken"),
+    "active reservations must prevent a second worker from starting duplicate generation",
   );
   assert.ok(
     reserve.includes("FOR UPDATE"),
@@ -198,7 +198,7 @@ test("AI usage reservation and release remain strictly tenant-scoped", () => {
     "duplicate detection must be tenant-scoped",
   );
   assert.ok(
-    release.includes("WHERE tenant_id = $1 AND event_key = $2 AND event_type = $3"),
+    release.includes("WHERE tenant_id=$1 AND event_key=$2 AND event_type=$3"),
     "release must be tenant-scoped and restricted to the reservation's own event type",
   );
   assert.ok(
@@ -266,7 +266,7 @@ test("copilot draft route reserves quota before any context work or Gemini call"
   assert.ok(route.includes("status(429)"), "blocked copilot drafts must return 429 without calling Gemini");
   assert.ok(
     route.indexOf("releaseAiUsage({") > route.indexOf("generateCopilotDraftReply") &&
-      route.includes('eventKey: aiReservation.eventKey, type: "copilot_draft"'),
+      route.includes('eventKey: aiReservation.eventKey, reservationToken: aiReservation.reservationToken, type: "copilot_draft"'),
     "any post-reservation copilot failure must release its own reservation",
   );
 });
@@ -292,7 +292,7 @@ test("OCR extraction reserves quota before the Gemini call and releases on failu
   );
   assert.ok(
     extract.includes("releaseAiUsage({") &&
-      extract.includes('eventKey: aiReservation.eventKey, type: "ocr_document"'),
+      extract.includes('eventKey: aiReservation.eventKey, reservationToken: aiReservation.reservationToken, type: "ocr_document"'),
     "any post-reservation OCR failure must release its own reservation",
   );
 });
