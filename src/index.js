@@ -1416,7 +1416,7 @@ app.get("/api/appointments/:appointmentId/ics", requireAuth, async (req, res, ne
   } catch (error) { return next(error); }
 });
 
-app.get("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next) => {
+app.get("/api/contacts/:contactId/ai-memory", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
   try {
     const data = await getCustomerMemory(req.user.tenantId, req.params.contactId);
     return res.status(200).json({ status: "ok", data });
@@ -1425,7 +1425,7 @@ app.get("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next
   }
 });
 
-app.post("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next) => {
+app.post("/api/contacts/:contactId/ai-memory", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
   try {
     const data = await rememberCustomerPreference(
       req.user.tenantId,
