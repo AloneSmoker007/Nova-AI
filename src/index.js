@@ -1299,7 +1299,7 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
         businessBrain: brain,
         copilotContext,
       });
-      saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
+      saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft, aiReservation.eventKey);
       if (aiReservation.reservationToken) {
         try {
           await commitAiUsage({
