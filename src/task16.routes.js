@@ -113,6 +113,13 @@ export function registerTask16Routes(app) {
       });
 
       if (!data) return res.status(404).json({ status: "error", error: "Payment not found" });
+      if (data.rejected) {
+        return res.status(200).json({
+          status: "rejected",
+          reason: data.reason,
+          duplicate: false,
+        });
+      }
       return res.status(200).json({ status: "ok", data });
     } catch (error) {
       if (error instanceof SyntaxError || bad(error)) return res.status(400).json({ status: "error", error: "Invalid payment webhook" });
