@@ -92,6 +92,17 @@ function request(method, path, body) {
   });
 }
 
+test("payments list route is registered exactly once and remains authenticated", () => {
+  const matches = app._router.stack
+    .map((layer) => layer.route)
+    .filter((route) => route?.path === "/api/payments" && route.methods?.get);
+  assert.equal(matches.length, 1, "the duplicate Task 16 GET /api/payments route must not shadow the canonical route");
+  assert.ok(
+    matches[0].stack.some((layer) => layer.handle.name === "requireAuth"),
+    "payments list must require authentication",
+  );
+});
+
 test("compiled Express stack places every Task 16 route before the terminal 404", () => {
   assert.ok(app, "the production app must be importable");
   assert.ok(app._router, "app must have a compiled Express router");
