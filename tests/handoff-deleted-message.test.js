@@ -12,6 +12,8 @@ describe("handoff summary privacy (PostgreSQL)", { skip }, () => {
   let dbPool;
   let runMigrations;
   let persistInboundMessage;
+  let persistDeletedInboundMessage;
+  let getConversationMessages;
   let handoffConversation;
   let runRetentionCleanup;
 
@@ -19,7 +21,8 @@ describe("handoff summary privacy (PostgreSQL)", { skip }, () => {
     process.env.DATABASE_URL = integrationUrl;
     ({ runMigrations } = await import("../src/database/migrate.js"));
     ({ dbPool } = await import("../src/config/database.js"));
-    ({ persistInboundMessage } = await import("../src/services/message-persistence.service.js"));
+    ({ persistInboundMessage, persistDeletedInboundMessage } = await import("../src/services/message-persistence.service.js"));
+    ({ getConversationMessages } = await import("../src/services/conversation.service.js"));
     ({ handoffConversation } = await import("../src/services/handoff.service.js"));
     ({ runRetentionCleanup } = await import("../src/services/retention.service.js"));
 
@@ -55,12 +58,13 @@ describe("handoff summary privacy (PostgreSQL)", { skip }, () => {
       [userId, tenantId, `handoff-${userId}@example.test`, "test-only-password-hash"],
     );
 
+    const deletedWhatsAppMessageId = "wamid-" + randomUUID();
     const first = await persistInboundMessage({
       tenantId,
       whatsappNumberId: number.rows[0].id,
       waId,
       profileName: "Handoff privacy test",
-      whatsappMessageId: "wamid-" + randomUUID(),
+      whatsappMessageId: deletedWhatsAppMessageId,
       messageType: "text",
       body: "DELETED_PRIVATE_TEXT_7f42",
       receivedAt: new Date("2026-10-13T10:00:00.000Z"),
@@ -79,10 +83,59 @@ describe("handoff summary privacy (PostgreSQL)", { skip }, () => {
     assert.equal(first.conversationId, second.conversationId, "the two messages must share a conversation");
 
     await dbPool.query(
-      `UPDATE messages SET deleted_at=NOW(), status='deleted'
-       WHERE tenant_id=$1 AND id=$2`,
-      [tenantId, first.messageId],
+      `INSERT INTO contact_ai_memory
+         (tenant_id, contact_id, memory_key, memory_value, confidence, source, source_message_id)
+       VALUES ($1,$2,'source-test','DELETED_PRIVATE_TEXT_7f42',0.8,'conversation',$3)`,
+      [tenantId, first.contactId, first.messageId],
     );
+    await dbPool.query(
+      `INSERT INTO conversation_ai_signals
+         (tenant_id, conversation_id, message_id, intent, sentiment, priority)
+       VALUES ($1,$2,$3,'support','negative',4)`,
+      [tenantId, first.conversationId, first.messageId],
+    );
+    await dbPool.query(
+      `INSERT INTO conversation_ai_summaries (tenant_id, conversation_id, summary)
+       VALUES ($1,$2,'Old summary contains DELETED_PRIVATE_TEXT_7f42')`,
+      [tenantId, first.conversationId],
+    );
+    await dbPool.query(
+      `INSERT INTO ai_copilot_drafts (tenant_id, conversation_id, author_user_id, draft)
+       VALUES ($1,$2,$3,'Old draft contains DELETED_PRIVATE_TEXT_7f42')`,
+      [tenantId, first.conversationId, userId],
+    );
+
+    await persistDeletedInboundMessage({
+      tenantId,
+      whatsappNumberId: number.rows[0].id,
+      waId,
+      profileName: "Handoff privacy test",
+      whatsappMessageId: deletedWhatsAppMessageId,
+      deletedAt: new Date("2026-10-14T10:00:00.000Z"),
+    });
+
+    const visibleMessages = await getConversationMessages(tenantId, first.conversationId);
+    assert.equal(visibleMessages.length, 1);
+    assert.match(visibleMessages[0].text, /ACTIVE_MESSAGE_SHOULD_REMAIN/);
+    assert.doesNotMatch(JSON.stringify(visibleMessages), /DELETED_PRIVATE_TEXT_7f42/);
+
+    for (const [table, key] of [
+      ["contact_ai_memory", "source_message_id"],
+      ["conversation_ai_signals", "message_id"],
+    ]) {
+      const purged = await dbPool.query(
+        `SELECT count(*)::int AS count FROM ${table} WHERE tenant_id=$1 AND ${key}=$2`,
+        [tenantId, first.messageId],
+      );
+      assert.equal(purged.rows[0].count, 0, `${table} must be purged for the deleted source message`);
+    }
+    for (const table of ["conversation_ai_summaries", "ai_copilot_drafts"]) {
+      const purged = await dbPool.query(
+        `SELECT count(*)::int AS count FROM ${table} WHERE tenant_id=$1 AND conversation_id=$2`,
+        [tenantId, first.conversationId],
+      );
+      assert.equal(purged.rows[0].count, 0, `${table} must be invalidated after a message deletion`);
+    }
 
     const result = await handoffConversation(tenantId, first.conversationId, userId, "privacy regression");
     assert.doesNotMatch(result.summary, /DELETED_PRIVATE_TEXT_7f42/);
