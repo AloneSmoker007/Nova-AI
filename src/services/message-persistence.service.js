@@ -108,6 +108,7 @@ export async function persistInboundMessage({
            m.direction,
            m.message_type,
            m."text" AS body,
+           m.deleted_at,
            c.contact_id,
            c.whatsapp_number_id,
            contact.wa_id
@@ -141,6 +142,8 @@ export async function persistInboundMessage({
       return {
         duplicate: true,
         identityConflict,
+        deleted: Boolean(existing.deleted_at),
+        deletedAt: existing.deleted_at,
         conversationId: existing.conversation_id,
         contactId: existing.contact_id,
         messageId: existing.message_id,
