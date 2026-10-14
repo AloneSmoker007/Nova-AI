@@ -104,6 +104,12 @@ jobs:
       - name: Run automation SQL integration tests
         run: node --test tests/automation-postgres.test.js
 
+      # External side effects require a durable result ledger. This live-PG suite
+      # proves success replay skips duplicate POSTs and ambiguous outcomes are
+      # parked until an owner/admin records a manual reconciliation decision.
+      - name: Run automation webhook effect integration tests
+        run: node --test tests/automation-webhook-effects.test.js
+
       # TASK-03 regression coverage: per-tenant payment webhook authentication,
       # tested against the real application and PostgreSQL. This suite resets
       # the shared test schema, so it runs as a separate serialized step.
