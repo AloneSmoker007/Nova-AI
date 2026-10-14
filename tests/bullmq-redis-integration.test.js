@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import IORedis from "ioredis";
 import { Queue, Worker } from "bullmq";
 
@@ -53,7 +53,6 @@ test("a retained failed BullMQ job can be removed and re-enqueued against live R
     const replacement = await queue.getJob(inboxId);
     assert.ok(replacement, "enqueue must create a job after removing a retained terminal job");
     assert.equal(await replacement.getState(), "waiting");
-    assert.equal((await replacement.getState()), "waiting");
   } finally {
     if (failureListener) worker.off("failed", failureListener);
     if (errorListener) worker.off("error", errorListener);
