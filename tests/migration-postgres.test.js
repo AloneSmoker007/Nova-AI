@@ -39,7 +39,7 @@ describe("PostgreSQL migration chain and checksum integrity", { skip }, () => {
       .map((entry) => entry.name)
       .sort(compareMigrationFilenames);
 
-    assert.ok(expectedFilenames.length >= 31, "expected the complete current migration chain including webhook effect ledger");
+    assert.ok(expectedFilenames.length >= 32, "expected the complete current migration chain including AI reservation fencing");
 
     if (allowReset) {
       await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
