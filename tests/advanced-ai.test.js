@@ -26,9 +26,9 @@ test("customer memory context is never treated as instructions", async () => {
 });
 
 test("saved customer memory strips bidi, zero-width and control characters", () => {
-  const cleaned = sanitizeMemoryValue("vip\\u202Ecustomer\\u200Bname\\u2066secret\\u2069\\u0007");
+  const cleaned = sanitizeMemoryValue("vip\\u202Ecustomer\\u200Bname\u2066secret\u2069\u0007");
   assert.equal(cleaned, "vip customer name secret");
-  assert.doesNotMatch(cleaned, /[\\u0000-\\u001f\\u007f\\u200b\\ufeff\\u202a-\\u202e\\u2066-\\u2069]/);
+  assert.doesNotMatch(cleaned, /[\u0000-\u001f\u007f\u200b\ufeff\u202a-\u202e\u2066-\u2069]/);
 });
 
 test("competitor requests are explicitly detected", async () => {
