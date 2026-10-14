@@ -117,6 +117,14 @@ const loginLimiter = rateLimit({
   message: { status: "error", error: "Too many login attempts. Please try again later." },
 });
 
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: "error", error: "Too many refresh attempts. Please try again later." },
+});
+
 // Development-only Gemini diagnostics can incur provider cost. Keep the route
 // unavailable to anonymous users and tightly limit each source IP.
 const geminiTestLimiter = rateLimit({
@@ -969,7 +977,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
   }
 });
 
-app.post("/api/auth/refresh", async (req, res) => {
+app.post("/api/auth/refresh", refreshLimiter, async (req, res) => {
   const { error, value } = refreshSchema.validate(req.body);
   if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
 
@@ -990,11 +998,14 @@ app.post("/api/auth/logout", async (req, res) => {
   const { error, value } = refreshSchema.validate(req.body);
   if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
   try {
-    await revokeRefreshToken(value.refreshToken);
+    const revoked = await revokeRefreshToken(value.refreshToken);
+    if (!revoked) {
+      return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
+    }
     return res.sendStatus(204);
   } catch (error) {
     req.log.error({ error: error.message }, "Logout request failed");
-    return res.sendStatus(204);
+    return res.status(503).json({ status: "error", error: "Logout could not be completed" });
   }
 });
 
