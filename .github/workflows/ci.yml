@@ -141,6 +141,11 @@ jobs:
       - name: Run access-token revocation integration tests
         run: node --test tests/access-token-revocation.test.js
 
+      # Privacy regression: deleted customer messages must not be copied into
+      # future handoff summaries or persisted AI summary context.
+      - name: Run deleted-message handoff privacy integration tests
+        run: node --test tests/handoff-deleted-message.test.js
+
       # TASK-27/TASK-29/TASK-30 coverage: canonical inbound IDs, post-retention replay,
       # and monotonic activity timestamps. This suite resets public schema; keep it serialized
       # before the final inbox lease-recovery integration suite.
