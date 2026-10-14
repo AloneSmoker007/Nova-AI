@@ -1332,10 +1332,31 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
         summary: summary?.summary,
         lastMessages: messages,
       });
+      const sourceMessageIds = messages.map((message) => message.id).filter(Boolean);
       const draft = await generateCopilotDraftReply({
         businessBrain: brain,
         copilotContext,
       });
+
+      // The user can delete a message while Gemini is generating. Require the
+      // entire source set and the exact summary snapshot to remain valid before
+      // persisting a draft that could be sent later.
+      if (sourceMessageIds.length > 0) {
+        const currentSources = await dbPool.query(
+          `SELECT count(*)::int AS count
+           FROM messages
+           WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL`,
+          [req.user.tenantId, sourceMessageIds],
+        );
+        if (currentSources.rows[0].count !== sourceMessageIds.length) {
+          throw new Error("Conversation messages changed or were deleted while drafting; retry");
+        }
+      }
+      const currentSummary = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
+      if (currentSummary?.id !== summary?.id) {
+        throw new Error("Conversation summary changed while drafting; retry");
+      }
+
       saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft, aiReservation.eventKey);
       if (aiReservation.reservationToken) {
         try {
