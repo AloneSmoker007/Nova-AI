@@ -21,7 +21,6 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
   let requireAuth;
   let issueRefreshToken;
   let revokeRefreshToken;
-  let hashToken;
 
   before(async () => {
     process.env.DATABASE_URL = integrationUrl;
