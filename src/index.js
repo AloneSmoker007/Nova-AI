@@ -465,6 +465,7 @@ async function processInboxMessage(inboxId, log = logger) {
         tenantId: message.tenant_id,
         contactId: persistedInbound.contactId,
         messageText: message.body,
+        sourceMessageId: persistedInbound.messageId,
       });
       if (savedMemories.length > 0) {
         log.info(
