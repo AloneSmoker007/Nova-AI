@@ -71,6 +71,7 @@ export async function getConversationMessages(tenantId, conversationId, { limit 
     `SELECT id, whatsapp_message_id, direction, message_type, text, status, created_at
      FROM messages
      WHERE tenant_id = $1 AND conversation_id = $2
+       AND deleted_at IS NULL
      ORDER BY created_at DESC
      LIMIT $3 OFFSET $4`,
     [tenantId, conversationId, limitValue, offsetValue],
