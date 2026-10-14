@@ -168,6 +168,11 @@ jobs:
       - name: Run webhook dead-letter operations integration tests
         run: node --test tests/webhook-dead-letter-operations.test.js
 
+      # Final-gate usage regression: enforce reservation ownership, stale-worker
+      # fencing, and cleanup when an AI operation reaches dead letter without output.
+      - name: Run AI reservation fencing integration tests
+        run: node --test tests/usage-reservation-fencing.test.js
+
       # Final-gate Redis check: prove BullMQ terminal job IDs can be re-enqueued
       # against a live Redis service rather than a deterministic queue double.
       - name: Run live Redis and BullMQ re-enqueue integration test
