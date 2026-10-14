@@ -74,7 +74,7 @@ test("every API route has authentication or is an explicit token/signature endpo
   assert.equal(new Set(seen).size, seen.length, "each method/path pair should have one handler");
 });
 
-test("privileged data/configuration endpoints retain owner/admin guards", () => {
+test("privileged data/configuration endpoints retain owner/admin guards", async () => {
   const routes = new Map(allApiRoutes().map((route) => [route.key, route.middleware]));
   const privileged = [
     "GET /api/contacts/:contactId/ai-memory",
