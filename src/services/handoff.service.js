@@ -213,17 +213,18 @@ export async function assignConversationRoundRobin(tenantId, conversationId, ski
   }
 }
 
-export async function saveCopilotDraft(tenantId, conversationId, userId, draft) {
+export async function saveCopilotDraft(tenantId, conversationId, userId, draft, usageEventKey = null) {
   assertDatabase();
   if (!validId(tenantId) || !validId(conversationId) || !validId(userId)) throw new Error("Invalid identifier");
+  if (usageEventKey !== null && !validId(usageEventKey)) throw new Error("Invalid AI usage event key");
   const text = cleanText(draft, 8000);
   const result = await dbPool.query(
-    `INSERT INTO ai_copilot_drafts (tenant_id, conversation_id, author_user_id, draft)
-     SELECT $1, $2, $3, $4
+    `INSERT INTO ai_copilot_drafts (tenant_id, conversation_id, author_user_id, draft, usage_event_key)
+     SELECT $1, $2, $3, $4, $5
      WHERE EXISTS (SELECT 1 FROM conversations WHERE tenant_id = $1 AND id = $2)
        AND EXISTS (SELECT 1 FROM users WHERE tenant_id = $1 AND id = $3 AND status = 'active')
      RETURNING id, conversation_id, author_user_id, draft, status, created_at`,
-    [tenantId, conversationId, userId, text],
+    [tenantId, conversationId, userId, text, usageEventKey],
   );
   if (!result.rows[0]) throw new Error("Conversation or user not found");
   return result.rows[0];
