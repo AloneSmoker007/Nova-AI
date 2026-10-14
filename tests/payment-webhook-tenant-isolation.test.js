@@ -45,7 +45,6 @@ let server;
 let baseUrl;
 let dbPool;
 let runMigrations;
-const realListen = express.application.listen;
 
 function fakeServer() {
   return {
