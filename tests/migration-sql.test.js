@@ -8,6 +8,7 @@ import {
   assertUniqueMigrationNames,
   compareMigrationFilenames,
   findDuplicateMigrationPrefixes,
+  migrationChecksum,
 } from "../src/database/migrate.js";
 
 const testsDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -109,6 +110,14 @@ test("migration files are contiguous, ordered by numeric prefix, and uniquely na
   numbers.forEach((number, index) => {
     assert.equal(number, index + 1, "migration numeric prefixes must stay contiguous");
   });
+});
+
+test("migration checksums are deterministic and change when applied SQL changes", () => {
+  const original = "ALTER TABLE example ADD COLUMN value TEXT;";
+  const checksum = migrationChecksum(original);
+  assert.match(checksum, /^[a-f0-9]{64}$/);
+  assert.equal(migrationChecksum(original), checksum);
+  assert.notEqual(migrationChecksum(original + "\\n"), checksum);
 });
 
 test("duplicate numeric prefixes and duplicate filenames are rejected", () => {
