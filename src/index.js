@@ -278,7 +278,10 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
       const inboxMessage = await ingestWebhookMessage({ message, tenant });
       // The retained canonical-message guard may mark a replay COMPLETED on
       // insertion. It must not launch automation side effects a second time.
-      if (inboxMessage.state !== "COMPLETED") {
+      if (inboxMessage.state !== "COMPLETED" && inboxMessage.is_new_delivery !== false) {
+        // Duplicate provider deliveries can return an existing RECEIVED or
+        // PROCESSING inbox row. Only the INSERT winner may create automation
+        // runs; inbox processing itself remains independently lease-fenced.
         await triggerWorkflows({
           tenantId: tenant.tenantId,
           triggerType: "message_received",
