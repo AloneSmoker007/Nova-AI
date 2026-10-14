@@ -1357,7 +1357,14 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
         throw new Error("Conversation summary changed while drafting; retry");
       }
 
-      saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft, aiReservation.eventKey);
+      saved = await saveCopilotDraft(
+        req.user.tenantId,
+        req.params.conversationId,
+        req.user.id,
+        draft,
+        aiReservation.eventKey,
+        { sourceMessageIds, expectedSummaryId: summary?.id ?? null },
+      );
       if (aiReservation.reservationToken) {
         try {
           await commitAiUsage({
