@@ -233,6 +233,7 @@ export async function reserveAiUsage({ tenantId, conversationId, messageId, what
   // ocr_document carries no conversation/message context; both stay NULL.
 
   const eventKey = aiUsageEventKeyForType(type, { messageId, whatsappMessageId });
+  const reservationToken = randomUUID();
   const client = await dbPool.connect();
 
   try {
@@ -248,16 +249,45 @@ export async function reserveAiUsage({ tenantId, conversationId, messageId, what
     if (tenantLock.rowCount === 0) throw new Error("Tenant not found");
 
     const existingEvent = await client.query(
-      `SELECT id FROM usage_events
+      `SELECT id, reservation_status, reservation_lease_until
+       FROM usage_events
        WHERE tenant_id = $1 AND event_key = $2
-       LIMIT 1`,
+       LIMIT 1
+       FOR UPDATE`,
       [tenantId, eventKey],
     );
     if (existingEvent.rowCount > 0) {
-      // This message already holds its AI reservation (durable-inbox retry
-      // after a crash mid-generation). Never self-block, never double-count.
+      const existing = existingEvent.rows[0];
+      if (existing.reservation_status === "committed") {
+        await client.query("COMMIT");
+        return { allowed: true, duplicate: true, committed: true, eventKey };
+      }
+
+      // Do not let a second worker generate in parallel while the current
+      // reservation lease is active. The retry can reclaim it after expiry.
+      const reclaimed = await client.query(
+        `UPDATE usage_events
+         SET reservation_token=$2,
+             reservation_lease_until=NOW() + INTERVAL '5 minutes'
+         WHERE id=$1
+           AND reservation_status='reserved'
+           AND reservation_lease_until <= NOW()
+         RETURNING id`,
+        [existing.id, reservationToken],
+      );
+      if (reclaimed.rowCount === 1) {
+        await client.query("COMMIT");
+        return {
+          allowed: true,
+          duplicate: true,
+          reclaimed: true,
+          eventKey,
+          reservationToken,
+        };
+      }
+
       await client.query("COMMIT");
-      return { allowed: true, duplicate: true };
+      return { allowed: true, duplicate: true, inProgress: true, eventKey };
     }
 
     const summary = await getUsageSummary(tenantId, { client });
@@ -272,17 +302,31 @@ export async function reserveAiUsage({ tenantId, conversationId, messageId, what
       return { allowed: false, used: decision.used, limit: decision.limit, percent: decision.percent };
     }
 
-    await client.query(
+    const inserted = await client.query(
       `INSERT INTO usage_events (
-         tenant_id, conversation_id, message_id, event_type, event_key, units, created_at
+         tenant_id, conversation_id, message_id, event_type, event_key, units, created_at,
+         reservation_status, reservation_token, reservation_lease_until
        )
-       VALUES ($1, $2, $3, $4, $5, 1, NOW())
-       ON CONFLICT (tenant_id, event_key) DO NOTHING`,
-      [tenantId, conversationId || null, messageId || null, type, eventKey],
+       VALUES ($1, $2, $3, $4, $5, 1, NOW(), 'reserved', $6, NOW() + INTERVAL '5 minutes')
+       ON CONFLICT (tenant_id, event_key) DO NOTHING
+       RETURNING id`,
+      [tenantId, conversationId || null, messageId || null, type, eventKey, reservationToken],
     );
 
+    if (inserted.rowCount !== 1) {
+      await client.query("ROLLBACK");
+      return reserveAiUsage({ tenantId, conversationId, messageId, whatsappMessageId, type });
+    }
+
     await client.query("COMMIT");
-    return { allowed: true, duplicate: false, used: decision.used + 1, limit: decision.limit, eventKey };
+    return {
+      allowed: true,
+      duplicate: false,
+      used: decision.used + 1,
+      limit: decision.limit,
+      eventKey,
+      reservationToken,
+    };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
@@ -296,18 +340,120 @@ export async function reserveAiUsage({ tenantId, conversationId, messageId, what
 // exists; a durable-inbox retry reserves again on its next attempt. The
 // release is restricted to the reservation's own event type so releasing one
 // operation can never delete another operation's reservation.
-export async function releaseAiUsage({ tenantId, messageId, whatsappMessageId, eventKey, type = "ai_message" } = {}) {
+export async function commitAiUsage({ tenantId, eventKey, reservationToken, type = "ai_message" } = {}) {
+  if (!isAiEventType(type)) throw new Error("Invalid AI usage event type");
+  assertDatabase();
+  if (!validTenantId(tenantId) || !validTenantId(eventKey) || !validTenantId(reservationToken)) {
+    throw new Error("Missing AI reservation identifiers");
+  }
+
+  const result = await dbPool.query(
+    `UPDATE usage_events
+     SET reservation_status='committed',
+         reservation_token=NULL,
+         reservation_lease_until=NULL
+     WHERE tenant_id=$1 AND event_key=$2 AND event_type=$3
+       AND reservation_status='reserved' AND reservation_token=$4::uuid
+     RETURNING id`,
+    [tenantId, eventKey, type, reservationToken],
+  );
+  return { committed: result.rowCount === 1 };
+}
+
+export async function releaseAiUsage({
+  tenantId,
+  messageId,
+  whatsappMessageId,
+  eventKey,
+  reservationToken,
+  type = "ai_message",
+} = {}) {
   if (!isAiEventType(type)) throw new Error("Invalid AI usage event type");
   assertDatabase();
   if (!validTenantId(tenantId)) throw new Error("Invalid tenant ID");
 
   const key = eventKey || aiUsageEventKeyForType(type, { messageId, whatsappMessageId });
   if (!validTenantId(key)) throw new Error("Missing usage identifiers");
+  // A caller without the current ownership token must never release a shared
+  // or already-committed event reservation.
+  if (!validTenantId(reservationToken)) return { released: false };
 
   const result = await dbPool.query(
     `DELETE FROM usage_events
-     WHERE tenant_id = $1 AND event_key = $2 AND event_type = $3`,
-    [tenantId, key, type],
+     WHERE tenant_id=$1 AND event_key=$2 AND event_type=$3
+       AND reservation_status='reserved' AND reservation_token=$4::uuid`,
+    [tenantId, key, type, reservationToken],
   );
   return { released: result.rowCount > 0 };
+}
+
+export async function reconcileExpiredAiUsageReservations(limit = 100) {
+  assertDatabase();
+  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const client = await dbPool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // A persisted generated response is already a successful billable result;
+    // finalize it if the worker died after saving the reply but before commit.
+    const finalized = await client.query(
+      `WITH stale AS (
+         SELECT u.id
+         FROM usage_events u
+         JOIN webhook_messages w
+           ON w.tenant_id=u.tenant_id
+          AND u.event_key='ai_message:' || w.whatsapp_message_id
+         WHERE u.event_type='ai_message'
+           AND u.reservation_status='reserved'
+           AND u.reservation_lease_until < NOW()
+           AND w.generated_response IS NOT NULL
+         ORDER BY u.reservation_lease_until
+         LIMIT $1
+         FOR UPDATE OF u SKIP LOCKED
+       )
+       UPDATE usage_events u
+       SET reservation_status='committed',
+           reservation_token=NULL,
+           reservation_lease_until=NULL
+       FROM stale
+       WHERE u.id=stale.id
+       RETURNING u.id`,
+      [safeLimit],
+    );
+
+    // A dead-lettered message with no persisted generated response can never
+    // use its AI reservation again. Release only expired reservations tied to
+    // that exact durable inbox record.
+    const released = await client.query(
+      `WITH stale AS (
+         SELECT u.id
+         FROM usage_events u
+         JOIN webhook_messages w
+           ON w.tenant_id=u.tenant_id
+          AND u.event_key='ai_message:' || w.whatsapp_message_id
+         WHERE u.event_type='ai_message'
+           AND u.reservation_status='reserved'
+           AND u.reservation_lease_until < NOW()
+           AND w.state='DEAD_LETTER'
+           AND w.generated_response IS NULL
+         ORDER BY u.reservation_lease_until
+         LIMIT $1
+         FOR UPDATE OF u SKIP LOCKED
+       )
+       DELETE FROM usage_events u
+       USING stale
+       WHERE u.id=stale.id
+       RETURNING u.id`,
+      [safeLimit],
+    );
+
+    await client.query("COMMIT");
+    return { committed: finalized.rowCount, released: released.rowCount };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
