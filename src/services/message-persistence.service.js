@@ -363,6 +363,13 @@ export async function persistDeletedInboundMessage({
     );
 
     if (existing.rowCount === 1) {
+      await purgeDeletedMessageAiArtifacts(
+        client,
+        tenantId,
+        contactId,
+        conversationId,
+        existing.rows[0].id,
+      );
       await client.query("COMMIT");
       return { foundExisting: true, conversationId, messageId: existing.rows[0].id };
     }
@@ -378,13 +385,24 @@ export async function persistDeletedInboundMessage({
       [tenantId, conversationId, whatsappMessageId, deletedAt],
     );
 
+    const deletedMessageId = created.rows[0]?.id ?? null;
+    if (deletedMessageId) {
+      await purgeDeletedMessageAiArtifacts(
+        client,
+        tenantId,
+        contactId,
+        conversationId,
+        deletedMessageId,
+      );
+    }
+
     await client.query(
       `UPDATE conversations SET last_message_at = GREATEST(last_message_at, $2), updated_at = NOW()
        WHERE tenant_id = $1 AND id = $3`,
       [tenantId, deletedAt, conversationId],
     );
     await client.query("COMMIT");
-    return { foundExisting: false, conversationId, messageId: created.rows[0]?.id ?? null };
+    return { foundExisting: false, conversationId, messageId: deletedMessageId };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
