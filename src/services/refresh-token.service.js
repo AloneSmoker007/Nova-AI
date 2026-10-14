@@ -93,6 +93,12 @@ export async function rotateRefreshToken(rawToken) {
          WHERE user_id = $1 AND tenant_id = $2 AND revoked_at IS NULL`,
         [row.user_id, row.tenant_id],
       );
+      await client.query(
+        `UPDATE users
+         SET token_version = token_version + 1
+         WHERE id = $1 AND tenant_id = $2`,
+        [row.user_id, row.tenant_id],
+      );
 
       await client.query("COMMIT");
       return null;
@@ -133,13 +139,47 @@ export async function revokeRefreshToken(rawToken) {
   assertDatabase();
 
   const tokenHash = hashToken(rawToken);
+  const client = await dbPool.connect();
 
-  await dbPool.query(
-    `UPDATE refresh_tokens
-     SET revoked_at = NOW()
-     WHERE token_hash = $1 AND revoked_at IS NULL`,
-    [tokenHash],
-  );
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `SELECT user_id, tenant_id
+       FROM refresh_tokens
+       WHERE token_hash = $1
+       FOR UPDATE`,
+      [tokenHash],
+    );
+    const row = result.rows[0];
+
+    if (!row) {
+      await client.query("COMMIT");
+      return false;
+    }
+
+    // Logout terminates all sessions for this account. Bumping token_version
+    // makes every already-issued access JWT fail requireAuth immediately.
+    await client.query(
+      `UPDATE refresh_tokens
+       SET revoked_at = COALESCE(revoked_at, NOW())
+       WHERE user_id = $1 AND tenant_id = $2`,
+      [row.user_id, row.tenant_id],
+    );
+    await client.query(
+      `UPDATE users
+       SET token_version = token_version + 1
+       WHERE id = $1 AND tenant_id = $2`,
+      [row.user_id, row.tenant_id],
+    );
+
+    await client.query("COMMIT");
+    return true;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function revokeAllUserTokens(userId, tenantId) {
