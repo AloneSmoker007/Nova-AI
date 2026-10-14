@@ -39,7 +39,7 @@ describe("PostgreSQL migration chain and checksum integrity", { skip }, () => {
       .map((entry) => entry.name)
       .sort(compareMigrationFilenames);
 
-    assert.ok(expectedFilenames.length >= 33, "expected the complete current migration chain including durable webhook replay keys");
+    assert.ok(expectedFilenames.length >= 34, "expected the complete current migration chain including memory provenance");
 
     if (allowReset) {
       await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
