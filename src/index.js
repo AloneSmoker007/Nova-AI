@@ -61,7 +61,7 @@ import {
 } from "./services/whatsapp-delivery.service.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
-import { registerInboundUsage, getUsageSummary, reserveAiUsage, releaseAiUsage } from "./services/usage.service.js";
+import { registerInboundUsage, getUsageSummary, reserveAiUsage, commitAiUsage, releaseAiUsage } from "./services/usage.service.js";
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
 import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotContext, setUserSkills } from "./services/handoff.service.js";
 import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers, listUnknownWorkflowWebhookEffects, resolveUnknownWorkflowWebhookEffect } from "./services/automation.service.js";
@@ -510,6 +510,12 @@ async function processInboxMessage(inboxId, log = logger) {
         throw usageError;
       }
 
+      if (aiReservation.inProgress) {
+        const reservationBusy = new Error("AI generation reservation is already active; retry later");
+        reservationBusy.code = "AI_RESERVATION_IN_PROGRESS";
+        throw reservationBusy;
+      }
+
       if (!aiReservation.allowed) {
         // Same safe fallback as the AI-paused path: no reply is sent, nothing
         // pretends an AI response went out, the message stays visible in the
@@ -565,6 +571,24 @@ async function processInboxMessage(inboxId, log = logger) {
 
         reply = await generateGeminiReply(message.body, aiBrain);
         reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
+
+        // Persisting the generated response is the durable success boundary.
+        // Failure to clear reservation metadata must not release a billable
+        // successful generation; the reconciler can finalize it from this row.
+        if (aiReservation.reservationToken) {
+          try {
+            await commitAiUsage({
+              tenantId: message.tenant_id,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+            });
+          } catch (commitError) {
+            log.warn(
+              { tenantId: message.tenant_id, inboxId: message.id, error: commitError.message },
+              "AI reply saved but reservation finalization will be reconciled",
+            );
+          }
+        }
       } catch (aiError) {
         // Any failure after reservation but before a successful durable AI response
         // must release the reservation. This includes context/signal/memory work,
@@ -574,6 +598,8 @@ async function processInboxMessage(inboxId, log = logger) {
             tenantId: message.tenant_id,
             messageId: persistedInbound.messageId,
             whatsappMessageId: message.whatsapp_message_id,
+            eventKey: aiReservation.eventKey,
+            reservationToken: aiReservation.reservationToken,
           });
         } catch (releaseError) {
           log.warn(
@@ -1253,6 +1279,9 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
       conversationId: req.params.conversationId,
       type: "copilot_draft",
     });
+    if (aiReservation.inProgress) {
+      return res.status(409).json({ status: "error", error: "An AI draft operation is already in progress" });
+    }
     if (!aiReservation.allowed) {
       return res.status(429).json({ status: "error", error: "AI usage hard limit reached" });
     }
@@ -1271,11 +1300,26 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
         copilotContext,
       });
       saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
+      if (aiReservation.reservationToken) {
+        try {
+          await commitAiUsage({
+            tenantId: req.user.tenantId,
+            eventKey: aiReservation.eventKey,
+            reservationToken: aiReservation.reservationToken,
+            type: "copilot_draft",
+          });
+        } catch (commitError) {
+          logger.warn(
+            { tenantId: req.user.tenantId, conversationId: req.params.conversationId, error: commitError.message },
+            "Copilot draft saved but reservation finalization will be reconciled",
+          );
+        }
+      }
     } catch (error) {
       // Any post-reservation failure (context, provider, or persistence) must
       // not leave a reservation behind; failed attempts consume no quota.
       try {
-        await releaseAiUsage({ tenantId: req.user.tenantId, eventKey: aiReservation.eventKey, type: "copilot_draft" });
+        await releaseAiUsage({ tenantId: req.user.tenantId, eventKey: aiReservation.eventKey, reservationToken: aiReservation.reservationToken, type: "copilot_draft" });
       } catch {
         // Release failure leaves a bounded orphan (one unit); nothing else to do.
       }
