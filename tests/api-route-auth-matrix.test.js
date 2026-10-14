@@ -90,6 +90,8 @@ test("privileged data/configuration endpoints retain owner/admin guards", () => 
     "PUT /api/business-brain",
     "GET /api/webhook-inbox/dead-letters",
     "POST /api/webhook-inbox/dead-letters/:inboxId/retry",
+    "GET /api/automations/webhook-effects/unknown",
+    "POST /api/automations/webhook-effects/:effectId/resolve",
   ];
 
   for (const key of privileged) {
