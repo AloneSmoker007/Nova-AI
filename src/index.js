@@ -1723,12 +1723,19 @@ if (!IS_PRODUCTION) {
           providerCallStarted = true;
           const reply = await generateGeminiReply(value.message);
           if (aiReservation.reservationToken) {
-            await commitAiUsage({
-              tenantId: req.user.tenantId,
-              eventKey: aiReservation.eventKey,
-              reservationToken: aiReservation.reservationToken,
-              type: "ai_diagnostic",
-            });
+            try {
+              await commitAiUsage({
+                tenantId: req.user.tenantId,
+                eventKey: aiReservation.eventKey,
+                reservationToken: aiReservation.reservationToken,
+                type: "ai_diagnostic",
+              });
+            } catch (commitError) {
+              req.log.warn(
+                { error: commitError.message, tenantId: req.user.tenantId },
+                "Diagnostic reply returned but usage finalization will be reconciled",
+              );
+            }
           }
           return res.status(200).json({ status: "ok", reply });
         } catch (error) {
