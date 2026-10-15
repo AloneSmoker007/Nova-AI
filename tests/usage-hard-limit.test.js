@@ -250,6 +250,11 @@ test("every billable Gemini operation shares the existing monthly AI limit", () 
     reserve.includes("conversationId || null"),
     "OCR reservations must tolerate missing conversation context",
   );
+  const reconciler = usageSource.slice(usageSource.indexOf("export async function reconcileExpiredAiUsageReservations"));
+  assert.ok(
+    reconciler.includes("event_type='ai_diagnostic'") && reconciler.includes("diagnosticCommitted.rowCount"),
+    "abandoned diagnostic reservations must be conservatively finalized after their lease expires",
+  );
 });
 
 test("inbound AI reservations keep deterministic retry keys; other types use per-call keys", () => {
