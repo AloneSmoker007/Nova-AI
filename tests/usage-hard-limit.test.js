@@ -150,7 +150,7 @@ test("AI usage cleanup distinguishes pre-provider failures from uncertain provid
   assert.ok(aiSection.includes("throw aiError;"), "failed attempts must preserve durable-inbox retry semantics");
 });
 
-test("failed AI generations conservatively retain usage when provider spend is uncertain", () => {
+test("failed AI generations conservatively retain usage and do not repeat uncertain provider calls", () => {
   const aiSection = sliceBetween(
     indexSource,
     "Hard usage limit gate",
@@ -163,6 +163,16 @@ test("failed AI generations conservatively retain usage when provider spend is u
   assert.ok(
     aiSection.includes("Failed to release pre-provider AI usage reservation"),
     "pre-provider cleanup failures must be observable",
+  );
+  const committedGuard = aiSection.indexOf("if (aiReservation.committed && !message.generated_response)");
+  assert.ok(committedGuard >= 0, "committed usage without a saved reply must have a retry guard");
+  assert.ok(
+    committedGuard < aiSection.indexOf("generateGeminiReply(message.body"),
+    "an uncertain, already-committed attempt must not invoke Gemini again",
+  );
+  assert.ok(
+    aiSection.slice(committedGuard).includes("markCompleted(message.id, message.tenant_id, leaseToken, null)"),
+    "uncertain retries must stop safely and hand the conversation to a human",
   );
 });
 
