@@ -23,7 +23,7 @@ export function aiUsageEventKey({ messageId, whatsappMessageId }) {
 // (monthly_ai_message_limit) under the existing hard_limit_enabled flag.
 // Distinct event types keep operations auditable without introducing new
 // billing plans; extending this list requires no schema migration.
-export const AI_EVENT_TYPES = ["ai_message", "copilot_draft", "ocr_document"];
+export const AI_EVENT_TYPES = ["ai_message", "copilot_draft", "ocr_document", "ai_diagnostic"];
 
 function isAiEventType(type) {
   return AI_EVENT_TYPES.includes(type);
@@ -149,7 +149,7 @@ export async function getUsageSummary(tenantId, { monthStart = null, client = nu
     `SELECT
        COALESCE((SELECT COUNT(*) FROM conversation_windows cw
          WHERE cw.tenant_id = $1 AND cw.created_at >= $2), 0)::int AS conversations,
-       COALESCE(SUM(CASE WHEN ue.event_type IN ('ai_message', 'copilot_draft', 'ocr_document') THEN ue.units ELSE 0 END), 0)::int AS ai_messages,
+       COALESCE(SUM(CASE WHEN ue.event_type IN ('ai_message', 'copilot_draft', 'ocr_document', 'ai_diagnostic') THEN ue.units ELSE 0 END), 0)::int AS ai_messages,
        COALESCE(SUM(CASE WHEN ue.event_type = 'media_message' THEN ue.units ELSE 0 END), 0)::int AS media_messages
      FROM usage_events ue
      WHERE ue.tenant_id = $1 AND ue.created_at >= $2`,
