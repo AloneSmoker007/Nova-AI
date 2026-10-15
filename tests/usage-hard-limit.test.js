@@ -129,40 +129,40 @@ test("blocked AI attempts take the safe human-handoff fallback and are not doubl
   );
 });
 
-test("any post-reservation pre-success AI failure releases the reservation", () => {
+test("AI usage cleanup distinguishes pre-provider failures from uncertain provider spend", () => {
   const aiSection = sliceBetween(
     indexSource,
     "Hard usage limit gate",
     "if (message.provider_message_id)",
   );
   const reservation = aiSection.indexOf("reserveAiUsage({");
-  const cleanup = aiSection.lastIndexOf("releaseAiUsage({");
   const generation = aiSection.indexOf("generateGeminiReply(message.body");
   const save = aiSection.indexOf("saveGeneratedResponse(");
 
   assert.ok(reservation >= 0, "AI flow must reserve usage before provider work");
-  assert.ok(cleanup > reservation, "AI flow must release usage after a reservation failure path");
   assert.ok(generation > reservation, "Gemini must run after reservation");
   assert.ok(save > generation, "generated response must be durably saved after Gemini");
-  assert.ok(
-    aiSection.slice(cleanup).includes("throw aiError;"),
-    "cleanup path must rethrow so durable inbox retry semantics are preserved",
-  );
+  assert.ok(aiSection.includes("let providerCallStarted = false;"), "provider dispatch must be tracked");
+  assert.ok(aiSection.includes("providerCallStarted = true;"), "mark the reservation uncertain before dispatch");
+  assert.ok(aiSection.includes("if (providerCallStarted)"), "cleanup must branch on provider dispatch");
+  assert.ok(aiSection.includes("await commitAiUsage({"), "uncertain provider spend must be metered");
+  assert.ok(aiSection.includes("await releaseAiUsage({"), "pre-provider failures must release quota");
+  assert.ok(aiSection.includes("throw aiError;"), "failed attempts must preserve durable-inbox retry semantics");
 });
 
-test("failed AI generations release the reservation so retries are not double-billed", () => {
-  const guardedCall = sliceBetween(
+test("failed AI generations conservatively retain usage when provider spend is uncertain", () => {
+  const aiSection = sliceBetween(
     indexSource,
-    "reply = await generateGeminiReply(message.body, aiBrain);",
-    "Failed to release reserved AI usage",
+    "Hard usage limit gate",
+    "if (message.provider_message_id)",
   );
   assert.ok(
-    guardedCall.includes("releaseAiUsage"),
-    "generation failure must release the reservation",
+    aiSection.includes("AI provider may have been charged; usage reservation remains for reconciliation"),
+    "provider errors must not silently erase potentially billable usage",
   );
   assert.ok(
-    indexSource.includes("throw aiError;"),
-    "generation failure must still fail the attempt",
+    aiSection.includes("Failed to release pre-provider AI usage reservation"),
+    "pre-provider cleanup failures must be observable",
   );
 });
 
@@ -265,9 +265,18 @@ test("copilot draft route reserves quota before any context work or Gemini call"
   assert.ok(route.indexOf("generateCopilotDraftReply") > reserveAt, "dedicated Gemini Copilot generation must follow the reservation");
   assert.ok(route.includes("status(429)"), "blocked copilot drafts must return 429 without calling Gemini");
   assert.ok(
-    route.indexOf("releaseAiUsage({") > route.indexOf("generateCopilotDraftReply") &&
-      route.includes('eventKey: aiReservation.eventKey, reservationToken: aiReservation.reservationToken, type: "copilot_draft"'),
-    "any post-reservation copilot failure must release its own reservation",
+    route.includes("let providerCallStarted = false;") &&
+      route.includes("providerCallStarted = true;") &&
+      route.includes("if (providerCallStarted)"),
+    "Copilot must distinguish pre-provider failures from uncertain provider spend",
+  );
+  assert.ok(
+    route.includes("await commitAiUsage({") && route.includes("await releaseAiUsage({"),
+    "Copilot must meter uncertain provider outcomes and release only pre-dispatch failures",
+  );
+  assert.ok(
+    route.includes("Copilot provider may have been charged; usage reservation remains for reconciliation"),
+    "uncertain Copilot provider spend must be logged and retained",
   );
 });
 
