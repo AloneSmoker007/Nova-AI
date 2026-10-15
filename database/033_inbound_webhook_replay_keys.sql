@@ -19,8 +19,10 @@ INSERT INTO inbound_webhook_replay_keys
   (tenant_id, whatsapp_message_id, phone_number_id, first_received_at)
 SELECT m.tenant_id, m.whatsapp_message_id, n.phone_number_id, MIN(m.created_at)
 FROM messages m
+JOIN conversations c
+  ON c.tenant_id=m.tenant_id AND c.id=m.conversation_id
 JOIN whatsapp_numbers n
-  ON n.tenant_id=m.tenant_id AND n.id=m.whatsapp_number_id
+  ON n.tenant_id=c.tenant_id AND n.id=c.whatsapp_number_id
 WHERE m.whatsapp_message_id IS NOT NULL
 GROUP BY m.tenant_id, m.whatsapp_message_id, n.phone_number_id
 ON CONFLICT (tenant_id, whatsapp_message_id) DO NOTHING;
