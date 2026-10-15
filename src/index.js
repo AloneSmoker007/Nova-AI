@@ -550,6 +550,7 @@ async function processInboxMessage(inboxId, log = logger) {
         return;
       }
 
+      let providerCallStarted = false;
       try {
         let brain = null;
         try {
@@ -584,16 +585,17 @@ async function processInboxMessage(inboxId, log = logger) {
           ? { ...brain, advancedContext }
           : { advancedContext };
 
+        // After dispatch, provider spend may have occurred even if the
+        // request errors or the customer deletes the source message.
+        providerCallStarted = true;
         reply = await generateGeminiReply(message.body, aiBrain);
 
         // Recheck after the provider call. If Meta's deletion webhook landed
-        // while Gemini was generating, release only this reservation and do
-        // not persist or send the generated text.
+        // while Gemini was generating, do not persist/send its text, but retain
+        // the usage charge because provider work has already occurred.
         if (await isInboundMessageDeleted(message.tenant_id, persistedInbound.messageId)) {
-          await releaseAiUsage({
+          await commitAiUsage({
             tenantId: message.tenant_id,
-            messageId: persistedInbound.messageId,
-            whatsappMessageId: message.whatsapp_message_id,
             eventKey: aiReservation.eventKey,
             reservationToken: aiReservation.reservationToken,
           });
@@ -621,22 +623,39 @@ async function processInboxMessage(inboxId, log = logger) {
           }
         }
       } catch (aiError) {
-        // Any failure after reservation but before a successful durable AI response
-        // must release the reservation. This includes context/signal/memory work,
-        // Gemini failures, and saveGeneratedResponse failures.
-        try {
-          await releaseAiUsage({
-            tenantId: message.tenant_id,
-            messageId: persistedInbound.messageId,
-            whatsappMessageId: message.whatsapp_message_id,
-            eventKey: aiReservation.eventKey,
-            reservationToken: aiReservation.reservationToken,
-          });
-        } catch (releaseError) {
-          log.warn(
-            { error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id },
-            "Failed to release reserved AI usage",
-          );
+        if (providerCallStarted) {
+          // Gemini may have processed the request even if generation or saving
+          // failed. Conservatively count the operation rather than allowing a
+          // durable-inbox retry to incur unmetered provider spend.
+          try {
+            await commitAiUsage({
+              tenantId: message.tenant_id,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+            });
+          } catch (commitError) {
+            log.warn(
+              { error: commitError.message, tenantId: message.tenant_id, inboxId: message.id },
+              "AI provider may have been charged; usage reservation remains for reconciliation",
+            );
+          }
+        } else {
+          // Failures during local context preparation happen before dispatch
+          // and can safely release the reservation for a retry.
+          try {
+            await releaseAiUsage({
+              tenantId: message.tenant_id,
+              messageId: persistedInbound.messageId,
+              whatsappMessageId: message.whatsapp_message_id,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+            });
+          } catch (releaseError) {
+            log.warn(
+              { error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id },
+              "Failed to release pre-provider AI usage reservation",
+            );
+          }
         }
         throw aiError;
       }
