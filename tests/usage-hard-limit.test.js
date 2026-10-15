@@ -231,7 +231,7 @@ test("usage gate and fallback never log message bodies or AI content", () => {
 test("every billable Gemini operation shares the existing monthly AI limit", () => {
   assert.deepEqual(
     [...usageService.AI_EVENT_TYPES].sort(),
-    ["ai_message", "copilot_draft", "ocr_document"],
+    ["ai_diagnostic", "ai_message", "copilot_draft", "ocr_document"],
     "copilot and OCR must be billable AI event types",
   );
   const reserve = usageSource.slice(
@@ -338,6 +338,13 @@ test("the dev-only Gemini test route is privileged and rate-limited", () => {
     indexSource,
     /const geminiTestLimiter = rateLimit\(\{\s*windowMs: 15 \* 60 \* 1000,\s*max: 5,/,
     "the per-IP diagnostic limit must stay at five requests per fifteen minutes",
+  );
+  assert.ok(route.includes('type: "ai_diagnostic"'), "diagnostic Gemini calls must reserve shared AI quota");
+  assert.ok(route.includes("await commitAiUsage({"), "diagnostic provider calls must be metered");
+  assert.ok(route.includes("await releaseAiUsage({"), "pre-provider diagnostic failures must release reservations");
+  assert.ok(
+    route.indexOf("reserveAiUsage({") < route.indexOf("generateGeminiReply(value.message)"),
+    "diagnostic quota must be reserved before calling Gemini",
   );
 });
 
