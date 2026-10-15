@@ -149,7 +149,7 @@ describe("automation webhook external-effect reconciliation (PostgreSQL)", { ski
       );
       assert.equal(stored.rows[0].status, "failed");
       assert.equal(stored.rows[0].current_step, 0);
-      assert.match(stored.rows[0].last_error, /manual reconciliation required/);
+      assert.match(stored.rows[0].last_error, /owner\/admin reconciliation required/);
       assert.equal(calls, 1);
 
       const unknown = await dbPool.query(
