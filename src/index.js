@@ -1327,6 +1327,7 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
     }
 
     let saved;
+    let providerCallStarted = false;
     try {
       const messages = await getConversationMessages(req.user.tenantId, req.params.conversationId, { limit: 12, offset: 0 });
       const summary = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
@@ -1336,6 +1337,9 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
         lastMessages: messages,
       });
       const sourceMessageIds = messages.map((message) => message.id).filter(Boolean);
+      // Once dispatched, a timeout/network error cannot prove Gemini did
+      // not process the request, so retain quota for uncertain provider spend.
+      providerCallStarted = true;
       const draft = await generateCopilotDraftReply({
         businessBrain: brain,
         copilotContext,
@@ -1384,12 +1388,37 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
         }
       }
     } catch (error) {
-      // Any post-reservation failure (context, provider, or persistence) must
-      // not leave a reservation behind; failed attempts consume no quota.
-      try {
-        await releaseAiUsage({ tenantId: req.user.tenantId, eventKey: aiReservation.eventKey, reservationToken: aiReservation.reservationToken, type: "copilot_draft" });
-      } catch {
-        // Release failure leaves a bounded orphan (one unit); nothing else to do.
+      if (providerCallStarted) {
+        // Gemini may have spent quota even if drafting/persistence failed.
+        // Commit conservatively to avoid a retry receiving an unmetered call.
+        try {
+          await commitAiUsage({
+            tenantId: req.user.tenantId,
+            eventKey: aiReservation.eventKey,
+            reservationToken: aiReservation.reservationToken,
+            type: "copilot_draft",
+          });
+        } catch (commitError) {
+          logger.warn(
+            { tenantId: req.user.tenantId, conversationId: req.params.conversationId, error: commitError.message },
+            "Copilot provider may have been charged; usage reservation remains for reconciliation",
+          );
+        }
+      } else {
+        // Context/validation failures before dispatch cannot incur Gemini spend.
+        try {
+          await releaseAiUsage({
+            tenantId: req.user.tenantId,
+            eventKey: aiReservation.eventKey,
+            reservationToken: aiReservation.reservationToken,
+            type: "copilot_draft",
+          });
+        } catch (releaseError) {
+          logger.warn(
+            { tenantId: req.user.tenantId, conversationId: req.params.conversationId, error: releaseError.message },
+            "Failed to release pre-provider Copilot usage reservation",
+          );
+        }
       }
       throw error;
     }
