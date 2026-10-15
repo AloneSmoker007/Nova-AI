@@ -28,7 +28,18 @@ test("customer memory context is never treated as instructions", async () => {
 test("saved customer memory strips bidi, zero-width and control characters", () => {
   const cleaned = sanitizeMemoryValue("vip\u202Ecustomer\u200Bname\u2066secret\u2069\u0007");
   assert.equal(cleaned, "vip customer name secret");
-  assert.doesNotMatch(cleaned, /[\u0000-\u001f\u007f\u200b\ufeff\u202a-\u202e\u2066-\u2069]/);
+  const hasForbiddenCodePoint = [...cleaned].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return (
+      codePoint <= 0x1f ||
+      codePoint === 0x7f ||
+      codePoint === 0x200b ||
+      codePoint === 0xfeff ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069)
+    );
+  });
+  assert.equal(hasForbiddenCodePoint, false);
 });
 
 test("competitor requests are explicitly detected", async () => {
