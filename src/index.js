@@ -1706,8 +1706,63 @@ if (!IS_PRODUCTION) {
       try {
         const { error, value } = geminiTestSchema.validate(req.body);
         if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
-        const reply = await generateGeminiReply(value.message);
-        return res.status(200).json({ status: "ok", reply });
+
+        const aiReservation = await reserveAiUsage({
+          tenantId: req.user.tenantId,
+          type: "ai_diagnostic",
+        });
+        if (aiReservation.inProgress) {
+          return res.status(409).json({ status: "error", message: "An AI diagnostic is already in progress" });
+        }
+        if (!aiReservation.allowed) {
+          return res.status(429).json({ status: "error", message: "AI usage hard limit reached" });
+        }
+
+        let providerCallStarted = false;
+        try {
+          providerCallStarted = true;
+          const reply = await generateGeminiReply(value.message);
+          if (aiReservation.reservationToken) {
+            await commitAiUsage({
+              tenantId: req.user.tenantId,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+              type: "ai_diagnostic",
+            });
+          }
+          return res.status(200).json({ status: "ok", reply });
+        } catch (error) {
+          if (providerCallStarted) {
+            try {
+              await commitAiUsage({
+                tenantId: req.user.tenantId,
+                eventKey: aiReservation.eventKey,
+                reservationToken: aiReservation.reservationToken,
+                type: "ai_diagnostic",
+              });
+            } catch (commitError) {
+              req.log.warn(
+                { error: commitError.message, tenantId: req.user.tenantId },
+                "Diagnostic provider may have been charged; usage reservation remains for reconciliation",
+              );
+            }
+          } else {
+            try {
+              await releaseAiUsage({
+                tenantId: req.user.tenantId,
+                eventKey: aiReservation.eventKey,
+                reservationToken: aiReservation.reservationToken,
+                type: "ai_diagnostic",
+              });
+            } catch (releaseError) {
+              req.log.warn(
+                { error: releaseError.message, tenantId: req.user.tenantId },
+                "Failed to release pre-provider diagnostic reservation",
+              );
+            }
+          }
+          throw error;
+        }
       } catch (error) {
         return next(error);
       }
