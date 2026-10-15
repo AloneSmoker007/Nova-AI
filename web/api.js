@@ -26,6 +26,7 @@ window.NovaAPI=(()=>{
     me:()=>request("/api/auth/me"),
     logout:async()=>{const refresh=get(REFRESH);try{if(refresh)await request("/api/auth/logout",{method:"POST",body:json({refreshToken:refresh})});}finally{set(KEY,null);set(REFRESH,null);if(!isLoginPage())location.href="./login.html";}},
     dashboard:()=>request("/api/dashboard/summary"), usage:()=>request("/api/usage"),
+    assistantAsk:question=>request("/api/assistant/ask",{method:"POST",body:json({question})}),
     conversations:(params={})=>request("/api/conversations"+q(params)),
     messages:(id,params={})=>request("/api/conversations/"+id+"/messages"+q(params)),
     readConversation:id=>request("/api/conversations/"+id+"/read",{method:"POST"}),

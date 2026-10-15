@@ -9,7 +9,7 @@ import Joi from "joi";
 import { checkDatabaseReadiness, closeDatabaseConnection, isDatabaseConfigured, dbPool } from "./config/database.js";
 import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
-import { generateCopilotDraftReply, generateGeminiReply } from "./services/gemini.service.js";
+import { generateCopilotDraftReply, generateGeminiReply, generateWorkspaceAssistantReply } from "./services/gemini.service.js";
 import {
   isAmbiguousWhatsAppSendError,
   sendWhatsAppMessage,
@@ -125,6 +125,14 @@ const geminiTestLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { status: "error", error: "Too many AI diagnostic requests. Please try again later." },
+});
+
+const workspaceAssistantLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: "error", error: "Too many Nova Assistant questions. Please try again shortly." },
 });
 
 app.use(express.json({
@@ -1032,6 +1040,106 @@ app.get("/api/usage", requireAuth, async (req, res) => {
     return res.status(500).json({ status: "error", error: "Failed to fetch usage summary" });
   }
 });
+
+const workspaceAssistantSchema = Joi.object({
+  question: Joi.string().trim().min(1).max(2000).required(),
+});
+
+app.post("/api/assistant/ask", workspaceAssistantLimiter, requireAuth, async (req, res, next) => {
+  let reservation = null;
+  try {
+    const { error, value } = workspaceAssistantSchema.validate(req.body);
+    if (error) return res.status(400).json({ status: "error", error: "Enter a question up to 2000 characters." });
+
+    const tenantId = req.user.tenantId;
+    reservation = await reserveAiUsage({ tenantId, type: "assistant_query" });
+    if (!reservation.allowed) {
+      return res.status(429).json({ status: "error", error: "AI usage hard limit reached" });
+    }
+
+    try {
+      const generatedAt = new Date();
+      const until = new Date(generatedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+      const [dashboard, conversationRows, appointmentRows, paymentRows, usage, brain] = await Promise.all([
+        getDashboardSummary(tenantId),
+        listConversations(tenantId, { limit: 12 }),
+        listAppointments(tenantId, { from: generatedAt.toISOString(), to: until.toISOString() }),
+        listPayments(tenantId, { limit: 12 }),
+        getUsageSummary(tenantId),
+        getBusinessBrain(tenantId),
+      ]);
+
+      // Share only bounded operational facts. Raw customer message bodies, phone
+      // numbers, provider IDs and full payment/appointment records are never
+      // included in the workspace prompt.
+      const workspaceContext = {
+        generatedAt: generatedAt.toISOString(),
+        period: "Dashboard totals are all-time; usage totals and limits are for the current UTC month; appointments cover the next 7 days.",
+        dashboard: {
+          messages: dashboard.messages,
+          conversations: dashboard.conversations,
+          aiReplies: dashboard.aiReplies,
+          revenueMinor: dashboard.revenueMinor,
+          upcomingAppointments: dashboard.upcomingAppointments,
+        },
+        usage: {
+          periodStart: usage.periodStart,
+          usage: usage.usage,
+          limits: usage.limits,
+        },
+        conversations: conversationRows.slice(0, 8).map((item, index) => ({
+          label: item.display_name || `Conversation ${index + 1}`,
+          status: item.status,
+          priority: item.priority,
+          unreadCount: item.unread_count,
+          lastMessageAt: item.last_message_at,
+          tags: Array.isArray(item.tags) ? item.tags.slice(0, 3) : [],
+        })),
+        appointments: appointmentRows
+          .filter((item) => ["pending", "confirmed"].includes(item.status))
+          .slice(0, 8)
+          .map((item) => ({
+            title: item.title || "Appointment",
+            status: item.status,
+            startsAt: item.starts_at,
+            timezone: item.timezone,
+          })),
+        payments: paymentRows.slice(0, 8).map((item) => ({
+          status: item.status,
+          currency: item.currency,
+          amountMinor: item.amount_minor,
+          createdAt: item.created_at,
+        })),
+      };
+
+      const answer = await generateWorkspaceAssistantReply({
+        question: value.question,
+        businessBrain: brain,
+        workspaceContext,
+      });
+      req.log?.info({ tenantId }, "Nova workspace assistant answered a read-only question");
+      return res.status(200).json({
+        status: "ok",
+        data: { answer, generatedAt: generatedAt.toISOString() },
+      });
+    } catch (error) {
+      try {
+        if (reservation.eventKey) {
+          await releaseAiUsage({ tenantId, eventKey: reservation.eventKey, type: "assistant_query" });
+        }
+      } catch {
+        // A failed release leaves at most one bounded reservation; preserve the original error.
+      }
+      throw error;
+    }
+  } catch (error) {
+    if (error.message.startsWith("Invalid") || error.message.includes("too large") || error.message.includes("too long")) {
+      return res.status(400).json({ status: "error", error: error.message });
+    }
+    return next(error);
+  }
+});
+
 
 app.get(
   "/api/webhook-inbox/dead-letters",

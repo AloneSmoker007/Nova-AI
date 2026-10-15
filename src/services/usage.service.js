@@ -19,17 +19,17 @@ export function aiUsageEventKey({ messageId, whatsappMessageId }) {
 }
 
 // Every billable Gemini operation — inbound auto-reply, agent copilot draft,
-// and OCR extraction — shares the tenant's existing monthly AI limit
+// workspace assistant query and OCR extraction — shares the tenant's existing monthly AI limit
 // (monthly_ai_message_limit) under the existing hard_limit_enabled flag.
 // Distinct event types keep operations auditable without introducing new
 // billing plans; extending this list requires no schema migration.
-export const AI_EVENT_TYPES = ["ai_message", "copilot_draft", "ocr_document"];
+export const AI_EVENT_TYPES = ["ai_message", "copilot_draft", "ocr_document", "assistant_query"];
 
 function isAiEventType(type) {
   return AI_EVENT_TYPES.includes(type);
 }
 
-// Copilot and OCR operations have no provider-side message id; each call
+// Copilot, OCR and workspace assistant operations have no provider-side message id; each call
 // reserves its own event with a collision-free random key. Inbound messages
 // keep the H1 key so durable-inbox retries stay idempotent.
 export function aiUsageEventKeyForType(type, { messageId, whatsappMessageId } = {}) {
@@ -149,7 +149,7 @@ export async function getUsageSummary(tenantId, { monthStart = null, client = nu
     `SELECT
        COALESCE((SELECT COUNT(*) FROM conversation_windows cw
          WHERE cw.tenant_id = $1 AND cw.created_at >= $2), 0)::int AS conversations,
-       COALESCE(SUM(CASE WHEN ue.event_type IN ('ai_message', 'copilot_draft', 'ocr_document') THEN ue.units ELSE 0 END), 0)::int AS ai_messages,
+       COALESCE(SUM(CASE WHEN ue.event_type IN ('ai_message', 'copilot_draft', 'ocr_document', 'assistant_query') THEN ue.units ELSE 0 END), 0)::int AS ai_messages,
        COALESCE(SUM(CASE WHEN ue.event_type = 'media_message' THEN ue.units ELSE 0 END), 0)::int AS media_messages
      FROM usage_events ue
      WHERE ue.tenant_id = $1 AND ue.created_at >= $2`,
@@ -230,7 +230,7 @@ export async function reserveAiUsage({ tenantId, conversationId, messageId, what
   } else if (type === "copilot_draft") {
     if (!validTenantId(conversationId)) throw new Error("Invalid conversation ID");
   }
-  // ocr_document carries no conversation/message context; both stay NULL.
+  // ocr_document and assistant_query carry no conversation/message context; both stay NULL.
 
   const eventKey = aiUsageEventKeyForType(type, { messageId, whatsappMessageId });
   const client = await dbPool.connect();
