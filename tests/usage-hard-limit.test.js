@@ -271,7 +271,7 @@ test("copilot draft route reserves quota before any context work or Gemini call"
   );
 });
 
-test("OCR extraction reserves quota before the Gemini call and releases on failure", () => {
+test("OCR reserves before Gemini, releases pre-dispatch failures, and charges uncertain provider outcomes", () => {
   const extract = sliceBetween(
     ocrSource,
     "export async function extractTextFromDocument",
@@ -291,9 +291,20 @@ test("OCR extraction reserves quota before the Gemini call and releases on failu
     "blocked OCR must fail before any provider call",
   );
   assert.ok(
-    extract.includes("releaseAiUsage({") &&
-      extract.includes('eventKey: aiReservation.eventKey, reservationToken: aiReservation.reservationToken, type: "ocr_document"'),
-    "any post-reservation OCR failure must release its own reservation",
+    extract.includes("let providerCallStarted = false;") &&
+      extract.includes("providerCallStarted = true;"),
+    "the service must distinguish failures before dispatch from uncertain provider outcomes",
+  );
+  assert.ok(
+    extract.includes("if (providerCallStarted)") &&
+      extract.includes("await commitAiUsage({") &&
+      extract.includes("await releaseAiUsage({"),
+    "provider-dispatched failures must retain/commit quota while pre-dispatch failures release it",
+  );
+  assert.ok(
+    extract.includes("Do not release quota and permit a retry to") &&
+      extract.includes("Failed to release pre-provider OCR usage reservation"),
+    "the uncertain-spend tradeoff must be explicit and release failures observable",
   );
 });
 
