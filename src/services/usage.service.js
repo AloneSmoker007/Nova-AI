@@ -495,6 +495,29 @@ export async function reconcileExpiredAiUsageReservations(limit = 100) {
       [safeLimit],
     );
 
+    // Diagnostic results are intentionally not persisted. If a process dies
+    // after reserving or dispatching Gemini, the outcome is unknowable; retain
+    // the usage charge after lease expiry rather than silently refunding a
+    // potentially billable provider call.
+    const diagnosticCommitted = await client.query(
+      `UPDATE usage_events
+       SET reservation_status='committed',
+           reservation_token=NULL,
+           reservation_lease_until=NULL
+       WHERE id IN (
+         SELECT id
+         FROM usage_events
+         WHERE event_type='ai_diagnostic'
+           AND reservation_status='reserved'
+           AND reservation_lease_until < NOW()
+         ORDER BY reservation_lease_until
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING id`,
+      [safeLimit],
+    );
+
     // Expired non-inbound reservations without a corresponding durable result
     // are abandoned attempts. Their five-minute lease greatly exceeds Gemini's
     // 30-second timeout, so reclaim only after that ownership lease expires.
@@ -543,7 +566,7 @@ export async function reconcileExpiredAiUsageReservations(limit = 100) {
     await client.query("COMMIT");
     return {
       committed:
-        inboundCommitted.rowCount + copilotCommitted.rowCount + ocrCommitted.rowCount,
+        inboundCommitted.rowCount + copilotCommitted.rowCount + ocrCommitted.rowCount + diagnosticCommitted.rowCount,
       released:
         inboundReleased.rowCount + orphanedCopilot.rowCount + orphanedOcr.rowCount,
     };
