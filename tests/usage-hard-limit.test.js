@@ -129,52 +129,62 @@ test("blocked AI attempts take the safe human-handoff fallback and are not doubl
   );
 });
 
-test("any post-reservation pre-success AI failure releases the reservation", () => {
+test("AI usage cleanup distinguishes pre-provider failures from uncertain provider spend", () => {
   const aiSection = sliceBetween(
     indexSource,
     "Hard usage limit gate",
     "if (message.provider_message_id)",
   );
   const reservation = aiSection.indexOf("reserveAiUsage({");
-  const cleanup = aiSection.lastIndexOf("releaseAiUsage({");
   const generation = aiSection.indexOf("generateGeminiReply(message.body");
   const save = aiSection.indexOf("saveGeneratedResponse(");
 
   assert.ok(reservation >= 0, "AI flow must reserve usage before provider work");
-  assert.ok(cleanup > reservation, "AI flow must release usage after a reservation failure path");
   assert.ok(generation > reservation, "Gemini must run after reservation");
   assert.ok(save > generation, "generated response must be durably saved after Gemini");
-  assert.ok(
-    aiSection.slice(cleanup).includes("throw aiError;"),
-    "cleanup path must rethrow so durable inbox retry semantics are preserved",
-  );
+  assert.ok(aiSection.includes("let providerCallStarted = false;"), "provider dispatch must be tracked");
+  assert.ok(aiSection.includes("providerCallStarted = true;"), "mark the reservation uncertain before dispatch");
+  assert.ok(aiSection.includes("if (providerCallStarted)"), "cleanup must branch on provider dispatch");
+  assert.ok(aiSection.includes("await commitAiUsage({"), "uncertain provider spend must be metered");
+  assert.ok(aiSection.includes("await releaseAiUsage({"), "pre-provider failures must release quota");
+  assert.ok(aiSection.includes("throw aiError;"), "failed attempts must preserve durable-inbox retry semantics");
 });
 
-test("failed AI generations release the reservation so retries are not double-billed", () => {
-  const guardedCall = sliceBetween(
+test("failed AI generations conservatively retain usage and do not repeat uncertain provider calls", () => {
+  const aiSection = sliceBetween(
     indexSource,
-    "reply = await generateGeminiReply(message.body, aiBrain);",
-    "Failed to release reserved AI usage",
+    "Hard usage limit gate",
+    "if (message.provider_message_id)",
   );
   assert.ok(
-    guardedCall.includes("releaseAiUsage"),
-    "generation failure must release the reservation",
+    aiSection.includes("AI provider may have been charged; usage reservation remains for reconciliation"),
+    "provider errors must not silently erase potentially billable usage",
   );
   assert.ok(
-    indexSource.includes("throw aiError;"),
-    "generation failure must still fail the attempt",
+    aiSection.includes("Failed to release pre-provider AI usage reservation"),
+    "pre-provider cleanup failures must be observable",
+  );
+  const committedGuard = aiSection.indexOf("if (aiReservation.committed && !message.generated_response)");
+  assert.ok(committedGuard >= 0, "committed usage without a saved reply must have a retry guard");
+  assert.ok(
+    committedGuard < aiSection.indexOf("generateGeminiReply(message.body"),
+    "an uncertain, already-committed attempt must not invoke Gemini again",
+  );
+  assert.ok(
+    aiSection.slice(committedGuard).includes("markCompleted(message.id, message.tenant_id, leaseToken, null)"),
+    "uncertain retries must stop safely and hand the conversation to a human",
   );
 });
 
 test("reservation is idempotent for durable-inbox retries and race-safe per tenant", () => {
   const reserve = sliceBetween(usageSource, "export async function reserveAiUsage", "export async function releaseAiUsage");
   assert.ok(
-    reserve.includes("SELECT id FROM usage_events") && reserve.includes("LIMIT 1"),
+    reserve.includes("SELECT id, reservation_status, reservation_lease_until") && reserve.includes("LIMIT 1"),
     "an existing reservation must short-circuit as a duplicate",
   );
   assert.ok(
-    reserve.includes("{ allowed: true, duplicate: true }"),
-    "duplicate reservations must allow generation without double-counting",
+    reserve.includes("inProgress: true") && reserve.includes("reservationToken"),
+    "active reservations must prevent a second worker from starting duplicate generation",
   );
   assert.ok(
     reserve.includes("FOR UPDATE"),
@@ -198,7 +208,7 @@ test("AI usage reservation and release remain strictly tenant-scoped", () => {
     "duplicate detection must be tenant-scoped",
   );
   assert.ok(
-    release.includes("WHERE tenant_id = $1 AND event_key = $2 AND event_type = $3"),
+    release.includes("WHERE tenant_id=$1 AND event_key=$2 AND event_type=$3"),
     "release must be tenant-scoped and restricted to the reservation's own event type",
   );
   assert.ok(
@@ -221,7 +231,7 @@ test("usage gate and fallback never log message bodies or AI content", () => {
 test("every billable Gemini operation shares the existing monthly AI limit", () => {
   assert.deepEqual(
     [...usageService.AI_EVENT_TYPES].sort(),
-    ["ai_message", "copilot_draft", "ocr_document"],
+    ["ai_diagnostic", "ai_message", "copilot_draft", "ocr_document"],
     "copilot and OCR must be billable AI event types",
   );
   const reserve = usageSource.slice(
@@ -239,6 +249,11 @@ test("every billable Gemini operation shares the existing monthly AI limit", () 
   assert.ok(
     reserve.includes("conversationId || null"),
     "OCR reservations must tolerate missing conversation context",
+  );
+  const reconciler = usageSource.slice(usageSource.indexOf("export async function reconcileExpiredAiUsageReservations"));
+  assert.ok(
+    reconciler.includes("event_type='ai_diagnostic'") && reconciler.includes("diagnosticCommitted.rowCount"),
+    "abandoned diagnostic reservations must be conservatively finalized after their lease expires",
   );
 });
 
@@ -265,13 +280,22 @@ test("copilot draft route reserves quota before any context work or Gemini call"
   assert.ok(route.indexOf("generateCopilotDraftReply") > reserveAt, "dedicated Gemini Copilot generation must follow the reservation");
   assert.ok(route.includes("status(429)"), "blocked copilot drafts must return 429 without calling Gemini");
   assert.ok(
-    route.indexOf("releaseAiUsage({") > route.indexOf("generateCopilotDraftReply") &&
-      route.includes('eventKey: aiReservation.eventKey, type: "copilot_draft"'),
-    "any post-reservation copilot failure must release its own reservation",
+    route.includes("let providerCallStarted = false;") &&
+      route.includes("providerCallStarted = true;") &&
+      route.includes("if (providerCallStarted)"),
+    "Copilot must distinguish pre-provider failures from uncertain provider spend",
+  );
+  assert.ok(
+    route.includes("await commitAiUsage({") && route.includes("await releaseAiUsage({"),
+    "Copilot must meter uncertain provider outcomes and release only pre-dispatch failures",
+  );
+  assert.ok(
+    route.includes("Copilot provider may have been charged; usage reservation remains for reconciliation"),
+    "uncertain Copilot provider spend must be logged and retained",
   );
 });
 
-test("OCR extraction reserves quota before the Gemini call and releases on failure", () => {
+test("OCR reserves before Gemini, releases pre-dispatch failures, and charges uncertain provider outcomes", () => {
   const extract = sliceBetween(
     ocrSource,
     "export async function extractTextFromDocument",
@@ -291,9 +315,20 @@ test("OCR extraction reserves quota before the Gemini call and releases on failu
     "blocked OCR must fail before any provider call",
   );
   assert.ok(
-    extract.includes("releaseAiUsage({") &&
-      extract.includes('eventKey: aiReservation.eventKey, type: "ocr_document"'),
-    "any post-reservation OCR failure must release its own reservation",
+    extract.includes("let providerCallStarted = false;") &&
+      extract.includes("providerCallStarted = true;"),
+    "the service must distinguish failures before dispatch from uncertain provider outcomes",
+  );
+  assert.ok(
+    extract.includes("if (providerCallStarted)") &&
+      extract.includes("await commitAiUsage({") &&
+      extract.includes("await releaseAiUsage({"),
+    "provider-dispatched failures must retain/commit quota while pre-dispatch failures release it",
+  );
+  assert.ok(
+    extract.includes("Do not release quota and permit a retry to") &&
+      extract.includes("Failed to release pre-provider OCR usage reservation"),
+    "the uncertain-spend tradeoff must be explicit and release failures observable",
   );
 });
 
@@ -308,6 +343,13 @@ test("the dev-only Gemini test route is privileged and rate-limited", () => {
     indexSource,
     /const geminiTestLimiter = rateLimit\(\{\s*windowMs: 15 \* 60 \* 1000,\s*max: 5,/,
     "the per-IP diagnostic limit must stay at five requests per fifteen minutes",
+  );
+  assert.ok(route.includes('type: "ai_diagnostic"'), "diagnostic Gemini calls must reserve shared AI quota");
+  assert.ok(route.includes("await commitAiUsage({"), "diagnostic provider calls must be metered");
+  assert.ok(route.includes("await releaseAiUsage({"), "pre-provider diagnostic failures must release reservations");
+  assert.ok(
+    route.indexOf("reserveAiUsage({") < route.indexOf("generateGeminiReply(value.message)"),
+    "diagnostic quota must be reserved before calling Gemini",
   );
 });
 

@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { dbPool } from "../config/database.js";
-import { releaseAiUsage, reserveAiUsage } from "./usage.service.js";
+import { logger } from "../config/logger.js";
+import { commitAiUsage, releaseAiUsage, reserveAiUsage } from "./usage.service.js";
 
 const MAX_TEXT = 20_000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -56,8 +57,10 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
   // tenant's shared monthly AI limit before any provider call. The validation
   // failures above throw before reserving, so rejected uploads consume nothing.
   const aiReservation = await reserveAiUsage({ tenantId: t, type: "ocr_document" });
+  if (aiReservation.inProgress) throw new Error("OCR reservation is already active; retry later");
   if (!aiReservation.allowed) throw new Error("AI usage hard limit reached");
 
+  let providerCallStarted = false;
   try {
     const ai = getClient();
     const base64 = buffer.toString("base64");
@@ -65,6 +68,9 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
     const timeoutController = new AbortController();
     const timeoutId = setTimeout(() => timeoutController.abort(), OCR_REQUEST_TIMEOUT_MS);
     try {
+      // Once dispatched, a timeout/network error cannot prove Gemini did not
+      // process the request. Conservatively retain the billable reservation.
+      providerCallStarted = true;
       response = await ai.models.generateContent({
         model: MODEL,
         config: {
@@ -88,18 +94,61 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
 
     const extracted = typeof response?.text === "string" ? response.text.trim().slice(0, MAX_TEXT) : "";
     const r = await dbPool.query(
-      `INSERT INTO ocr_documents (tenant_id,filename,mime_type,extracted_text,model,created_by)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [t, filename.trim(), mimeType, extracted, MODEL, createdBy],
+      `INSERT INTO ocr_documents (tenant_id,filename,mime_type,extracted_text,model,created_by,usage_event_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [t, filename.trim(), mimeType, extracted, MODEL, createdBy, aiReservation.eventKey],
     );
+    if (aiReservation.reservationToken) {
+      try {
+        await commitAiUsage({
+          tenantId: t,
+          eventKey: aiReservation.eventKey,
+          reservationToken: aiReservation.reservationToken,
+          type: "ocr_document",
+        });
+      } catch (commitError) {
+        logger.warn(
+          { tenantId: t, error: commitError.message },
+          "OCR result saved but reservation finalization will be reconciled",
+        );
+      }
+    }
     return r.rows[0];
   } catch (error) {
-    // Any post-reservation failure (provider or persistence) must not leave a
-    // reservation behind; failed attempts consume no quota.
-    try {
-      await releaseAiUsage({ tenantId: t, eventKey: aiReservation.eventKey, type: "ocr_document" });
-    } catch {
-      // Release failure leaves a bounded orphan (one unit); nothing else to do.
+    if (providerCallStarted) {
+      // Provider spend may already have occurred even if the request timed out
+      // or saving the result failed. Do not release quota and permit a retry to
+      // call Gemini again for free; commit the reservation as a conservative
+      // usage record. A commit failure leaves the reservation for reconciliation.
+      try {
+        await commitAiUsage({
+          tenantId: t,
+          eventKey: aiReservation.eventKey,
+          reservationToken: aiReservation.reservationToken,
+          type: "ocr_document",
+        });
+      } catch (commitError) {
+        logger.warn(
+          { tenantId: t, error: commitError.message },
+          "OCR provider may have been charged; usage reservation remains for reconciliation",
+        );
+      }
+    } else {
+      // Failures before dispatch (for example, missing local API configuration)
+      // cannot have incurred provider spend, so release the reservation.
+      try {
+        await releaseAiUsage({
+          tenantId: t,
+          eventKey: aiReservation.eventKey,
+          reservationToken: aiReservation.reservationToken,
+          type: "ocr_document",
+        });
+      } catch (releaseError) {
+        logger.warn(
+          { tenantId: t, error: releaseError.message },
+          "Failed to release pre-provider OCR usage reservation",
+        );
+      }
     }
     throw error;
   }

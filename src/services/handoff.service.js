@@ -63,8 +63,10 @@ async function buildConversationSummary(client, tenantId, conversationId) {
     `SELECT direction, text, created_at
      FROM messages
      WHERE tenant_id = $1 AND conversation_id = $2
+       AND deleted_at IS NULL
      ORDER BY created_at DESC
-     LIMIT 30`,
+     LIMIT 30
+     FOR SHARE`,
     [tenantId, conversationId],
   );
   const lines = result.rows.reverse().map((row) => {
@@ -212,20 +214,85 @@ export async function assignConversationRoundRobin(tenantId, conversationId, ski
   }
 }
 
-export async function saveCopilotDraft(tenantId, conversationId, userId, draft) {
+export async function saveCopilotDraft(
+  tenantId,
+  conversationId,
+  userId,
+  draft,
+  usageEventKey = null,
+  { sourceMessageIds = [], expectedSummaryId = undefined } = {},
+) {
   assertDatabase();
   if (!validId(tenantId) || !validId(conversationId) || !validId(userId)) throw new Error("Invalid identifier");
+  if (usageEventKey !== null && !validId(usageEventKey)) throw new Error("Invalid AI usage event key");
+  if (!Array.isArray(sourceMessageIds) || sourceMessageIds.some((id) => !validId(id))) {
+    throw new Error("Invalid Copilot source message identifiers");
+  }
+  if (expectedSummaryId !== undefined && expectedSummaryId !== null && !validId(expectedSummaryId)) {
+    throw new Error("Invalid Copilot summary identifier");
+  }
+
   const text = cleanText(draft, 8000);
-  const result = await dbPool.query(
-    `INSERT INTO ai_copilot_drafts (tenant_id, conversation_id, author_user_id, draft)
-     SELECT $1, $2, $3, $4
-     WHERE EXISTS (SELECT 1 FROM conversations WHERE tenant_id = $1 AND id = $2)
-       AND EXISTS (SELECT 1 FROM users WHERE tenant_id = $1 AND id = $3 AND status = 'active')
-     RETURNING id, conversation_id, author_user_id, draft, status, created_at`,
-    [tenantId, conversationId, userId, text],
-  );
-  if (!result.rows[0]) throw new Error("Conversation or user not found");
-  return result.rows[0];
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Serialize draft persistence with handoff and deletion paths. Deletion
+    // takes the same conversation lock, then marks a source deleted and purges
+    // derived drafts in its transaction. It therefore cannot slip between the
+    // source recheck and INSERT.
+    const conversation = await client.query(
+      "SELECT id FROM conversations WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+      [tenantId, conversationId],
+    );
+    if (!conversation.rowCount) throw new Error("Conversation not found");
+
+    const user = await client.query(
+      "SELECT id FROM users WHERE tenant_id=$1 AND id=$2 AND status='active'",
+      [tenantId, userId],
+    );
+    if (!user.rowCount) throw new Error("User not found");
+
+    if (sourceMessageIds.length > 0) {
+      const sources = await client.query(
+        `SELECT id FROM messages
+         WHERE tenant_id=$1 AND conversation_id=$2
+           AND id=ANY($3::uuid[]) AND deleted_at IS NULL
+         FOR SHARE`,
+        [tenantId, conversationId, sourceMessageIds],
+      );
+      if (sources.rowCount !== new Set(sourceMessageIds).size) {
+        throw new Error("Conversation messages changed or were deleted while drafting; retry");
+      }
+    }
+
+    if (expectedSummaryId !== undefined) {
+      const latest = await client.query(
+        `SELECT id FROM conversation_ai_summaries
+         WHERE tenant_id=$1 AND conversation_id=$2
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [tenantId, conversationId],
+      );
+      if ((latest.rows[0]?.id ?? null) !== expectedSummaryId) {
+        throw new Error("Conversation summary changed while drafting; retry");
+      }
+    }
+
+    const result = await client.query(
+      `INSERT INTO ai_copilot_drafts
+         (tenant_id, conversation_id, author_user_id, draft, usage_event_key)
+       VALUES ($1,$2,$3,$4,$5)
+       RETURNING id, conversation_id, author_user_id, draft, status, created_at`,
+      [tenantId, conversationId, userId, text, usageEventKey],
+    );
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function listCopilotDrafts(tenantId, conversationId, limit = 20) {

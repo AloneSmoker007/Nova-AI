@@ -86,6 +86,7 @@ The server defaults to port 3000.
 - `GEMINI_MODEL` — Gemini model override.
 - `META_GRAPH_API_VERSION` — Meta Graph API version; defaults to `v23.0`.
 - `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_EXPIRES_IN` — JWT configuration.
+- `TRUST_PROXY_HOPS` — number of explicitly trusted reverse-proxy hops (default 0; configure only for your deployment topology). This controls forwarded client IPs used by IP-based rate limits.
 - `LOG_LEVEL` — Pino log level.
 - `WHATSAPP_DELIVERY_RETRY_WINDOW_SECONDS` — delivery recovery window.
 

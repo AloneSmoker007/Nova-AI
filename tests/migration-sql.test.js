@@ -8,6 +8,7 @@ import {
   assertUniqueMigrationNames,
   compareMigrationFilenames,
   findDuplicateMigrationPrefixes,
+  migrationChecksum,
 } from "../src/database/migrate.js";
 
 const testsDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -32,6 +33,8 @@ const EXPECTED_COLUMN_LIST_SET_NULL = new Map([
   ["018_appointments.sql", ["contact_id", "conversation_id", "created_by"]],
   ["019_payments_ocr.sql", ["created_by"]],
   ["028_webhook_dead_letter_operations.sql", ["last_manual_retry_by"]],
+  ["031_automation_webhook_effects.sql", ["resolved_by"]],
+  ["034_ai_memory_source_provenance.sql", ["source_message_id"]],
 ]);
 
 function stripLineComments(sql) {
@@ -109,6 +112,14 @@ test("migration files are contiguous, ordered by numeric prefix, and uniquely na
   numbers.forEach((number, index) => {
     assert.equal(number, index + 1, "migration numeric prefixes must stay contiguous");
   });
+});
+
+test("migration checksums are deterministic and change when applied SQL changes", () => {
+  const original = "ALTER TABLE example ADD COLUMN value TEXT;";
+  const checksum = migrationChecksum(original);
+  assert.match(checksum, /^[a-f0-9]{64}$/);
+  assert.equal(migrationChecksum(original), checksum);
+  assert.notEqual(migrationChecksum(original + "\\n"), checksum);
 });
 
 test("duplicate numeric prefixes and duplicate filenames are rejected", () => {

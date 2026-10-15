@@ -56,12 +56,23 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
     # tests/migration-postgres.test.js maps MIGRATION_TEST_DATABASE_URL onto
     # DATABASE_URL before importing the migration runner, then applies the full
     # chain to a fresh database and re-runs it to prove the second run is a no-op.
     env:
       MIGRATION_TEST_DATABASE_URL: postgres://nova:nova@127.0.0.1:5432/nova_migration_test
       MIGRATION_TEST_ALLOW_RESET: "1"
+      REDIS_URL: redis://127.0.0.1:6379
 
     steps:
       - name: Checkout repository
@@ -92,6 +103,12 @@ jobs:
       # Keep this as a separate serialized step because the integration suite resets public schema.
       - name: Run automation SQL integration tests
         run: node --test tests/automation-postgres.test.js
+
+      # External side effects require a durable result ledger. This live-PG suite
+      # proves success replay skips duplicate POSTs and ambiguous outcomes are
+      # parked until an owner/admin records a manual reconciliation decision.
+      - name: Run automation webhook effect integration tests
+        run: node --test tests/automation-webhook-effects.test.js
 
       # TASK-03 regression coverage: per-tenant payment webhook authentication,
       # tested against the real application and PostgreSQL. This suite resets
@@ -125,6 +142,16 @@ jobs:
       - name: Run refresh token replay integration tests
         run: node --test tests/refresh-token-replay.test.js
 
+      # Final-gate auth regression: issued access JWTs must fail after logout,
+      # role change, password change, and refresh-token reuse.
+      - name: Run access-token revocation integration tests
+        run: node --test tests/access-token-revocation.test.js
+
+      # Privacy regression: deleted customer messages must not be copied into
+      # future handoff summaries or persisted AI summary context.
+      - name: Run deleted-message handoff privacy integration tests
+        run: node --test tests/handoff-deleted-message.test.js
+
       # TASK-27/TASK-29/TASK-30 coverage: canonical inbound IDs, post-retention replay,
       # and monotonic activity timestamps. This suite resets public schema; keep it serialized
       # before the final inbox lease-recovery integration suite.
@@ -140,3 +167,13 @@ jobs:
       # This suite also resets public schema, so run it serialized and last in this job.
       - name: Run webhook dead-letter operations integration tests
         run: node --test tests/webhook-dead-letter-operations.test.js
+
+      # Final-gate usage regression: enforce reservation ownership, stale-worker
+      # fencing, and cleanup when an AI operation reaches dead letter without output.
+      - name: Run AI reservation fencing integration tests
+        run: node --test tests/usage-reservation-fencing.test.js
+
+      # Final-gate Redis check: prove BullMQ terminal job IDs can be re-enqueued
+      # against a live Redis service rather than a deterministic queue double.
+      - name: Run live Redis and BullMQ re-enqueue integration test
+        run: node --test tests/bullmq-redis-integration.test.js

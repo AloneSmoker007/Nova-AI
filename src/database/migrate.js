@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +8,10 @@ import { dbPool, isDatabaseConfigured } from "../config/database.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const migrationsDirectory = path.resolve(__dirname, "../../database");
+
+export function migrationChecksum(sql) {
+  return createHash("sha256").update(sql, "utf8").digest("hex");
+}
 
 function migrationNumber(filename) {
   const match = /^([0-9]+)_/.exec(filename);
@@ -125,33 +130,53 @@ export async function runMigrations() {
       CREATE TABLE IF NOT EXISTS schema_migrations (
         id BIGSERIAL PRIMARY KEY,
         filename TEXT NOT NULL UNIQUE,
+        checksum TEXT,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    // Existing installations have a schema_migrations table without checksum.
+    // Add the metadata column safely before reading migration records.
+    await client.query("ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT");
 
     const migrationFiles = await getMigrationFiles();
     const appliedResult = await client.query(
-      "SELECT filename FROM schema_migrations ORDER BY filename",
+      "SELECT filename, checksum FROM schema_migrations ORDER BY filename",
     );
-    const applied = new Set(appliedResult.rows.map((row) => row.filename));
+    const appliedChecksums = new Map(
+      appliedResult.rows.map((row) => [row.filename, row.checksum]),
+    );
+    const applied = new Set(appliedChecksums.keys());
     validateMigrationOrder(migrationFiles, applied);
 
     const newlyApplied = [];
 
     for (const filename of migrationFiles) {
-      if (applied.has(filename)) {
-        continue;
-      }
-
       const sql = await fs.readFile(
         path.join(migrationsDirectory, filename),
         "utf8",
       );
+      const checksum = migrationChecksum(sql);
+
+      if (applied.has(filename)) {
+        const previousChecksum = appliedChecksums.get(filename);
+        if (!previousChecksum) {
+          // Existing installations have no historical checksum to compare
+          // against. Bootstrap today's checksum once, then detect all future
+          // accidental edits to an already-applied migration.
+          await client.query(
+            "UPDATE schema_migrations SET checksum = $2 WHERE filename = $1 AND checksum IS NULL",
+            [filename, checksum],
+          );
+        } else if (previousChecksum !== checksum) {
+          throw new Error("Migration checksum drift detected for " + filename);
+        }
+        continue;
+      }
 
       await client.query(sql);
       await client.query(
-        "INSERT INTO schema_migrations (filename) VALUES ($1)",
-        [filename],
+        "INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)",
+        [filename, checksum],
       );
       newlyApplied.push(filename);
     }
