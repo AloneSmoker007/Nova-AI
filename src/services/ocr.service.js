@@ -60,6 +60,7 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
   if (aiReservation.inProgress) throw new Error("OCR reservation is already active; retry later");
   if (!aiReservation.allowed) throw new Error("AI usage hard limit reached");
 
+  let providerCallStarted = false;
   try {
     const ai = getClient();
     const base64 = buffer.toString("base64");
@@ -67,6 +68,9 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
     const timeoutController = new AbortController();
     const timeoutId = setTimeout(() => timeoutController.abort(), OCR_REQUEST_TIMEOUT_MS);
     try {
+      // Once dispatched, a timeout/network error cannot prove Gemini did not
+      // process the request. Conservatively retain the billable reservation.
+      providerCallStarted = true;
       response = await ai.models.generateContent({
         model: MODEL,
         config: {
@@ -111,12 +115,40 @@ export async function extractTextFromDocument({ tenantId, buffer, mimeType, file
     }
     return r.rows[0];
   } catch (error) {
-    // Any post-reservation failure (provider or persistence) must not leave a
-    // reservation behind; failed attempts consume no quota.
-    try {
-      await releaseAiUsage({ tenantId: t, eventKey: aiReservation.eventKey, reservationToken: aiReservation.reservationToken, type: "ocr_document" });
-    } catch {
-      // Release failure leaves a bounded orphan (one unit); nothing else to do.
+    if (providerCallStarted) {
+      // Provider spend may already have occurred even if the request timed out
+      // or saving the result failed. Do not release quota and permit a retry to
+      // call Gemini again for free; commit the reservation as a conservative
+      // usage record. A commit failure leaves the reservation for reconciliation.
+      try {
+        await commitAiUsage({
+          tenantId: t,
+          eventKey: aiReservation.eventKey,
+          reservationToken: aiReservation.reservationToken,
+          type: "ocr_document",
+        });
+      } catch (commitError) {
+        logger.warn(
+          { tenantId: t, error: commitError.message },
+          "OCR provider may have been charged; usage reservation remains for reconciliation",
+        );
+      }
+    } else {
+      // Failures before dispatch (for example, missing local API configuration)
+      // cannot have incurred provider spend, so release the reservation.
+      try {
+        await releaseAiUsage({
+          tenantId: t,
+          eventKey: aiReservation.eventKey,
+          reservationToken: aiReservation.reservationToken,
+          type: "ocr_document",
+        });
+      } catch (releaseError) {
+        logger.warn(
+          { tenantId: t, error: releaseError.message },
+          "Failed to release pre-provider OCR usage reservation",
+        );
+      }
     }
     throw error;
   }
