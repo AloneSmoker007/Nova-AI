@@ -531,6 +531,19 @@ async function processInboxMessage(inboxId, log = logger) {
         throw reservationBusy;
       }
 
+      // A committed reservation with no saved response means Gemini may have
+      // been charged but the durable response was not recorded. Do not invoke
+      // Gemini again on a durable-inbox retry; leave the conversation for a
+      // human rather than creating an unmetered duplicate provider call.
+      if (aiReservation.committed && !message.generated_response) {
+        await markCompleted(message.id, message.tenant_id, leaseToken, null);
+        log.warn(
+          { inboxId: message.id, tenantId: message.tenant_id, conversationId: persistedInbound.conversationId },
+          "AI usage was already committed without a saved reply; handed off for manual review",
+        );
+        return;
+      }
+
       if (!aiReservation.allowed) {
         // Same safe fallback as the AI-paused path: no reply is sent, nothing
         // pretends an AI response went out, the message stays visible in the
