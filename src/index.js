@@ -594,11 +594,18 @@ async function processInboxMessage(inboxId, log = logger) {
         // while Gemini was generating, do not persist/send its text, but retain
         // the usage charge because provider work has already occurred.
         if (await isInboundMessageDeleted(message.tenant_id, persistedInbound.messageId)) {
-          await commitAiUsage({
-            tenantId: message.tenant_id,
-            eventKey: aiReservation.eventKey,
-            reservationToken: aiReservation.reservationToken,
-          });
+          try {
+            await commitAiUsage({
+              tenantId: message.tenant_id,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+            });
+          } catch (commitError) {
+            log.warn(
+              { error: commitError.message, tenantId: message.tenant_id, inboxId: message.id },
+              "Deleted source prevented reply persistence; provider usage remains for reconciliation",
+            );
+          }
           await markCompleted(message.id, message.tenant_id, leaseToken, null);
           return;
         }
