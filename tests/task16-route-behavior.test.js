@@ -170,6 +170,31 @@ test("development Gemini diagnostics reject anonymous calls and rate-limit repea
   assert.match(limited.body, /Too many AI diagnostic requests/);
 });
 
+test("unhandled API errors never disclose internals in the default environment", () => {
+  assert.ok(app, "real composed app must be imported");
+  const errorLayers = app._router.stack.filter((layer) => layer.handle?.length === 4);
+  assert.ok(errorLayers.length > 0, "the real app must register an error handler");
+  const publicErrorHandler = errorLayers.at(-1).handle;
+
+  const secret = "private-db.internal:5432 password=should-not-leak";
+  let statusCode = null;
+  let payload = null;
+  publicErrorHandler(
+    new Error(secret),
+    { log: { error() {} } },
+    {
+      headersSent: false,
+      status(code) { statusCode = code; return this; },
+      json(body) { payload = body; return this; },
+    },
+    (error) => { throw error; },
+  );
+
+  assert.equal(statusCode, 500);
+  assert.deepEqual(payload, { status: "error", message: "Internal server error" });
+  assert.doesNotMatch(JSON.stringify(payload), /private-db|password|should-not-leak/);
+});
+
 test("the terminal 404 still handles genuinely unknown routes", async () => {
   const res = await request("GET", "/__definitely_not_a_real_route__");
   assert.equal(res.status, 404);
