@@ -114,7 +114,7 @@ jobs:
       # tested against the real application and PostgreSQL. This suite resets
       # the shared test schema, so it runs as a separate serialized step.
       - name: Run payment webhook tenant-isolation integration tests
-        run: node --test tests/payment-webhook-tenant-isolation.test.js
+        run: timeout 120s node --test tests/payment-webhook-tenant-isolation.test.js
 
       # TASK-04 regression coverage: outbound WhatsApp delivery retries,
       # attempt caps, lease fencing and monotonic state transitions.
@@ -177,3 +177,10 @@ jobs:
       # against a live Redis service rather than a deterministic queue double.
       - name: Run live Redis and BullMQ re-enqueue integration test
         run: node --test tests/bullmq-redis-integration.test.js
+
+      # N-13 regression: prove real-app test startup/teardown exits naturally
+      # even with BOTH the PostgreSQL pool and BullMQ Redis worker enabled.
+      - name: Verify Task 16 natural exit with PostgreSQL and Redis
+        env:
+          DATABASE_URL: postgres://nova:nova@127.0.0.1:5432/nova_migration_test
+        run: timeout 120s node --test tests/task16-route-behavior.test.js
