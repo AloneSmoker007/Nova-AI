@@ -211,8 +211,13 @@ export async function rememberCustomerPreference(
             CASE WHEN $6::uuid IS NULL THEN 'manual' ELSE 'conversation' END,
             $6::uuid
      WHERE $6::uuid IS NULL OR EXISTS (
-       SELECT 1 FROM messages
-       WHERE tenant_id=$1 AND id=$6::uuid AND deleted_at IS NULL
+       SELECT 1 FROM messages m
+       JOIN conversations c
+         ON c.tenant_id=m.tenant_id AND c.id=m.conversation_id
+       WHERE m.tenant_id=$1 AND m.id=$6::uuid
+         AND c.contact_id=$2 AND m.direction='inbound'
+         AND m.deleted_at IS NULL
+       FOR SHARE OF m
      )
      ON CONFLICT (tenant_id, contact_id, memory_key) DO UPDATE SET
        memory_value = EXCLUDED.memory_value,
