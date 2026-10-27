@@ -98,6 +98,22 @@ export async function analyzeCustomerMessage(text, businessBrain = null) {
 const TRAILING_COPULA = /\s+(?:hai|hun|hoon|ho)\s*$/i;
 const TRAILING_KEYWORD = /\s+(?:chahiye|mujhe|need|want|wants|looking\s+for)\s*$/i;
 
+// Auto-extracted customer facts are untrusted. Refuse to persist obvious
+// instructions masquerading as a name, budget, or service preference.
+// This is defense in depth; model prompts must still treat all memory as data.
+const MEMORY_DIRECTIVE_PATTERNS = [
+  /\b(?:ignore|disregard|override)\s+(?:(?:all|any|the|your|previous|prior|system|developer)\s+){0,5}(?:instructions?|rules?|prompts?)\b/i,
+  /\b(?:reveal|show|print|leak|expose)\s+(?:(?:me|your|the|hidden|internal|full)\s+){0,4}(?:system|developer)\s+(?:prompts?|instructions?|rules?)\b/i,
+  /\b(?:you\s+are\s+now|act\s+as)\s+(?:the\s+)?(?:system|developer|administrator)\b/i,
+];
+
+function isInstructionLikeMemoryFact(value) {
+  const normalized = String(value ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+  return MEMORY_DIRECTIVE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function trimTrailingCopula(name) {
   return name.replace(TRAILING_COPULA, "");
 }
@@ -155,7 +171,7 @@ export function extractCustomerPreferencesFromText(text) {
     const normalizedKey = candidate.key.toLowerCase();
     const normalizedValue = normalizeText(candidate.value, MAX_MEMORY_VALUE).toLowerCase();
     const dedupeKey = `${normalizedKey}:${normalizedValue}`;
-    if (!dedupeKey || seen.has(dedupeKey)) continue;
+    if (!normalizedValue || seen.has(dedupeKey) || isInstructionLikeMemoryFact(candidate.value)) continue;
     seen.add(dedupeKey);
     deduped.push({
       key: normalizedKey,
