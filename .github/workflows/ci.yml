@@ -188,10 +188,32 @@ jobs:
       # Part 5.15-B backup/restore gate: create two disposable databases on
       # the local PostgreSQL 15 service, verify encrypted backup and restore,
       # reject wrong keys and tampering, then drop both test databases.
-      - name: Install PostgreSQL CLI tools for backup smoke test
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      # Use the exact PostgreSQL 15 utilities already installed in our
+      # throwaway service container. Newer pg_dump (for example PG18) can emit
+      # settings that PostgreSQL 15 cannot restore.
+      - name: Use PostgreSQL 15 client utilities for backup smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pg15-client"
+          for utility in pg_dump pg_restore; do
+            cat > "$RUNNER_TEMP/pg15-client/$utility" <<'PG_WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec docker exec -i \
+            -e "PGHOST=127.0.0.1" \
+            -e "PGPORT=5432" \
+            -e "PGUSER=${PGUSER}" \
+            -e "PGPASSWORD=${PGPASSWORD}" \
+            -e "PGDATABASE=${PGDATABASE}" \
+            "${TEST_POSTGRES_CONTAINER}" "${0##*/}" "$@"
+          PG_WRAPPER
+            chmod +x "$RUNNER_TEMP/pg15-client/$utility"
+          done
+          echo "$RUNNER_TEMP/pg15-client" >> "$GITHUB_PATH"
 
       - name: Verify encrypted backup and restore on throwaway databases
         env:
           NOVA_BACKUP_TEST_ALLOW_CREATE_DATABASES: "YES"
+          TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: timeout 180s node --test tests/backup-restore-roundtrip.test.js
