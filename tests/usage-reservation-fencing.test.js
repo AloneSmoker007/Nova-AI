@@ -194,6 +194,18 @@ describe("AI usage reservation ownership and orphan reconciliation (PostgreSQL)"
     assert.ok(copilot.reservationToken);
     assert.ok(ocr.reservationToken);
 
+    // A Copilot draft may only reference a Copilot usage reservation.
+    await assert.rejects(
+      saveCopilotDraft(
+        seed.tenantId,
+        seed.message.conversationId,
+        userId,
+        "Invalid cross-type key",
+        ocr.eventKey,
+      ),
+      /Invalid AI usage event key/,
+    );
+
     await saveCopilotDraft(
       seed.tenantId,
       seed.message.conversationId,
