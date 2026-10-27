@@ -184,3 +184,14 @@ jobs:
         env:
           DATABASE_URL: postgres://nova:nova@127.0.0.1:5432/nova_migration_test
         run: timeout 120s node --test tests/task16-route-behavior.test.js
+
+      # Part 5.15-B backup/restore gate: create two disposable databases on
+      # the local PostgreSQL 15 service, verify encrypted backup and restore,
+      # reject wrong keys and tampering, then drop both test databases.
+      - name: Install PostgreSQL CLI tools for backup smoke test
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Verify encrypted backup and restore on throwaway databases
+        env:
+          NOVA_BACKUP_TEST_ALLOW_CREATE_DATABASES: "YES"
+        run: timeout 180s node --test tests/backup-restore-roundtrip.test.js
