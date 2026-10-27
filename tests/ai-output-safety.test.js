@@ -19,11 +19,27 @@ test("private keys, provider keys, bearer tokens, and JWTs are blocked", () => {
     ["-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----", "private_key"],
     ["Use this token: Bearer abcdefghijklmnopqrstuvwxyz0123456789", "bearer_token"],
     ["Provider key: sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", "provider_token"],
+    ["Project-style key: sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890abcd", "provider_token"],
+    ["Fine-grained token: github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890abcd", "provider_token"],
     ["JWT: eyJabcdefghijk.eyJabcdefghijk.abcdefghijklmnopqrstuvwxyz_1234", "jwt"],
   ];
 
   for (const [value, reason] of cases) {
     assert.deepEqual(inspectGeneratedAiOutput(value), { safe: false, reason });
+  }
+});
+
+test("provider token variants are replaced with a safe fallback before delivery", () => {
+  const tokens = [
+    "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890abcd",
+    "github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890abcd",
+  ];
+  for (const token of tokens) {
+    const decision = enforceGeneratedAiOutput("Customer reply: " + token);
+    assert.equal(decision.safe, false);
+    assert.equal(decision.reason, "provider_token");
+    assert.equal(decision.text, SAFE_AI_FALLBACK);
+    assert.ok(!decision.text.includes(token));
   }
 });
 
