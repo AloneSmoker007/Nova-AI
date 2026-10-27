@@ -1,0 +1,45 @@
+# Part 5.10 AI / memory / PII red-team reconciliation
+
+**Verdict: PARTIAL MITIGATION VERIFIED; FINAL SECURITY GATE NOT PASSED.**
+
+Review date: 2026-10-27. Candidate: [PR #163](https://github.com/AloneSmoker007/Nova-AI/pull/163) at `66f4ff629644b5e89e21f8c7b4aad766d6dfc01a`. [CI run #40512238329](https://github.com/AloneSmoker007/Nova-AI/actions/runs/40512238329): both quality and PostgreSQL 15 / Redis 7 integration jobs passed at this SHA.
+
+## Provenance and limits
+
+An earlier 2026-10-01 conversation/checkpoint summary identifies a three-reviewer **Part 5.10** audit of AI memory, persistent prompt injection, PII, and red-team regressions. It reported 125/125 tests passing but the *security gate FAILING*. The complete original three reports, stable finding identifiers, reproduction inputs and signoffs are **not available in this repository**. The following rows are an independently scoped **present-code reconciliation by historical theme**; they do not reconstruct original finding IDs or change that FAIL to PASS.
+
+## Finding-to-evidence matrix
+
+| Historical theme | Current code and test evidence | Assessment at candidate SHA | Residual / required gate |
+| --- | --- | --- | --- |
+| HIGH — customer/business content promoted into trusted system instructions | `src/services/gemini.service.js` server-authored `buildSystemInstruction()`, structured untrusted user payload; `tests/ai-prompt-boundaries.test.js` | **Mitigated in prompt construction; unit PASS** | A real Gemini model may still obey instructions embedded in user data; live adversarial evaluation required |
+| HIGH — persistent customer memory poisoning | `advanced-ai.service.js` auto-extraction bounded to named facts; obvious instruction-like facts filtered; `tests/memory-persistence.test.js` synthetic attack + legitimate controls | **Limited deterministic mitigation; unit PASS** | Pattern-based detection is bypassable by paraphrases/languages/encoding; do not claim comprehensive filtering |
+| HIGH — memory wrapper/key-value breakout | `buildAdvancedAiContext()` XML-escapes keys/values and sanitizes controls; `tests/ai-prompt-boundaries.test.js`, `tests/advanced-ai.test.js` | **Mitigated for tested delimiter cases; unit PASS** | Re-evaluate when prompt format changes; semantic injections remain possible inside escaped text |
+| HIGH — missing outbound safety gate | `src/services/ai-output-safety.service.js`, `gemini.service.js` applies safe fallback before returning generated output; `tests/ai-output-safety.test.js` includes private keys/JWTs, bearer, hyphenated `sk-` and `github_pat_` variants, markup and invisible controls | **Known-pattern checks verified; unit PASS** | Does not detect all secrets, other tenants' PII, semantic policy failures or arbitrary credential formats; privacy/red-team evaluation required |
+| MEDIUM — deleted messages reused in AI memory/summaries | `src/services/message-persistence.service.js` deletion-driven invalidation, source ID tracking and guarded handoff persistence; `tests/handoff-deleted-message.test.js` real PG | **Tested deletion paths PASS** | Add adversarial live provider/worker timing before broad signoff; already-sent content cannot be retroactively recalled |
+| MEDIUM — memory write/read authorization | `src/index.js` memory GET/POST requires authentication + owner/admin; `tests/ai-memory-route-auth.test.js`, `tests/api-route-auth-matrix.test.js` | **Route composition/role tests PASS** | Deployed identity lifecycle, tenant membership and session configuration still need integrated operator review |
+| MEDIUM — unowned or forged memory provenance | `rememberCustomerPreference` now requires a live inbound message from the target contact and locks it when source supplied; `tests/handoff-deleted-message.test.js` real PG regression | **Tested direct-service provenance PASS** | Source-free owner/admin manual memory remains an explicit privileged path |
+| MEDIUM — AI artifacts retained indefinitely | `src/services/retention.service.js` configurable memory, signals, summaries, drafts cleanup; `tests/handoff-deleted-message.test.js` real PG retention | **Configured cleanup tests PASS** | Verify production scheduler health, policy/legal periods and backups' separate retention |
+| MEDIUM — long conversation / handoff resource exhaustion | `src/services/handoff.service.js` summary queries at most 30 messages, 600 chars/message and 8,000 chars output; `gemini.service.js` Copilot context max 12 messages with bounded message/summary text | **Bounds present by source inspection** | Stress-test concurrency and provider timeouts at expected workload; not a performance certification |
+| LOW — bidi, zero-width, invisible characters | `sanitizeMemoryValue()` and output gate strip/reject explicit control classes; `tests/advanced-ai.test.js`, `tests/ai-output-safety.test.js` | **Listed code points tested** | Unicode is broader; ZWNJ/ZWJ may be valid in Urdu, so avoid indiscriminate stripping without language-aware tests |
+| LOW — literal newline joining and forged source markers | `buildAdvancedAiContext()` joins with actual newline; source is derived server-side, with live-message ownership check; `tests/memory-persistence.test.js`, real-PG provenance regression | **Tested current paths** | Do not treat untrusted labels/content as instruction authority |
+| LOW — development error detail disclosure | `src/index.js` terminal 500 handler returns constant internal error in every environment; N-07 focused regression on PR | **Mitigated in tested handler path** | Scrutinize explicit route-level 4xx and proxy error surfaces during deployment |
+
+**Interpretation:** Unit/integration CI proves the stated *deterministic implementation properties*. It cannot establish semantic model robustness, real provider correctness, complete PII elimination or the historical audit's successful closure.
+
+## Red-team gate remaining (owner-approved test environment only)
+
+1. **Isolated test identities:** two fake tenants and contacts with clearly synthetic PII/canary strings, test Meta WhatsApp number and non-production credentials. Never use customer secrets or production chats.
+2. **Semantic attacks:** role spoofing in names, budgets, memory, Business Brain, recent chat, Copilot summaries and tool/service descriptions; multilingual/Roman Urdu and delimiter variations; ensure no hidden-policy disclosure, cross-tenant canary mention or unauthorized message/tool action.
+3. **Deletion races:** message deletion before/during Gemini generation, handoff and retry; verify derived memory/drafts stay purged and no new reply is dispatched for deleted input.
+4. **Output and privacy checks:** run synthetic sensitive-data probes through the actual model path; inspect returned text, persistence, logs, metrics and Meta send payloads—not solely regex unit tests.
+5. **Availability/cost:** bound paid requests, run quota enforcement and provider-timeout paths; validate human fallback and no duplicate charge/send. Do not start without owner-approved number, credentials, spending ceiling and rollback boundary.
+6. **Independent review:** record each case/input (redacting test credentials), exact test commit/run, result, surviving finding and owner/security signoff. Only then consider Part 5.10 independently re-audited.
+
+## Release decision
+
+- Candidate's automated quality and isolated DB/Redis tests: **PASS within scope**.
+- Original Part 5.10 report recovery: **INCOMPLETE**.
+- External semantic prompt-injection and PII assurance: **UNTESTED live**.
+- Final Part 5.15-B production release: **NO-GO**; see [release gate checklist](./PART-5.15-B-RELEASE-GATE.md).
+- **No merge/deployment authorization** is given by this document.
