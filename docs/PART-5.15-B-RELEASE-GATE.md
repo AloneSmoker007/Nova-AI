@@ -18,7 +18,7 @@ These results establish **automated test confidence**, not safe live provider be
 | Gate | Current state | Required evidence before approval |
 | --- | --- | --- |
 | Historical Parts 5.1–5.15 | **INCOMPLETE** | Locate original reports or explicitly mark each as unavailable; do not transform missing reports into PASS |
-| Part 5.10 | **UNRECONCILED** | Establish the original audit scope from authentic source material. If irrecoverable, commission and label a *new* independent scoped review, not a reconstructed historical result |
+| Part 5.10 | **HISTORICAL FAIL; ORIGINAL REPORT MISSING** | Earlier conversation checkpoint recovered the scope and severity-level findings below, but not finding IDs/full original report. Re-audit each issue against the current SHA with evidence and independent review |
 | Meta WhatsApp Cloud API | **UNTESTED live** | Owner-approved test phone/number and credentials, signed webhook delivery, duplicated inbound event, outbound status, ambiguous send, retry, human takeover |
 | Gemini and paid AI provider | **UNTESTED live** | Owner-approved bounded test budget; prompt-injection / output-redaction checks, quota reservation and provider-failure exercise |
 | Deployment network controls | **NO production signoff** | Confirm exact public reverse-proxy hop count; no direct path that permits spoofed forwarding headers; HTTPS, private database/Redis and rate-limit behavior in the actual topology |
@@ -26,6 +26,18 @@ These results establish **automated test confidence**, not safe live provider be
 | Backup operations | **SMOKE PASS; ops NOT SIGNED** | Verified offsite encrypted copies, retention, access control, independent key recovery, scheduled restore drill, `pg_dump` / server version compatibility, RPO/RTO |
 | Monitoring and rollback | **NO production signoff** | Alerts for webhook queue/dead letter, payment failures, Redis/Postgres readiness and AI budget; migration rollback/roll-forward plan; owner drill |
 | Final red-team and release review | **PENDING** | Evidence-indexed security review, explicit owner signoff tied to *exact* final commit SHA |
+
+## Part 5.10 historical scope recovery (not a pass)
+
+An earlier **2026-10-01 multi-agent checkpoint summary** identifies Part 5.10 as AI memory, prompt-injection, PII, and red-team coverage. It records three independent reviewer roles, 125/125 then-current unit tests green, but a **security gate FAIL**. The original complete report, stable finding IDs and exact reproductions have **not** been recovered. Do not claim that the original audit passed.
+
+- **HIGH historical concerns:** customer-controlled memory/context in trusted system instructions, persistent poisoning, memory-wrapper escaping/breakout, missing deterministic outbound AI validation.
+- **MEDIUM:** deleted-message context reuse, memory-write role authorization, memory/AI artifact retention, long handoff-context resource consumption.
+- **LOW:** zero-width/bidi text, incorrect literal newline joins, memory-source metadata forgery, development error disclosure.
+
+Current **candidate mitigations for independent review**, not proof of closure: `src/services/gemini.service.js` keeps a server-authored system instruction and puts business/memory data in the untrusted user payload; `advanced-ai.service.js` sanitizes and XML-escapes memory; `ai-output-safety.service.js` applies high-confidence output rejection; AI-memory API routes restrict writes; source-message deletion purges derived records; retention windows exist; handoff context is bounded; N-07 masks server errors.
+
+In the subsequent unmerged PR #163 patch, direct `rememberCustomerPreference` provenance checks now require the source to be a live inbound message belonging to that **same contact** and lock it against concurrent deletion. The new real-PostgreSQL regression must pass in CI before this mitigation can be marked verified. This is narrower than a comprehensive prompt-injection / PII red-team signoff.
 
 ## Operator preflight (no secrets in GitHub)
 
