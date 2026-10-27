@@ -11,6 +11,14 @@ function validId(value) {
   return typeof value === "string" && /^[0-9a-fA-F-]{36}$/.test(value);
 }
 
+// Copilot reservations use an event-type prefix plus a UUID, not a bare UUID.
+// Accept ONLY the matching type so another billable event cannot be associated
+// with a draft by accident.
+function validCopilotUsageEventKey(value) {
+  return typeof value === "string" &&
+    /^copilot_draft:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function cleanText(value, max) {
   if (typeof value !== "string") throw new Error("Invalid text");
   const text = value.trim();
@@ -224,7 +232,7 @@ export async function saveCopilotDraft(
 ) {
   assertDatabase();
   if (!validId(tenantId) || !validId(conversationId) || !validId(userId)) throw new Error("Invalid identifier");
-  if (usageEventKey !== null && !validId(usageEventKey)) throw new Error("Invalid AI usage event key");
+  if (usageEventKey !== null && !validCopilotUsageEventKey(usageEventKey)) throw new Error("Invalid AI usage event key");
   if (!Array.isArray(sourceMessageIds) || sourceMessageIds.some((id) => !validId(id))) {
     throw new Error("Invalid Copilot source message identifiers");
   }
