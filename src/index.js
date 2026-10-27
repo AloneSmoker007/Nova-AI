@@ -81,6 +81,7 @@ const IS_PRODUCTION = NODE_ENV === "production";
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 let startupComplete = false;
+let stopRetentionSchedulerHandle = null;
 
 const REQUIRED_ENV_VARS = [
   "GEMINI_API_KEY",
@@ -1788,6 +1789,17 @@ app.use((error, req, res, next) => {
   return res.status(500).json({ status: "error", message: IS_PRODUCTION ? "Internal server error" : error.message });
 });
 
+// Integration tests import the composed app and must release its queue,
+// recovery, retention, and optional database resources without force-exit.
+export async function stopBackgroundServices({ closeDatabase = false } = {}) {
+  await appStartupPromise;
+  await stopInboxRecovery();
+  stopRetentionSchedulerHandle?.();
+  stopRetentionSchedulerHandle = null;
+  await closeQueue();
+  if (closeDatabase) await closeDatabaseConnection();
+}
+
 async function startServer() {
   if (IS_PRODUCTION || process.env.DATABASE_URL) {
     const migrationResult = await runMigrations();
@@ -1808,7 +1820,7 @@ async function startServer() {
     logger.info("WhatsApp queue worker started");
   }
 
-  const stopRetentionScheduler = startRetentionScheduler();
+  stopRetentionSchedulerHandle = startRetentionScheduler();
   if (isDatabaseConfigured()) startInboxRecovery();
 
   startupComplete = true;
@@ -1840,7 +1852,8 @@ async function startServer() {
         });
       });
 
-      stopRetentionScheduler?.();
+      stopRetentionSchedulerHandle?.();
+      stopRetentionSchedulerHandle = null;
       await closeQueue();
       await closeDatabaseConnection();
 
@@ -1876,7 +1889,7 @@ async function startServer() {
     process.exit(1);
   });
 }
-startServer().catch((error) => {
+export const appStartupPromise = startServer().catch((error) => {
   logger.fatal({ error: error.message }, "Nova-AI failed to start");
   process.exit(1);
 });
