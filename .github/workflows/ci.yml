@@ -56,6 +56,16 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
     # tests/migration-postgres.test.js maps MIGRATION_TEST_DATABASE_URL onto
     # DATABASE_URL before importing the migration runner, then applies the full
     # chain to a fresh database and re-runs it to prove the second run is a no-op.
@@ -97,7 +107,9 @@ jobs:
       # tested against the real application and PostgreSQL. This suite resets
       # the shared test schema, so it runs as a separate serialized step.
       - name: Run payment webhook tenant-isolation integration tests
-        run: node --test tests/payment-webhook-tenant-isolation.test.js
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        run: timeout 120s node --test tests/payment-webhook-tenant-isolation.test.js
 
       # TASK-04 regression coverage: outbound WhatsApp delivery retries,
       # attempt caps, lease fencing and monotonic state transitions.
@@ -140,3 +152,11 @@ jobs:
       # This suite also resets public schema, so run it serialized and last in this job.
       - name: Run webhook dead-letter operations integration tests
         run: node --test tests/webhook-dead-letter-operations.test.js
+
+      # N-13: exercise the previously hanging app-composition test with both
+      # PostgreSQL and Redis live, and require natural process exit (no force-exit).
+      - name: Verify Task 16 app shutdown with PostgreSQL and Redis
+        env:
+          DATABASE_URL: postgres://nova:nova@127.0.0.1:5432/nova_migration_test
+          REDIS_URL: redis://127.0.0.1:6379
+        run: timeout 120s node --test tests/task16-route-behavior.test.js
