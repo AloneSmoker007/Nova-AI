@@ -45,6 +45,7 @@ let server;
 let baseUrl;
 let dbPool;
 let runMigrations;
+let stopBackgroundServices;
 
 function fakeServer() {
   return {
@@ -91,7 +92,9 @@ before(async () => {
   // keep it suppressed so startServer()'s app.listen(PORT) cannot bind a stray
   // port. Serve the real app ourselves via http.createServer(app).
   express.application.listen = function suppressed() { return fakeServer(); };
-  ({ default: app } = await import("../src/index.js"));
+  const appModule = await import("../src/index.js");
+  ({ default: app, stopBackgroundServices } = appModule);
+  await appModule.appStartupPromise;
   server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -124,7 +127,10 @@ before(async () => {
 
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
-  if (dbPool) await dbPool.end();
+  // The app starts its own queue worker, inbox recovery and retention work.
+  // Release these before the shared DB pool, and close that pool only once.
+  if (stopBackgroundServices) await stopBackgroundServices({ closeDatabase: true });
+  else if (dbPool) await dbPool.end();
 });
 
 function rawJson(obj) {

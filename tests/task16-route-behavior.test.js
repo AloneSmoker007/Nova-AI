@@ -36,6 +36,7 @@ const TASK16_ROUTES = [
 let app;
 let server;
 let baseUrl;
+let stopBackgroundServices;
 const realListen = express.application.listen;
 
 function fakeServer() {
@@ -52,13 +53,17 @@ function fakeServer() {
 before(async () => {
   express.application.listen = function suppressed() { return fakeServer(); };
   try {
-    ({ default: app } = await import("../src/index.js"));
+    const appModule = await import("../src/index.js");
+    ({ default: app, stopBackgroundServices } = appModule);
+    // startServer awaits migrations when DATABASE_URL is set. Do not restore
+    // listen early or its continuation can bind an unintended second server.
+    await appModule.appStartupPromise;
   } finally {
     // express() mixins application methods onto the app instance, so the
     // instance holds its own copy of `listen` captured at construction time.
     // Restoring the prototype alone is not enough - restore it on the instance.
     express.application.listen = realListen;
-    app.listen = realListen;
+    if (app) app.listen = realListen;
   }
   server = app.listen(0);
   await new Promise((resolve) => server.on("listening", resolve));
@@ -68,6 +73,7 @@ before(async () => {
 
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
+  if (stopBackgroundServices) await stopBackgroundServices({ closeDatabase: true });
 });
 
 function request(method, path, body) {
