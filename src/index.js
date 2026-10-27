@@ -1503,7 +1503,9 @@ app.use((req, res) => res.status(404).json({ status: "error", message: "Route no
 app.use((error, req, res, next) => {
   req.log?.error({ error: error.message }, "Unhandled application error");
   if (res.headersSent) return next(error);
-  return res.status(500).json({ status: "error", message: IS_PRODUCTION ? "Internal server error" : error.message });
+  // Keep internal diagnostics in server logs, never in public API responses.
+  // Fail closed even if NODE_ENV is unset or misconfigured.
+  return res.status(500).json({ status: "error", message: "Internal server error" });
 });
 
 async function startServer() {
