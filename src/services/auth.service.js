@@ -113,6 +113,7 @@ export async function loginUser(email, password) {
 
   return {
     token,
+    tokenVersion: user.token_version,
     user: {
       id: user.id,
       email: user.email,

@@ -28,21 +28,29 @@ function validateIdentity(userId, tenantId) {
   );
 }
 
-export async function issueRefreshToken(userId, tenantId) {
+export async function issueRefreshToken(userId, tenantId, expectedTokenVersion = null) {
   assertDatabase();
 
   if (!validateIdentity(userId, tenantId)) {
     throw new Error("User and tenant identifiers are required");
   }
+  if (expectedTokenVersion !== null && (!Number.isInteger(expectedTokenVersion) || expectedTokenVersion < 0)) {
+    throw new Error("Invalid account token version");
+  }
 
   const rawToken = crypto.randomBytes(REFRESH_TOKEN_BYTES).toString("base64url");
   const tokenHash = hashToken(rawToken);
 
-  await dbPool.query(
-    `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at)
-     VALUES ($1, $2, $3, NOW() + INTERVAL '${REFRESH_TOKEN_TTL_DAYS} days')`,
-    [userId.trim(), tenantId.trim(), tokenHash],
+  const issued = await dbPool.query(
+    `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at, token_version)
+     SELECT id, tenant_id, $3, NOW() + INTERVAL '${REFRESH_TOKEN_TTL_DAYS} days', token_version
+     FROM users
+     WHERE id=$1 AND tenant_id=$2 AND status='active'
+       AND ($4::integer IS NULL OR token_version=$4)
+     RETURNING id`,
+    [userId.trim(), tenantId.trim(), tokenHash, expectedTokenVersion],
   );
+  if (issued.rowCount !== 1) throw new Error("Invalid credentials");
 
   return rawToken;
 }
@@ -57,7 +65,7 @@ export async function rotateRefreshToken(rawToken) {
     await client.query("BEGIN");
 
     const result = await client.query(
-      `SELECT id, user_id, tenant_id, expires_at, revoked_at
+      `SELECT id, user_id, tenant_id, expires_at, revoked_at, token_version
        FROM refresh_tokens
        WHERE token_hash = $1
        FOR UPDATE`,
@@ -76,6 +84,22 @@ export async function rotateRefreshToken(rawToken) {
     // the user's currently active sessions.
     if (new Date(row.expires_at) <= new Date()) {
       await client.query("ROLLBACK");
+      return null;
+    }
+
+    const account = await client.query(
+      "SELECT token_version FROM users WHERE id=$1 AND tenant_id=$2",
+      [row.user_id, row.tenant_id],
+    );
+    // Never upgrade a pre-change refresh credential into a post-change
+    // session. Check before replay handling so an obsolete credential cannot
+    // revoke sessions created after the password/role change.
+    if (!account.rows[0] || row.token_version !== account.rows[0].token_version) {
+      await client.query(
+        "UPDATE refresh_tokens SET revoked_at=COALESCE(revoked_at, NOW()) WHERE id=$1 AND tenant_id=$2",
+        [row.id, row.tenant_id],
+      );
+      await client.query("COMMIT");
       return null;
     }
 
@@ -115,9 +139,9 @@ export async function rotateRefreshToken(rawToken) {
     const newHash = hashToken(newRaw);
 
     await client.query(
-      `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at)
-       VALUES ($1, $2, $3, NOW() + INTERVAL '${REFRESH_TOKEN_TTL_DAYS} days')`,
-      [row.user_id, row.tenant_id, newHash],
+      `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at, token_version)
+       VALUES ($1, $2, $3, NOW() + INTERVAL '${REFRESH_TOKEN_TTL_DAYS} days', $4)`,
+      [row.user_id, row.tenant_id, newHash, row.token_version],
     );
 
     await client.query("COMMIT");
@@ -126,6 +150,7 @@ export async function rotateRefreshToken(rawToken) {
       refreshToken: newRaw,
       userId: row.user_id,
       tenantId: row.tenant_id,
+      tokenVersion: row.token_version,
     };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -144,7 +169,7 @@ export async function revokeRefreshToken(rawToken) {
   try {
     await client.query("BEGIN");
     const result = await client.query(
-      `SELECT user_id, tenant_id, revoked_at, expires_at
+      `SELECT user_id, tenant_id, revoked_at, expires_at, token_version
        FROM refresh_tokens
        WHERE token_hash = $1
        FOR UPDATE`,
@@ -155,6 +180,15 @@ export async function revokeRefreshToken(rawToken) {
     // A replayed/expired token is not valid logout authority. In particular,
     // never let an old stolen refresh token terminate sessions created later.
     if (!row || row.revoked_at || new Date(row.expires_at).getTime() <= Date.now()) {
+      await client.query("COMMIT");
+      return false;
+    }
+
+    const account = await client.query(
+      "SELECT token_version FROM users WHERE id=$1 AND tenant_id=$2",
+      [row.user_id, row.tenant_id],
+    );
+    if (!account.rows[0] || row.token_version !== account.rows[0].token_version) {
       await client.query("COMMIT");
       return false;
     }

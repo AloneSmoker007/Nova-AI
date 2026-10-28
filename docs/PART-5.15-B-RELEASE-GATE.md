@@ -2,6 +2,8 @@
 
 **State: BLOCKED / NOT RELEASE APPROVED.** This is a living release-control document for PR [#163](https://github.com/AloneSmoker007/Nova-AI/pull/163), not a certification or deployment authorization.
 
+Current scope reconciliation: [Part 5 evidence matrix](./PART-5-AUDIT-EVIDENCE-MATRIX.md) maps all fifteen parts, separates missing reports from tested fixes, and records the reproduced refresh-credential revocation gap plus its follow-up. Its new database/race checks require CI at the containing commit. Migration 035 requires existing users to sign in again when their current access expires; include that impact in any later rollout approval. This does not change the NO-GO decision below.
+
 ## Verified branch evidence (2026-10-27)
 
 - Baseline reviewed: PR #163 head `29c79c470ca4f8bd0dca762c0e03d14085026547`. `main` remains separate. Recheck the SHA before reusing this evidence.

@@ -120,7 +120,7 @@ The endpoint verifies the `x-nova-payment-signature` HMAC-SHA256 over the **raw*
 - `POST /webhook` — Meta WhatsApp webhook receiver.
 - `POST /api/auth/login` — login.
 - `POST /api/auth/refresh` — rotate refresh token.
-- `POST /api/auth/logout` — revoke refresh token.
+- `POST /api/auth/logout` — revoke the account's refresh sessions and invalidate older access JWTs. Password/role changes invalidate both access and refresh credentials; rotation preserves the original credential version. Migration 035 revokes legacy unversioned refresh tokens, so users must sign in again after their existing access expires.
 - `GET /api/auth/me` — authenticated user details.
 - `GET /api/conversations` — tenant-scoped conversations.
 - `GET /api/usage` — tenant usage summary.

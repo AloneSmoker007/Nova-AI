@@ -1076,7 +1076,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
     const { error, value } = loginSchema.validate(req.body);
     if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
     const result = await loginUser(value.email, value.password);
-    const refreshToken = await issueRefreshToken(result.user.id, result.user.tenantId);
+    const refreshToken = await issueRefreshToken(result.user.id, result.user.tenantId, result.tokenVersion);
     return res.status(200).json({ status: "ok", token: result.token, refreshToken, user: result.user });
   } catch (error) {
     if (error.message === "Invalid credentials") return res.status(401).json({ status: "error", error: "Invalid credentials" });
@@ -1093,6 +1093,9 @@ app.post("/api/auth/refresh", refreshLimiter, async (req, res) => {
     if (!rotatedToken) return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
     const user = await getUserById(rotatedToken.userId, rotatedToken.tenantId);
     if (!user || user.status !== "active" || !(await isTenantActive(rotatedToken.tenantId))) return res.status(401).json({ status: "error", error: "Account is inactive" });
+    // A credential/logout change may race with rotation. A rotated token keeps
+    // its original version; never mint a new-version access JWT from it.
+    if (user.token_version !== rotatedToken.tokenVersion) return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
     const token = generateToken(user);
     return res.status(200).json({ status: "ok", token, refreshToken: rotatedToken.refreshToken, user: { id: user.id, email: user.email, role: user.role, tenantId: user.tenant_id } });
   } catch (error) {

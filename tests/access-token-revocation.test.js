@@ -1,6 +1,8 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import express from "express";
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "ci-access-token-revocation-secret-32chars";
@@ -22,6 +24,7 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
   let issueRefreshToken;
   let rotateRefreshToken;
   let revokeRefreshToken;
+  let stopBackgroundServices;
 
   before(async () => {
     process.env.DATABASE_URL = integrationUrl;
@@ -40,6 +43,7 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
   });
 
   after(async () => {
+    if (stopBackgroundServices) await stopBackgroundServices();
     if (dbPool) await dbPool.end();
   });
 
@@ -144,6 +148,151 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
       assert.equal(renewed, null, "a credential change must require fresh authentication, not just invalidate one access JWT");
     });
   }
+
+  it("refresh issuance rejects a stale login version and fresh authentication can rotate normally", async () => {
+    const user = await seedUser();
+    await dbPool.query("UPDATE users SET password_hash='changed-password' WHERE id=$1", [user.id]);
+    await assert.rejects(
+      issueRefreshToken(user.id, user.tenant_id, user.token_version),
+      /Invalid credentials/,
+    );
+    const fresh = await issueRefreshToken(user.id, user.tenant_id, 1);
+    const rotated = await rotateRefreshToken(fresh);
+    assert.ok(rotated?.refreshToken);
+    assert.equal(rotated.tokenVersion, 1);
+    const next = await rotateRefreshToken(rotated.refreshToken);
+    assert.ok(next?.refreshToken);
+    assert.equal(next.tokenVersion, 1, "rotation must preserve the credential version");
+    await dbPool.query("UPDATE users SET password_hash='another-password-change' WHERE id=$1", [user.id]);
+    assert.equal(await rotateRefreshToken(next.refreshToken), null, "descendants must not survive a later credential change");
+  });
+
+  it("authentication rejects expired, forged, cross-tenant and suspended identities", async () => {
+    const user = await seedUser();
+    const other = await seedUser();
+    const valid = generateToken(user);
+    assert.equal((await authenticate(valid)).nextCalled, true);
+    const parts = valid.split(".");
+    parts[2] = (parts[2][0] === "A" ? "B" : "A") + parts[2].slice(1);
+    const originalExpiry = process.env.JWT_EXPIRES_IN;
+    let expired;
+    try {
+      process.env.JWT_EXPIRES_IN = "-1s";
+      expired = generateToken(user);
+    } finally {
+      if (originalExpiry === undefined) delete process.env.JWT_EXPIRES_IN;
+      else process.env.JWT_EXPIRES_IN = originalExpiry;
+    }
+    for (const token of ["", "invalid.token", parts.join("."), expired, generateToken({ ...user, tenant_id: other.tenant_id })]) {
+      const denied = await authenticate(token);
+      assert.equal(denied.statusCode, 401);
+      assert.equal(denied.nextCalled, false);
+    }
+    await dbPool.query("UPDATE users SET status='suspended' WHERE id=$1", [user.id]);
+    assert.equal((await authenticate(valid)).statusCode, 401);
+    await dbPool.query("UPDATE users SET status='active' WHERE id=$1", [user.id]);
+    await dbPool.query("UPDATE tenants SET status='suspended' WHERE id=$1", [user.tenant_id]);
+    assert.equal((await authenticate(valid)).statusCode, 401);
+  });
+
+  it("obsolete refresh and logout credentials cannot revoke fresh or other-tenant sessions", async () => {
+    const user = await seedUser();
+    const other = await seedUser();
+    const stale = await issueRefreshToken(user.id, user.tenant_id);
+    const otherRefresh = await issueRefreshToken(other.id, other.tenant_id);
+    await dbPool.query("UPDATE users SET password_hash='changed-password' WHERE id=$1", [user.id]);
+    const fresh = await issueRefreshToken(user.id, user.tenant_id, 1);
+
+    assert.equal(await revokeRefreshToken(stale), false);
+    assert.equal(await rotateRefreshToken(stale), null);
+    assert.equal(await rotateRefreshToken(stale), null, "replaying an obsolete token must not bump the current version");
+    assert.ok((await rotateRefreshToken(fresh))?.refreshToken);
+    assert.ok((await rotateRefreshToken(otherRefresh))?.refreshToken);
+    const versions = await dbPool.query(
+      "SELECT id, token_version FROM users WHERE id=ANY($1::uuid[])", [[user.id, other.id]],
+    );
+    const byId = new Map(versions.rows.map((row) => [row.id, row.token_version]));
+    assert.equal(byId.get(user.id), 1);
+    assert.equal(byId.get(other.id), 0);
+  });
+
+  it("migration revokes unversioned legacy refresh credentials instead of upgrading them", async () => {
+    const user = await seedUser();
+    const client = await dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      // Recreate the pre-035 refresh schema inside a rollback-only transaction.
+      await client.query("ALTER TABLE refresh_tokens DROP COLUMN token_version");
+      const legacy = await client.query(
+        `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at)
+         VALUES ($1, $2, $3, NOW()+INTERVAL '1 day') RETURNING id`,
+        [user.id, user.tenant_id, "legacy-synthetic-" + randomUUID()],
+      );
+      const sql = await readFile(new URL("../database/035_refresh_token_version_fencing.sql", import.meta.url), "utf8");
+      await client.query(sql);
+      const migrated = await client.query(
+        "SELECT revoked_at, token_version FROM refresh_tokens WHERE id=$1", [legacy.rows[0].id],
+      );
+      assert.ok(migrated.rows[0].revoked_at);
+      assert.equal(migrated.rows[0].token_version, -1, "legacy replay must not share the fresh account's credential version");
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  });
+
+  it("the real refresh handler rejects a credential change between rotation and access-token signing", async () => {
+    const realListen = express.application.listen;
+    express.application.listen = () => ({
+      on() { return this; },
+      close(callback) { callback?.(); },
+    });
+    let app;
+    try {
+      const appModule = await import("../src/index.js");
+      app = appModule.default;
+      stopBackgroundServices = appModule.stopBackgroundServices;
+      await appModule.appStartupPromise;
+    } finally {
+      express.application.listen = realListen;
+    }
+    // Await recovery before schema-sensitive assertions, and leave the pool
+    // available to this test file's after hook.
+    await stopBackgroundServices();
+    const handler = app._router.stack.find((layer) =>
+      layer.route?.path === "/api/auth/refresh" && layer.route.methods.post,
+    ).route.stack.at(-1).handle;
+    const user = await seedUser();
+    const refresh = await issueRefreshToken(user.id, user.tenant_id);
+    const originalQuery = dbPool.query;
+    let injected = false;
+    dbPool.query = async function (sql, params) {
+      if (!injected && typeof sql === "string" && sql.includes("SELECT id, tenant_id, email, role, status, token_version")) {
+        injected = true;
+        await originalQuery.call(this, "UPDATE users SET password_hash='racing-password-change' WHERE id=$1", [user.id]);
+      }
+      return originalQuery.call(this, sql, params);
+    };
+    const result = { statusCode: null, body: null };
+    const response = {
+      status(code) { result.statusCode = code; return this; },
+      json(body) { result.body = body; return this; },
+    };
+    try {
+      await handler({ body: { refreshToken: refresh }, log: { error() {} } }, response);
+    } finally {
+      dbPool.query = originalQuery;
+    }
+    assert.equal(injected, true, "exercise the post-rotation account lookup");
+    assert.equal(result.statusCode, 401);
+    assert.equal(result.body?.token, undefined, "no upgraded access JWT may escape the route");
+    assert.equal(result.body?.refreshToken, undefined);
+
+    const fresh = await issueRefreshToken(user.id, user.tenant_id, 1);
+    await handler({ body: { refreshToken: fresh }, log: { error() {} } }, response);
+    assert.equal(result.statusCode, 200, "fresh authentication must remain usable");
+    assert.equal((await authenticate(result.body.token)).nextCalled, true);
+  });
 
   it("role and password changes bump the token version and reject old access JWTs", async () => {
     const user = await seedUser();
