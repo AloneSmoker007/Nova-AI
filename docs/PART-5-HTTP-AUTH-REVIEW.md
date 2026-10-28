@@ -19,7 +19,7 @@ The checked database constraints and scoped reads prevented foreign data disclos
 - Starting a foreign/missing workflow returned HTTP 202 with `data: null`, implying acceptance when no run existed.
 - Assigning a foreign user to a local conversation, referencing foreign contacts/conversations in workflow runs, and booking with foreign nested references returned HTTP 500 from database integrity errors.
 
-The fixes add tenant-qualified existence predicates or transaction-scoped reference checks, retain composite foreign keys, and return explicit 4xx rejection. No new data-access role is granted. Positive controls cover owned IDs, nullable assignment, and caller-derived ownership despite forged body/query tenant IDs.
+The fixes add tenant-qualified existence predicates, transaction-scoped reference checks or safe API translation of integrity rejection. Composite foreign keys remain in force, and the API returns explicit 4xx rejection. In particular, direct workflow service calls still reject a foreign nested reference with PostgreSQL `23503`; the HTTP handler translates that failure without revealing constraint details. No new data-access role is granted. Positive controls cover owned IDs, nullable assignment, and caller-derived ownership despite forged body/query tenant IDs.
 
 ### Confirmed auth deadlock
 

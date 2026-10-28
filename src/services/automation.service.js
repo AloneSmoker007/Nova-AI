@@ -163,10 +163,7 @@ export async function startWorkflowRun({tenantId,workflowId,conversationId=null,
   if(contactId!==null&&!uuid(contactId)) throw new Error("Invalid contact ID");
   const r=await dbPool.query(`INSERT INTO automation_runs(tenant_id,workflow_id,conversation_id,contact_id,status,context,next_run_at,trigger_key)
     SELECT $1,w.id,$3,$4,'queued',$5,NOW(),$6 FROM automation_workflows w
-    WHERE w.tenant_id=$1 AND w.id=$2 AND w.status='active'
-      AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM conversations c WHERE c.tenant_id=$1 AND c.id=$3))
-      AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM contacts c WHERE c.tenant_id=$1 AND c.id=$4))
-    ON CONFLICT (tenant_id,workflow_id,trigger_key) WHERE trigger_key IS NOT NULL DO NOTHING RETURNING *`,[t,workflowId,conversationId,contactId,context,triggerKey]);
+    WHERE w.tenant_id=$1 AND w.id=$2 AND w.status='active' ON CONFLICT (tenant_id,workflow_id,trigger_key) WHERE trigger_key IS NOT NULL DO NOTHING RETURNING *`,[t,workflowId,conversationId,contactId,context,triggerKey]);
   return r.rows[0] ?? null;
 }
 export async function triggerWorkflows({tenantId,triggerType,conversationId=null,contactId=null,context={}}) {

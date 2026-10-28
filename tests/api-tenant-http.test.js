@@ -279,7 +279,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
     }
   });
 
-  it("nested foreign IDs are rejected before inserts, quota reservations or provider calls", async (t) => {
+  it("nested foreign IDs are rejected without persisted side effects or provider calls", async (t) => {
     for (const [index, f] of fixtures.entries()) {
       const foreign = fixtures[1 - index];
       const before = await snapshot(f.tenant);

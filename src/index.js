@@ -1530,6 +1530,10 @@ app.post("/api/automations/:workflowId/run", requireAuth, requireRole("owner", "
     if (!data) return res.status(404).json({ status: "error", error: "Workflow or context not found or inactive" });
     return res.status(202).json({ status: "ok", data });
   } catch (error) {
+    // Keep the service/database tenant FK contract intact. Translate its
+    // rejection at the API boundary without exposing constraint details.
+    if (error.code === "23503") return res.status(404).json({ status: "error", error: "Workflow or context not found" });
+    if (error.code === "22P02") return res.status(400).json({ status: "error", error: "Invalid identifier" });
     if (error.message.startsWith("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
     return next(error);
   }
