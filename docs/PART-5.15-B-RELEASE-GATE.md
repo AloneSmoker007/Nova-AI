@@ -4,9 +4,9 @@
 
 **Owner instruction (29 October 2026):** continue tests/remediation autonomously and merge on GitHub after the final gate is complete. This supplies conditional merge authorization, not missing test evidence or production deployment authorization. Reuse that authorization if all required gates are subsequently evidenced; do not ask for the same merge permission again. Until then, the gate remains blocked.
 
-Current scope reconciliation: [Part 5 evidence matrix](./PART-5-AUDIT-EVIDENCE-MATRIX.md) maps all fifteen parts, separates missing reports from tested fixes, and records the reproduced refresh-credential revocation gap plus its follow-up. Its new database/race checks require CI at the containing commit. Migration 035 requires existing users to sign in again when their current access expires; include that impact in any later rollout approval. This does not change the NO-GO decision below.
+Current scope reconciliation: [Part 5 evidence matrix](./PART-5-AUDIT-EVIDENCE-MATRIX.md) maps all fifteen parts, separates missing reports from tested fixes, and records the reproduced refresh-credential revocation gap plus its verified follow-up. Migration 035 requires existing users to sign in again when their current access expires; include that impact in any later rollout approval. This does not change the NO-GO decision below.
 
-29 October: the [HTTP/auth follow-up](./PART-5-HTTP-AUTH-REVIEW.md) expands real-HTTP role/resource/rate-limit checks and logout/refresh concurrency coverage. It records the baseline failures and corrections; verify its containing commit's CI before accepting the new evidence. Independent and external/staging gates remain unsigned.
+29 October: the [HTTP/auth and AI outbound follow-up](./PART-5-HTTP-AUTH-REVIEW.md) records reproduced failures, corrections and exact-SHA CI. At `157512fa14f7c467a1a2641565f0d07afb4559f7`, [CI #40757466666](https://github.com/AloneSmoker007/Nova-AI/actions/runs/40757466666) passed both jobs: quality 197 pass / 0 fail / 2 summarized skips and serialized PostgreSQL/Redis 549 pass / 0 fail / 0 skip. The 633-request HTTP matrix and real worker's synthetic output-to-delivery checks passed. External provider transports were simulated; independent and external/staging gates remain unsigned. Recheck the CI of any later commit.
 
 ## Verified branch evidence (2026-10-27)
 
@@ -23,7 +23,7 @@ These results establish **automated test confidence**, not safe live provider be
 
 | Gate | Current state | Required evidence before approval |
 | --- | --- | --- |
-| Historical Parts 5.1–5.15 | **INCOMPLETE** | Locate original reports or explicitly mark each as unavailable; do not transform missing reports into PASS |
+| Historical Parts 5.1–5.15 | **15 scopes mapped; original reports unavailable where stated** | Use the current evidence map and independent current-code review; unavailable historical reports are not PASS |
 | Part 5.10 | **HISTORICAL FAIL; ORIGINAL REPORT MISSING** | Earlier conversation checkpoint recovered the scope and severity-level findings below, but not finding IDs/full original report. Re-audit each issue against the current SHA with evidence and independent review |
 | Meta WhatsApp Cloud API | **UNTESTED live** | Owner-approved test phone/number and credentials, signed webhook delivery, duplicated inbound event, outbound status, ambiguous send, retry, human takeover |
 | Gemini and paid AI provider | **UNTESTED live** | Owner-approved bounded test budget; prompt-injection / output-redaction checks, quota reservation and provider-failure exercise |
@@ -43,7 +43,7 @@ An earlier **2026-10-01 multi-agent checkpoint summary** identifies Part 5.10 as
 
 Current **candidate mitigations for independent review**, not proof of closure: `src/services/gemini.service.js` keeps a server-authored system instruction and puts business/memory data in the untrusted user payload; `advanced-ai.service.js` sanitizes and XML-escapes memory; `ai-output-safety.service.js` applies high-confidence output rejection; AI-memory API routes restrict writes; source-message deletion purges derived records; retention windows exist; handoff context is bounded; N-07 masks server errors.
 
-In the subsequent unmerged PR #163 patch, direct `rememberCustomerPreference` provenance checks now require the source to be a live inbound message belonging to that **same contact** and lock it against concurrent deletion. The new real-PostgreSQL regression must pass in CI before this mitigation can be marked verified. This is narrower than a comprehensive prompt-injection / PII red-team signoff.
+In the unmerged PR #163 patch, direct `rememberCustomerPreference` provenance checks require the source to be a live inbound message belonging to that **same contact** and lock it against concurrent deletion. These scoped PostgreSQL regressions passed in the exact-SHA CI referenced above. The AI boundary suite also checks synthetic output through persistence and delivery. This remains narrower than a comprehensive prompt-injection / PII red-team signoff.
 
 ## Operator preflight (no secrets in GitHub)
 

@@ -2,6 +2,14 @@
 
 **Release gate remains NO-GO.** This sequential review expands deterministic evidence for Parts 5.1–5.3, 5.6 and 5.14. It is not an independent review or a live Meta/Gemini test.
 
+## Verified follow-up evidence
+
+- HTTP/auth corrections passed at `a1387e5a54358d88f9eefacbd05d9578d4e6e7ae` in [CI #40756385327](https://github.com/AloneSmoker007/Nova-AI/actions/runs/40756385327). The database job reported 545 pass / 0 fail / 0 skip, including 436 HTTP matrix records and 11 auth integration cases.
+- The added AI outbound boundary suite passed at `157512fa14f7c467a1a2641565f0d07afb4559f7` in [CI #40757466666](https://github.com/AloneSmoker007/Nova-AI/actions/runs/40757466666). Both jobs succeeded: quality 197 pass / 0 fail / 2 summarized skips; 21 serialized PostgreSQL 15 / Redis 7 test commands reported 549 pass / 0 fail / 0 skip. These counts overlap and must not be added as unique coverage. The quality job's 20 raw `# SKIP` markers include environment-gated suites and the two summarized skipped tests; they are not passes.
+- The HTTP matrix completed **633 actual loopback HTTP requests** with zero external provider calls. Its 436 test records include grouped/parameterized probes, not 436 independent findings.
+- Production dependency audit in that CI reported zero vulnerabilities. The local full production-and-development dependency audit also reported zero known vulnerabilities at this checkpoint; this is time-bound advisory evidence, not proof of no dependency flaws.
+- Any later commit still needs its own exact-SHA CI result before merge. No production migration, real provider request, customer send, independent approval, merge or deployment is implied.
+
 ## Reproduced baseline failures
 
 Application baseline: `0760e5d82269b4b28b9ec603fcada2b58b89c1ab`. The following reproduction commits added tests and CI wiring without changing application behavior:
@@ -43,6 +51,19 @@ Read the CI run associated with the commit containing this follow-up for its fin
 | External actions | No Meta/Gemini credentials or requests are exercised. External `fetch` is forbidden and counted; fixture recovery/queue workers are stopped before seeding. Valid OCR/model generation and actual provider messages remain outside this test. |
 
 Counts distinguish test records, subtest groups and HTTP requests. Do not equate hundreds of parameterized probes with hundreds of independent vulnerabilities or sum overlapping CI suites as distinct tests.
+
+## AI output at the outbound delivery boundary
+
+`tests/ai-outbound-boundary.test.js` drives the real signed webhook HTTP handler, migrated PostgreSQL database, recovery dispatcher, Redis/BullMQ worker, Gemini SDK response parser, output policy and durable WhatsApp delivery path. Only the Gemini and Meta network transports are replaced; all credentials and identities are synthetic.
+
+Four passing cases establish the tested contract:
+
+1. A webhook with an invalid signature creates no inbox record and makes no generation/send attempt.
+2. A synthetic model response containing a JSON `access_token` assignment becomes the fixed safe fallback before it reaches the durable inbox response, delivery body, outbound history or simulated Meta payload. The raw secret canary is absent from those durable artifacts.
+3. A supported ordinary business reply passes unchanged to the owning tenant's recipient/number. Each model prompt contains its own business canary, excludes the other tenant's canary and excludes the Meta access credential.
+4. Signed duplicate deliveries and a completed inbox row re-enqueued through the real worker do not generate or send again; one AI usage event and one delivery intent remain per message. The final transport accounting is two simulated Gemini responses, two simulated Meta sends and **zero external provider calls**.
+
+The final accounting assertion is separate from the two substantive message cases. The replay assertion settles the real worker job before checking call counts. This exercises deterministic output-to-persistence/send wiring; it does not establish real-model semantic safety, universal PII detection, live Meta behavior, billing correctness or deployment controls.
 
 ## Residual release work
 
