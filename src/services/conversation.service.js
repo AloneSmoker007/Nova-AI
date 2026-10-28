@@ -85,6 +85,7 @@ export async function updateConversation(tenantId, conversationId, { status, pri
 
   const fields = [];
   const params = [tenantId, conversationId];
+  let assignmentGuard = "";
   if (status !== undefined) {
     if (!["active", "paused", "human", "archived"].includes(status)) throw new Error("Invalid conversation status");
     params.push(status); fields.push(`status = $${params.length}`);
@@ -99,13 +100,18 @@ export async function updateConversation(tenantId, conversationId, { status, pri
   if (assignedUserId !== undefined) {
     if (assignedUserId !== null && !validId(assignedUserId)) throw new Error("Invalid assigned user");
     params.push(assignedUserId); fields.push(`assigned_user_id = $${params.length}`);
+    if (assignedUserId !== null) {
+      assignmentGuard = `AND EXISTS (
+        SELECT 1 FROM users u WHERE u.tenant_id=$1 AND u.id=$${params.length} AND u.status='active'
+      )`;
+    }
   }
   if (!fields.length) throw new Error("No conversation changes supplied");
   fields.push("updated_at = NOW()");
 
   const result = await dbPool.query(
     `UPDATE conversations SET ${fields.join(", ")}
-     WHERE tenant_id = $1 AND id = $2
+     WHERE tenant_id = $1 AND id = $2 ${assignmentGuard}
      RETURNING id, status, priority, unread_count, assigned_user_id, archived_at`,
     params,
   );

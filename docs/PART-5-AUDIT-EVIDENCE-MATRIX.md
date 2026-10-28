@@ -2,6 +2,8 @@
 
 **Release verdict: NO-GO.** This is a source/test evidence map and a scoped remediation record, not a recovered original audit or independent security approval.
 
+29 October follow-up: [real HTTP tenant/role/resource and auth concurrency review](./PART-5-HTTP-AUTH-REVIEW.md) adds the listed behavioral cases, records reproduced response-contract failures and a PostgreSQL logout deadlock, and explains the fixes and residual scope. Use exact-SHA follow-up CI; the baseline results below remain historical.
+
 ## Evidence boundaries
 
 - Source baseline: PR #163 at `72b00b749ebd469fa0d5345f2557b8e7aebf7c88`, open and unmerged when inspected. [Baseline CI #40748177665](https://github.com/AloneSmoker007/Nova-AI/actions/runs/40748177665) passed both jobs. Quality: 197 pass / 0 fail / 2 summarized skips; separate PostgreSQL 15 / Redis 7 steps: 100 pass / 0 fail / 0 skip. These scopes overlap and must not be summed as unique tests.
@@ -51,7 +53,7 @@ Two regression cases were saved at `a58d17f992a55c99a7a5fab0330f61e19fa6d0bc`. [
 
 ## Remaining release inputs
 
-1. Complete the real-HTTP tenant/resource/abuse matrix and unresolved concurrency cases; retain each uncovered case as an evidence gap.
+1. Verify the added HTTP tenant/resource/role/abuse matrix and logout/refresh overlap cases at the final SHA; retain uncovered payload and concurrency cases as evidence gaps rather than declaring exhaustive coverage.
 2. Conduct an independent security review of the final diff and exact candidate. No independent review is implied by this document.
 3. Supply isolated Meta test identities/credentials and explicit permission to send test messages, plus isolated Gemini credentials and a bounded spend ceiling; run the documented semantic, privacy and delivery cases.
 4. Record staging ingress/proxy hops, private DB/Redis access, signer rollout, offsite encrypted backup/key recovery, restore drill, monitoring and rollback evidence.

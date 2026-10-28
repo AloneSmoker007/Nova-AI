@@ -24,6 +24,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
   let fixtures;
   const originalFetch = globalThis.fetch;
   let providerCalls = 0;
+  let requestCount = 0;
 
   before(async () => {
     process.env.NODE_ENV = "test";
@@ -97,6 +98,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
   }
 
   function request(actor, method, path, body) {
+    requestCount += 1;
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
       const req = http.request({
@@ -106,7 +108,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
         // disabling production middleware to fit the matrix under one IP.
         localAddress: actor?.ip || "127.0.0.10",
         headers: {
-          ...(actor ? { Authorization: `Bearer ${actor.token}` } : {}),
+          ...(actor?.token ? { Authorization: `Bearer ${actor.token}` } : {}),
           ...(payload ? { "Content-Type": "application/json", "Content-Length": payload.length } : {}),
         },
       }, (res) => {
@@ -116,7 +118,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
         res.on("end", () => {
           let body;
           try { body = JSON.parse(text); } catch { body = null; }
-          resolve({ status: res.statusCode, body, text });
+          resolve({ status: res.statusCode, headers: res.headers, body, text });
         });
       });
       req.setTimeout(10_000, () => req.destroy(new Error("HTTP matrix request timed out")));
@@ -130,6 +132,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
     for (const key of ["tenant", "contact", "conversation", "message", "payment", "ocr", "type", "appointment", "workflow", "run", "effect", "inbox"]) {
       assert.ok(!response.text.includes(foreign[key]), `foreign ${key} identifier must not escape`);
     }
+    for (const user of Object.values(foreign.users)) assert.ok(!response.text.includes(user.id), "foreign user ID must not escape");
   }
 
   async function snapshot(tenantId) {
@@ -188,7 +191,10 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
       }
       for (const [method, path, body] of privileged(f)) {
         await t.test(`${role} ${method} ${path}`, async () => {
-          const res = await request(f.users[role], method, path, body);
+          const foreign = fixtures.find((other) => other !== f);
+          const scopedPath = method === "GET" ? path + "?tenantId=" + foreign.tenant : path;
+          const res = await request(f.users[role], method, scopedPath, body);
+          privateAbsent(res, foreign);
           if (role === "agent") assert.equal(res.status, 403, res.text);
           else assert.ok(res.status >= 200 && res.status < 300, `${res.status} ${res.text}`);
         });
@@ -207,6 +213,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
         [`/api/conversations/${x.conversation}/handoff-summary`, 404],
         [`/api/payments/${x.payment}`, 404], [`/api/ocr/documents/${x.ocr}`, 404],
         [`/api/appointments/${x.appointment}`, 404], [`/api/appointments/${x.appointment}/ics`, 404],
+        [`/api/contacts/${x.contact}/ai-memory`, 200, true],
       ];
       for (const role of ["owner", "admin", "agent"]) {
         const actor = f.users[role];
@@ -215,16 +222,21 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
           assert.equal(res.status, 200, res.text);
           privateAbsent(res, foreign);
         });
-        for (const [path, status] of resources(foreign)) await t.test(`${role} foreign ${path}`, async () => {
+        for (const [path, status, privileged] of resources(foreign)) await t.test(`${role} foreign ${path}`, async () => {
           const res = await request(actor, "GET", path);
-          assert.equal(res.status, status, res.text);
-          if (status === 200) assert.deepEqual(res.body.data, []);
+          const expected = privileged && role === "agent" ? 403 : status;
+          assert.equal(res.status, expected, res.text);
+          if (expected === 200) assert.deepEqual(res.body.data, []);
           privateAbsent(res, foreign);
         });
         // Positive controls prove the resource handlers are actually reachable,
         // rather than returning empty data for all users.
-        for (const [path] of resources(f)) await t.test(`${role} owned ${path}`, async () => {
+        for (const [path, , privileged] of resources(f)) await t.test(`${role} owned ${path}`, async () => {
           const res = await request(actor, "GET", path);
+          if (privileged && role === "agent") {
+            assert.equal(res.status, 403, res.text);
+            return;
+          }
           assert.equal(res.status, 200, res.text);
           if (path.endsWith("/handoff")) assert.equal(res.body.data.id, f.conversation);
           else assert.ok(res.text.includes(f.canary), "owned resource should expose its synthetic data");
@@ -288,7 +300,101 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
     assert.equal(providerCalls, 0, "no request may reach a paid/external provider");
   });
 
-  it("token role claims cannot promote a database agent, and unexpected errors remain private", async () => {
+  it("owned nested references, clearing assignment and caller-owned writes remain usable", async () => {
+    for (const [index, f] of fixtures.entries()) {
+      const foreign = fixtures[1 - index];
+      const actor = f.users.owner;
+      const assignment = await request(actor, "PATCH", `/api/conversations/${f.conversation}`, { assignedUserId: f.users.agent.id });
+      assert.equal(assignment.status, 200, assignment.text);
+      assert.equal(assignment.body.data.assigned_user_id, f.users.agent.id);
+      const clear = await request(actor, "PATCH", `/api/conversations/${f.conversation}`, { assignedUserId: null });
+      assert.equal(clear.status, 200, clear.text);
+      assert.equal(clear.body.data.assigned_user_id, null);
+      const run = await request(actor, "POST", `/api/automations/${f.workflow}/run`, { conversationId: f.conversation, contactId: f.contact, tenantId: foreign.tenant });
+      assert.equal(run.status, 202, run.text);
+      assert.equal(run.body.data.tenant_id, f.tenant);
+      assert.equal(run.body.data.conversation_id, f.conversation);
+      assert.equal(run.body.data.contact_id, f.contact);
+      const booking = await request(actor, "POST", "/api/appointments", { appointmentTypeId: f.type, startsAt: new Date(Date.now() + 12 * 86400_000).toISOString(), customerName: "synthetic control", customerPhone: "15550001111", contactId: f.contact, conversationId: f.conversation, tenantId: foreign.tenant });
+      assert.equal(booking.status, 201, booking.text);
+      assert.equal(booking.body.data.tenant_id, f.tenant);
+      assert.equal(booking.body.data.contact_id, f.contact);
+      assert.equal(booking.body.data.created_by, actor.id);
+      const foreignUserBefore = await dbPool.query("SELECT skills FROM users WHERE id=$1", [foreign.users.agent.id]);
+      const skills = await request(f.users.agent, "PUT", "/api/users/me/skills", { skills: ["sales"], tenantId: foreign.tenant, userId: foreign.users.agent.id });
+      assert.equal(skills.status, 200, skills.text);
+      assert.equal(skills.body.data.id, f.users.agent.id);
+      const foreignUserAfter = await dbPool.query("SELECT skills FROM users WHERE id=$1", [foreign.users.agent.id]);
+      assert.deepEqual(foreignUserAfter.rows, foreignUserBefore.rows);
+      for (const role of ["owner", "admin", "agent"]) {
+        const analyze = await request(f.users[role], "POST", "/api/ai/analyze", { message: "Can I book a service?", tenantId: foreign.tenant });
+        assert.equal(analyze.status, 200, analyze.text);
+        privateAbsent(analyze, foreign);
+        const invalidOcr = await request(f.users[role], "POST", "/api/ocr/extract", {});
+        assert.equal(invalidOcr.status, 400, "authenticated roles reach upload validation before any provider operation");
+      }
+    }
+  });
+
+  it("diagnostic role checks reach validation for owner/admin and deny agents without a provider call", async () => {
+    for (const f of fixtures) for (const role of ["owner", "admin", "agent"]) {
+      const res = await request(f.users[role], "POST", "/api/test/gemini", { message: "" });
+      assert.equal(res.status, role === "agent" ? 403 : 400, res.text);
+    }
+    assert.equal(providerCalls, 0);
+  });
+
+  it("real HTTP login/refresh/logout revokes access and reports database logout failures honestly", async () => {
+    const f = fixtures[0];
+    const id = randomUUID();
+    const email = `http-login-${id}@example.com`;
+    const password = "synthetic-http-password-12345";
+    const { hashPassword } = await import("../src/services/auth.service.js");
+    await dbPool.query("INSERT INTO users (id,tenant_id,email,password_hash,role) VALUES ($1,$2,$3,$4,'agent')", [id, f.tenant, email, await hashPassword(password)]);
+    const actor = { ip: "127.0.0.40" };
+    const login = await request(actor, "POST", "/api/auth/login", { email, password });
+    assert.equal(login.status, 200, login.text);
+    assert.equal(login.body.user.id, id);
+    actor.token = login.body.token;
+    const originalConnect = dbPool.connect;
+    dbPool.connect = async () => { throw new Error("synthetic logout database failure"); };
+    try {
+      const failedLogout = await request(actor, "POST", "/api/auth/logout", { refreshToken: login.body.refreshToken });
+      assert.equal(failedLogout.status, 503);
+      assert.equal(failedLogout.body.error, "Logout could not be completed");
+    } finally { dbPool.connect = originalConnect; }
+    assert.equal((await request(actor, "GET", "/api/auth/me")).status, 200);
+    const refreshed = await request(actor, "POST", "/api/auth/refresh", { refreshToken: login.body.refreshToken });
+    assert.equal(refreshed.status, 200, refreshed.text);
+    actor.token = refreshed.body.token;
+    assert.equal((await request(actor, "GET", "/api/auth/me")).status, 200);
+    const logout = await request(actor, "POST", "/api/auth/logout", { refreshToken: refreshed.body.refreshToken });
+    assert.equal(logout.status, 204, logout.text);
+    assert.equal((await request(actor, "GET", "/api/auth/me")).status, 401);
+    assert.equal((await request(actor, "POST", "/api/auth/refresh", { refreshToken: refreshed.body.refreshToken })).status, 401);
+  });
+
+  it("global and dedicated auth/diagnostic rate limits apply through real HTTP middleware", async () => {
+    const cases = [
+      ["127.0.0.31", "POST", "/api/auth/login", 10, 400],
+      ["127.0.0.32", "POST", "/api/auth/refresh", 30, 400],
+      ["127.0.0.33", "POST", "/api/test/gemini", 5, 401],
+      ["127.0.0.34", "GET", "/health", 120, 200],
+    ];
+    for (const [ip, method, path, limit, initialStatus] of cases) {
+      const actor = { ip };
+      for (let i = 0; i < limit; i += 1) {
+        const res = await request(actor, method, path, method === "GET" ? undefined : {});
+        assert.equal(res.status, initialStatus, `${path} request ${i}: ${res.text}`);
+      }
+      const limited = await request(actor, method, path, method === "GET" ? undefined : {});
+      assert.equal(limited.status, 429, path);
+      assert.ok(Number(limited.headers["retry-after"]) > 0, "clients must receive retry guidance");
+    }
+    assert.equal(providerCalls, 0);
+  });
+
+  it("token role claims cannot promote a database agent, and unexpected errors remain private", async (t) => {
     const f = fixtures[0];
     const forgedRole = { ...f.users.agent, ip: "127.0.0.20", token: generateToken({ ...f.users.agent, role: "owner" }) };
     assert.equal((await request(forgedRole, "GET", "/api/automations")).status, 403);
@@ -305,5 +411,6 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
       assert.ok(!res.text.includes(sentinel));
     } finally { dbPool.query = originalQuery; }
     assert.equal(providerCalls, 0);
+    t.diagnostic(`HTTP requests completed: ${requestCount}; external provider calls: ${providerCalls}`);
   });
 });

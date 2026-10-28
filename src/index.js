@@ -1354,6 +1354,11 @@ app.get("/api/conversations/:conversationId/copilot/drafts", requireAuth, async 
 
 app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async (req, res, next) => {
   try {
+    // Reject missing/foreign context before reserving quota or constructing
+    // any model request. Database foreign keys remain the final backstop.
+    if (!(await getHandoffState(req.user.tenantId, req.params.conversationId))) {
+      return res.status(404).json({ status: "error", error: "Conversation not found" });
+    }
     // Copilot drafts are billable Gemini operations: reserve quota from the
     // tenant's shared monthly AI limit before any context work or provider
     // call, mirroring the inbound AI gate.
@@ -1522,6 +1527,7 @@ app.post("/api/automations/:workflowId/run", requireAuth, requireRole("owner", "
       contactId: req.body?.contactId,
       context: req.body?.context || {},
     });
+    if (!data) return res.status(404).json({ status: "error", error: "Workflow or context not found or inactive" });
     return res.status(202).json({ status: "ok", data });
   } catch (error) {
     if (error.message.startsWith("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
@@ -1658,6 +1664,7 @@ app.post("/api/contacts/:contactId/ai-memory", requireAuth, requireRole("owner",
       req.body?.value,
       req.body?.confidence,
     );
+    if (!data) return res.status(404).json({ status: "error", error: "Contact not found" });
     return res.status(201).json({ status: "ok", data });
   } catch (error) {
     if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message });

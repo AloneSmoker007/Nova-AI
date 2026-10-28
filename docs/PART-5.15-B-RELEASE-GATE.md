@@ -2,7 +2,11 @@
 
 **State: BLOCKED / NOT RELEASE APPROVED.** This is a living release-control document for PR [#163](https://github.com/AloneSmoker007/Nova-AI/pull/163), not a certification or deployment authorization.
 
+**Owner instruction (29 October 2026):** continue tests/remediation autonomously and merge on GitHub after the final gate is complete. This supplies conditional merge authorization, not missing test evidence or production deployment authorization. Reuse that authorization if all required gates are subsequently evidenced; do not ask for the same merge permission again. Until then, the gate remains blocked.
+
 Current scope reconciliation: [Part 5 evidence matrix](./PART-5-AUDIT-EVIDENCE-MATRIX.md) maps all fifteen parts, separates missing reports from tested fixes, and records the reproduced refresh-credential revocation gap plus its follow-up. Its new database/race checks require CI at the containing commit. Migration 035 requires existing users to sign in again when their current access expires; include that impact in any later rollout approval. This does not change the NO-GO decision below.
+
+29 October: the [HTTP/auth follow-up](./PART-5-HTTP-AUTH-REVIEW.md) expands real-HTTP role/resource/rate-limit checks and logout/refresh concurrency coverage. It records the baseline failures and corrections; verify its containing commit's CI before accepting the new evidence. Independent and external/staging gates remain unsigned.
 
 ## Verified branch evidence (2026-10-27)
 

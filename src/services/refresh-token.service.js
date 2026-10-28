@@ -28,6 +28,23 @@ function validateIdentity(userId, tenantId) {
   );
 }
 
+async function lockRefreshAccount(client, tokenHash) {
+  // Discover the account without locking a token first. Every operation that
+  // may revoke several sessions must acquire the account row BEFORE any
+  // refresh row; otherwise two logouts can each hold the other's next lock.
+  const identity = await client.query(
+    "SELECT user_id, tenant_id FROM refresh_tokens WHERE token_hash=$1",
+    [tokenHash],
+  );
+  const row = identity.rows[0];
+  if (!row) return null;
+  const account = await client.query(
+    "SELECT id, tenant_id, token_version FROM users WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+    [row.user_id, row.tenant_id],
+  );
+  return account.rows[0] || null;
+}
+
 export async function issueRefreshToken(userId, tenantId, expectedTokenVersion = null) {
   assertDatabase();
 
@@ -64,6 +81,12 @@ export async function rotateRefreshToken(rawToken) {
   try {
     await client.query("BEGIN");
 
+    const account = await lockRefreshAccount(client, tokenHash);
+    if (!account) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
     const result = await client.query(
       `SELECT id, user_id, tenant_id, expires_at, revoked_at, token_version
        FROM refresh_tokens
@@ -87,14 +110,10 @@ export async function rotateRefreshToken(rawToken) {
       return null;
     }
 
-    const account = await client.query(
-      "SELECT token_version FROM users WHERE id=$1 AND tenant_id=$2",
-      [row.user_id, row.tenant_id],
-    );
     // Never upgrade a pre-change refresh credential into a post-change
     // session. Check before replay handling so an obsolete credential cannot
     // revoke sessions created after the password/role change.
-    if (!account.rows[0] || row.token_version !== account.rows[0].token_version) {
+    if (row.user_id !== account.id || row.tenant_id !== account.tenant_id || row.token_version !== account.token_version) {
       await client.query(
         "UPDATE refresh_tokens SET revoked_at=COALESCE(revoked_at, NOW()) WHERE id=$1 AND tenant_id=$2",
         [row.id, row.tenant_id],
@@ -168,6 +187,11 @@ export async function revokeRefreshToken(rawToken) {
 
   try {
     await client.query("BEGIN");
+    const account = await lockRefreshAccount(client, tokenHash);
+    if (!account) {
+      await client.query("ROLLBACK");
+      return false;
+    }
     const result = await client.query(
       `SELECT user_id, tenant_id, revoked_at, expires_at, token_version
        FROM refresh_tokens
@@ -184,11 +208,7 @@ export async function revokeRefreshToken(rawToken) {
       return false;
     }
 
-    const account = await client.query(
-      "SELECT token_version FROM users WHERE id=$1 AND tenant_id=$2",
-      [row.user_id, row.tenant_id],
-    );
-    if (!account.rows[0] || row.token_version !== account.rows[0].token_version) {
+    if (row.user_id !== account.id || row.tenant_id !== account.tenant_id || row.token_version !== account.token_version) {
       await client.query("COMMIT");
       return false;
     }
