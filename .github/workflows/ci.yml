@@ -152,6 +152,12 @@ jobs:
       - name: Run access-token revocation integration tests
         run: node --test tests/access-token-revocation.test.js
 
+      # Real composed HTTP app + two synthetic tenants and three DB-backed
+      # roles. This suite resets public schema; keep it serialized like the
+      # other integration files. External provider calls are forbidden.
+      - name: Run HTTP tenant and role authorization matrix
+        run: timeout 120s node --test tests/api-tenant-http.test.js
+
       # Privacy regression: deleted customer messages must not be copied into
       # future handoff summaries or persisted AI summary context.
       - name: Run deleted-message handoff privacy integration tests
