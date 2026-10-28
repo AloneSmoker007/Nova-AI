@@ -158,6 +158,11 @@ jobs:
       - name: Run HTTP tenant and role authorization matrix
         run: timeout 120s node --test tests/api-tenant-http.test.js
 
+      # Real ingress/dispatcher/worker/database/Redis with SDK-level model and
+      # Meta HTTP transport substitutes. This is not live provider evidence.
+      - name: Run AI output to outbound delivery boundary integration tests
+        run: timeout 120s node --test tests/ai-outbound-boundary.test.js
+
       # Privacy regression: deleted customer messages must not be copied into
       # future handoff summaries or persisted AI summary context.
       - name: Run deleted-message handoff privacy integration tests
