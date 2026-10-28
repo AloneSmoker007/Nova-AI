@@ -66,11 +66,28 @@ function validateCallbackData(callbackData) {
   return callbackData.trim();
 }
 
+function safeTransportCode(originalError) {
+  const code = originalError?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,31}$/.test(code)
+    ? code
+    : null;
+}
+
+function safeProviderStatus(originalError) {
+  const status = originalError?.response?.status;
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
 function createSendError(message, outcome, originalError) {
   const error = new Error(message);
   error.code = "WHATSAPP_SEND_FAILED";
   error.deliveryOutcome = outcome;
-  error.cause = originalError;
+  // Axios errors can include the full request config and Authorization header.
+  // Never expose the upstream error object as a cause or serializable property.
+  const transportCode = safeTransportCode(originalError);
+  const providerStatus = safeProviderStatus(originalError);
+  if (transportCode) error.transportCode = transportCode;
+  if (providerStatus) error.providerStatus = providerStatus;
   return error;
 }
 
@@ -136,8 +153,8 @@ export async function sendWhatsAppMessage({
         : status
           ? "api_error"
           : "unknown",
-      status,
-      code: error.code,
+      status: safeProviderStatus(error),
+      code: safeTransportCode(error),
     });
 
     if (ambiguous) {
