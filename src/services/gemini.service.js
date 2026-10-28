@@ -1,13 +1,14 @@
 import "dotenv/config";
 import { GoogleGenAI } from "@google/genai";
 import { logger } from "../config/logger.js";
+import { getGeminiModel } from "../config/gemini-model.js";
 import { enforceGeneratedAiOutput } from "./ai-output-safety.service.js";
 
 const MAX_MESSAGE_LENGTH = 8000;
 const MAX_CONTEXT_LENGTH = 12_000;
 const MAX_RESPONSE_LENGTH = 4096;
 const REQUEST_TIMEOUT_MS = 30_000;
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const MODEL = getGeminiModel();
 
 let client;
 
