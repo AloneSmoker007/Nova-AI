@@ -72,3 +72,32 @@ test("blocked model output is replaced with a fixed safe response before callers
   assert.equal(decision.text, SAFE_AI_FALLBACK);
   assert.equal(inspectGeneratedAiOutput(decision.text).safe, true);
 });
+
+test("quoted JSON credential fields fail closed before persistence or delivery", () => {
+  const secret = "synthetic-credential-1234567890";
+  const cases = [
+    JSON.stringify({ client_secret: secret }),
+    JSON.stringify({ access_token: secret }),
+    JSON.stringify({ refresh_token: secret }, null, 2),
+    JSON.stringify({ api_key: secret }),
+    JSON.stringify({ password: secret }),
+    "'client_secret': '" + secret + "'",
+  ];
+  for (const value of cases) {
+    const decision = enforceGeneratedAiOutput(value);
+    assert.equal(decision.safe, false, value);
+    assert.equal(decision.reason, "credential_assignment", value);
+    assert.equal(decision.text, SAFE_AI_FALLBACK);
+    assert.ok(!decision.text.includes(secret));
+  }
+});
+
+test("quoted business data and password guidance still pass the output gate", () => {
+  for (const value of [
+    JSON.stringify({ appointment: "tomorrow at 3 PM", status: "confirmed" }),
+    'Use the "password" reset option to update your account.',
+    "Please keep your password private.",
+  ]) {
+    assert.deepEqual(inspectGeneratedAiOutput(value), { safe: true, reason: null });
+  }
+});

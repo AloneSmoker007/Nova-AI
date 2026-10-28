@@ -43,3 +43,11 @@ An earlier 2026-10-01 conversation/checkpoint summary identifies a three-reviewe
 - External semantic prompt-injection and PII assurance: **UNTESTED live**.
 - Final Part 5.15-B production release: **NO-GO**; see [release gate checklist](./PART-5.15-B-RELEASE-GATE.md).
 - **No merge/deployment authorization** is given by this document.
+
+## Quoted-credential follow-up (2026-10-28)
+
+- Baseline reproduced at `1e8fb2d6c8e1353e62e41e3f48dbecdc4eb702f3`: a JSON object containing a quoted `client_secret` field and a synthetic long credential passed `enforceGeneratedAiOutput()`. The existing assignment expression expected the separator immediately after the label and missed JSON's closing quote.
+- The fix accepts an optional single/double closing quote after a recognized credential label. Existing credential-length thresholds and plain assignment handling remain in place.
+- Behavioral regression covers compact/pretty JSON for client secrets, access/refresh tokens, API keys and passwords, plus single-quoted fields. Each case must produce the fixed safe fallback with no credential included. Legitimate appointment JSON and password-reset guidance remain allowed.
+- Local reproduction: focused suite **7 passed / 1 failed** before the fix; **8 passed / 0 failed / 0 skipped** after it. JavaScript syntax checks passed. Full lint, unit and PostgreSQL/Redis evidence must be read from the CI run matching the containing commit; these local counts do not certify that broader suite.
+- Scope: this closes the reproduced quoted-label bypass only. Encoded/paraphrased secrets, unknown formats, cross-tenant PII and real-model semantic attacks remain outside this deterministic guarantee. Part 5.15-B remains **NO-GO**.
