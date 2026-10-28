@@ -20,6 +20,7 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
   let generateToken;
   let requireAuth;
   let issueRefreshToken;
+  let rotateRefreshToken;
   let revokeRefreshToken;
 
   before(async () => {
@@ -28,7 +29,7 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
     ({ dbPool } = await import("../src/config/database.js"));
     ({ generateToken } = await import("../src/services/auth.service.js"));
     ({ requireAuth } = await import("../src/middleware/auth.js"));
-    ({ issueRefreshToken, revokeRefreshToken } = await import("../src/services/refresh-token.service.js"));
+    ({ issueRefreshToken, rotateRefreshToken, revokeRefreshToken } = await import("../src/services/refresh-token.service.js"));
 
     assert.ok(dbPool, "dbPool must use the integration database URL");
     await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
@@ -128,6 +129,21 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
     );
     assert.equal(finalVersion.rows[0].token_version, 1);
   });
+
+  for (const credential of ["password_hash", "role"]) {
+    it(`${credential} changes prevent old refresh tokens from renewing access`, async () => {
+      const user = await seedUser();
+      const oldRefresh = await issueRefreshToken(user.id, user.tenant_id);
+      const newValue = credential === "role" ? "agent" : "changed-test-password-hash";
+      await dbPool.query(
+        `UPDATE users SET ${credential}=$3 WHERE id=$1 AND tenant_id=$2`,
+        [user.id, user.tenant_id, newValue],
+      );
+
+      const renewed = await rotateRefreshToken(oldRefresh);
+      assert.equal(renewed, null, "a credential change must require fresh authentication, not just invalidate one access JWT");
+    });
+  }
 
   it("role and password changes bump the token version and reject old access JWTs", async () => {
     const user = await seedUser();
