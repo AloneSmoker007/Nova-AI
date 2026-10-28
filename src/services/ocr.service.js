@@ -1,13 +1,14 @@
 import { GoogleGenAI } from "@google/genai";
 import { dbPool } from "../config/database.js";
 import { logger } from "../config/logger.js";
+import { getGeminiModel } from "../config/gemini-model.js";
 import { commitAiUsage, releaseAiUsage, reserveAiUsage } from "./usage.service.js";
 
 const MAX_TEXT = 20_000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const OCR_REQUEST_TIMEOUT_MS = 30_000;
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const MODEL = getGeminiModel();
 
 let client;
 function getClient() {
