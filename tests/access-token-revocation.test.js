@@ -216,6 +216,75 @@ describe("access-token revocation and credential-version fencing (PostgreSQL)", 
     assert.equal(byId.get(other.id), 0);
   });
 
+  async function runOverlappingRefreshOperations(operations) {
+    const originalConnect = dbPool.connect;
+    let releaseBarrier;
+    const barrier = new Promise((resolve) => { releaseBarrier = resolve; });
+    let lockedTokens = 0;
+    // Encourage both operations to reach their first refresh-row lock. The
+    // bounded release also supports an implementation that serializes on the
+    // account BEFORE locking a token, so this test cannot require the unsafe
+    // lock order to make progress.
+    const timer = setTimeout(() => releaseBarrier(), 250);
+    dbPool.connect = async function () {
+      const client = await originalConnect.call(this);
+      const originalQuery = client.query;
+      const originalRelease = client.release;
+      client.query = async function (sql, ...args) {
+        const result = await originalQuery.call(this, sql, ...args);
+        if (typeof sql === "string" && sql.includes("FROM refresh_tokens") && sql.includes("FOR UPDATE")) {
+          lockedTokens += 1;
+          if (lockedTokens === 2) releaseBarrier();
+          await barrier;
+        }
+        return result;
+      };
+      client.release = function (...args) {
+        client.query = originalQuery;
+        return originalRelease.apply(this, args);
+      };
+      return client;
+    };
+    try {
+      return await Promise.allSettled(operations.map((operation) => operation()));
+    } finally {
+      clearTimeout(timer);
+      releaseBarrier();
+      dbPool.connect = originalConnect;
+    }
+  }
+
+  it("simultaneous logout of two account sessions completes without a PostgreSQL deadlock", { timeout: 10_000 }, async () => {
+    const user = await seedUser();
+    const first = await issueRefreshToken(user.id, user.tenant_id);
+    const second = await issueRefreshToken(user.id, user.tenant_id);
+    const results = await runOverlappingRefreshOperations([
+      () => revokeRefreshToken(first), () => revokeRefreshToken(second),
+    ]);
+    assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled"],
+      results.map((result) => result.reason?.code || result.status).join(", "));
+    assert.deepEqual(results.map((result) => result.value).sort(), [false, true]);
+    const account = await dbPool.query("SELECT token_version FROM users WHERE id=$1", [user.id]);
+    assert.equal(account.rows[0].token_version, 1, "only valid logout authority may revoke the account once");
+    assert.equal(await rotateRefreshToken(first), null);
+    assert.equal(await rotateRefreshToken(second), null);
+  });
+
+  it("logout racing another session's rotation leaves no reusable pre-logout credential", { timeout: 10_000 }, async () => {
+    const user = await seedUser();
+    const first = await issueRefreshToken(user.id, user.tenant_id);
+    const second = await issueRefreshToken(user.id, user.tenant_id);
+    const access = generateToken(user);
+    const results = await runOverlappingRefreshOperations([
+      () => rotateRefreshToken(first), () => revokeRefreshToken(second),
+    ]);
+    assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled"]);
+    assert.equal(results[1].value, true);
+    assert.equal((await authenticate(access)).statusCode, 401);
+    if (results[0].value) assert.equal(await rotateRefreshToken(results[0].value.refreshToken), null);
+    assert.equal(await rotateRefreshToken(second), null);
+  });
+
   it("migration revokes unversioned legacy refresh credentials instead of upgrading them", async () => {
     const user = await seedUser();
     const client = await dbPool.connect();
