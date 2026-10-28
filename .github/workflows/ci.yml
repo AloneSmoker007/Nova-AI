@@ -37,6 +37,11 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Release gate: fail on known HIGH/CRITICAL vulnerabilities in dependencies
+      # shipped to production. Development-only advisories are triaged separately.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
   migrations:
     name: Migration chain against PostgreSQL 15
     runs-on: ubuntu-latest
