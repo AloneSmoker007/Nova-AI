@@ -10,6 +10,7 @@ import { checkDatabaseReadiness, closeDatabaseConnection, isDatabaseConfigured, 
 import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateCopilotDraftReply, generateGeminiReply } from "./services/gemini.service.js";
+import { inspectGeneratedAiOutput } from "./services/ai-output-safety.service.js";
 import {
   isAmbiguousWhatsAppSendError,
   sendWhatsAppMessage,
@@ -384,6 +385,17 @@ function extractWebhookEvents(body) {
   return { messages, deletedMessages, statuses };
 }
 
+function requireSafeAutomaticReply(value) {
+  const decision = inspectGeneratedAiOutput(value);
+  if (!decision.safe) {
+    const error = new Error("Automatic AI reply suppressed: cached output failed safety policy");
+    error.code = "UNSAFE_AI_REPLY";
+    error.outputSafetyReason = decision.reason;
+    throw error;
+  }
+  return value.trim();
+}
+
 async function processInboxMessage(inboxId, log = logger) {
   const inbox = await getInboxMessage(inboxId);
   if (!inbox) return;
@@ -691,14 +703,25 @@ async function processInboxMessage(inboxId, log = logger) {
       return;
     }
 
+    // Stored replies may predate the current output policy. Re-authorize an
+    // unsent cached result before copying it into a new delivery intent.
+    if (!message.provider_message_id) requireSafeAutomaticReply(reply);
+
     if (message.provider_message_id) {
+      const accepted = await dbPool.query(
+        `SELECT id, body, last_attempt_at FROM whatsapp_deliveries
+         WHERE tenant_id=$1 AND inbox_message_id=$2 AND provider_message_id=$3 LIMIT 1`,
+        [message.tenant_id, message.id, message.provider_message_id],
+      );
+      const actualDelivery = accepted.rows[0];
       await persistOutboundMessage({
         tenantId: message.tenant_id,
         conversationId: persistedInbound.conversationId,
         whatsappMessageId: message.provider_message_id,
         messageType: "text",
-        body: reply,
-        sentAt: new Date(),
+        body: actualDelivery ? actualDelivery.body.trim() : reply,
+        sentAt: actualDelivery?.last_attempt_at || new Date(),
+        deliveryId: actualDelivery?.id,
       });
       await markCompleted(message.id, message.tenant_id, leaseToken, message.provider_message_id);
       return;
@@ -726,7 +749,7 @@ async function processInboxMessage(inboxId, log = logger) {
           conversationId: persistedInbound.conversationId,
           whatsappMessageId: currentDelivery.provider_message_id,
           messageType: "text",
-          body: reply,
+          body: currentDelivery.body.trim(),
           sentAt: currentDelivery.last_attempt_at || new Date(),
           deliveryId: currentDelivery.id,
         });
@@ -748,6 +771,9 @@ async function processInboxMessage(inboxId, log = logger) {
     const accessToken = decryptSecret(tenant.accessTokenEncrypted);
 
     try {
+      // A retained delivery body can differ from the inbox's cached response.
+      // Validate the exact payload to be sent before recording request-start.
+      const outboundBody = requireSafeAutomaticReply(deliveryClaim.delivery.body);
       await markDeliveryRequestStarted(
         delivery.id,
         message.tenant_id,
@@ -756,7 +782,7 @@ async function processInboxMessage(inboxId, log = logger) {
       );
       const sentMessage = await sendWhatsAppMessage({
         to: deliveryClaim.delivery.recipient_wa_id,
-        message: deliveryClaim.delivery.body,
+        message: outboundBody,
         accessToken,
         phoneNumberId: tenant.phoneNumberId,
         callbackData: deliveryClaim.delivery.delivery_key,
@@ -787,7 +813,7 @@ async function processInboxMessage(inboxId, log = logger) {
         conversationId: persistedInbound.conversationId,
         whatsappMessageId: providerMessageId,
         messageType: "text",
-        body: reply,
+        body: outboundBody,
         sentAt: new Date(),
         deliveryId: completedDelivery.id,
       });
@@ -829,6 +855,14 @@ async function processInboxMessage(inboxId, log = logger) {
       return;
     }
   } catch (error) {
+    if (error.code === "UNSAFE_AI_REPLY") {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.warn(
+        { inboxId: message.id, tenantId: message.tenant_id, reason: error.outputSafetyReason },
+        "Unsafe cached AI reply left unsent for human review",
+      );
+      return;
+    }
     const retryState = await markRetry(message.id, message.tenant_id, leaseToken, error);
     if (!retryState) {
       log.warn({ inboxId: message.id, tenantId: message.tenant_id }, "Unable to update durable inbox failure state");
@@ -904,6 +938,9 @@ async function recoverPendingDeliveries() {
         const accessToken = decryptSecret(tenant.accessTokenEncrypted);
 
         try {
+          const outboundBody = delivery.inbox_message_id
+            ? requireSafeAutomaticReply(delivery.body)
+            : delivery.body.trim();
           await markDeliveryRequestStarted(
             delivery.id,
             delivery.tenant_id,
@@ -912,7 +949,7 @@ async function recoverPendingDeliveries() {
           );
           const sentMessage = await sendWhatsAppMessage({
             to: delivery.recipient_wa_id,
-            message: delivery.body,
+            message: outboundBody,
             accessToken,
             phoneNumberId: tenant.phoneNumberId,
             callbackData: delivery.delivery_key,
@@ -936,7 +973,7 @@ async function recoverPendingDeliveries() {
             conversationId: delivery.conversation_id,
             whatsappMessageId: providerMessageId,
             messageType: "text",
-            body: delivery.body,
+            body: outboundBody,
             sentAt: new Date(),
             deliveryId: completedDelivery.id,
           });
@@ -981,7 +1018,7 @@ async function recoverPendingDeliveries() {
           conversationId: row.conversation_id,
           whatsappMessageId: row.provider_message_id,
           messageType: "text",
-          body: row.body,
+          body: row.body.trim(),
           sentAt: row.last_attempt_at || row.created_at || new Date(),
           deliveryId: row.id,
         });

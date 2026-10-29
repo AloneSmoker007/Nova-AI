@@ -391,7 +391,7 @@ describe("AI output boundary through the real webhook worker and delivery pipeli
     const beforeCalls = modelRequests.length;
     const beforeSends = metaRequests.length;
     const reply = "Our Monday hours are 9am to 5pm.";
-    const f = await seedCachedReply({ reply });
+    const f = await seedCachedReply({ reply: `  ${reply}\n` });
     const inbox = await activateCachedReply(f);
     assert.equal(modelRequests.length, beforeCalls);
     assert.equal(metaRequests.length, beforeSends + 1);
@@ -404,7 +404,7 @@ describe("AI output boundary through the real webhook worker and delivery pipeli
     const beforeCalls = modelRequests.length;
     const beforeSends = metaRequests.length;
     const actual = "The original durable delivery says Monday hours are 9am to 5pm.";
-    const f = await seedCachedReply({ reply: "A different cached reply that was never dispatched.", deliveryBody: actual });
+    const f = await seedCachedReply({ reply: "A different cached reply that was never dispatched.", deliveryBody: `  ${actual}\n` });
     const inbox = await activateCachedReply(f);
     assert.equal(modelRequests.length, beforeCalls);
     assert.equal(metaRequests.length, beforeSends + 1);
@@ -423,6 +423,21 @@ describe("AI output boundary through the real webhook worker and delivery pipeli
     assert.equal(modelRequests.length, beforeCalls);
     assert.equal(metaRequests.length, beforeSends);
     assert.equal((await dbPool.query("SELECT text FROM messages WHERE tenant_id=$1 AND whatsapp_message_id=$2", [f.tenant, inbox.provider_message_id])).rows[0].text, actual);
+    });
+  });
+
+  it("provider-correlated inbox repair uses the accepted delivery body without resending", async () => {
+    await withHistoryRepairBarrier(async () => {
+      const beforeCalls = modelRequests.length;
+      const beforeSends = metaRequests.length;
+      const actual = "The accepted provider receipt belongs to this original delivery body.";
+      const f = await seedCachedReply({ reply: "A different cache, not the accepted message.", deliveryBody: actual, accepted: true });
+      const accepted = (await dbPool.query("SELECT provider_message_id FROM whatsapp_deliveries WHERE id=$1", [f.delivery.id])).rows[0];
+      await dbPool.query("UPDATE webhook_messages SET provider_message_id=$2 WHERE id=$1", [f.inbox.id, accepted.provider_message_id]);
+      const inbox = await activateCachedReply(f);
+      assert.equal(modelRequests.length, beforeCalls);
+      assert.equal(metaRequests.length, beforeSends);
+      assert.equal((await dbPool.query("SELECT text FROM messages WHERE tenant_id=$1 AND whatsapp_message_id=$2", [f.tenant, inbox.provider_message_id])).rows[0].text, actual);
     });
   });
 
