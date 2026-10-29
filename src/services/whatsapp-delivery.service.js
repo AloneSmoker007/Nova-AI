@@ -22,7 +22,7 @@ function validateTenantId(tenantId) {
 }
 
 function validateUuid(value) {
-  return typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value.trim());
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
 }
 
 function getRetryWindowSeconds() {
@@ -419,6 +419,7 @@ export async function markDeliveryStatus({
   phoneNumberId,
   providerMessageId,
   callbackData,
+  recipientId,
   status,
   timestamp,
   errors,
@@ -437,12 +438,14 @@ export async function markDeliveryStatus({
     return null;
   }
 
+  const hasCallback = callbackData !== undefined && callbackData !== null;
+  if (hasCallback && !validateUuid(callbackData)) return null;
+  const hasRecipient = recipientId !== undefined && recipientId !== null;
+  if (hasRecipient && (typeof recipientId !== "string" || !/^\d{7,15}$/.test(recipientId.trim()))) return null;
+  const callbackKey = hasCallback ? callbackData.trim() : null;
+  const recipient = hasRecipient ? recipientId.trim() : null;
   const statusAt = normalizeStatusTimestamp(timestamp) ?? new Date();
   const errorDetails = normalizeErrorDetails(errors);
-  const callbackKey =
-    typeof callbackData === "string" && validateUuid(callbackData)
-      ? callbackData.trim()
-      : null;
 
   const result = await dbPool.query(
     `
@@ -458,8 +461,13 @@ export async function markDeliveryStatus({
         WHERE d.tenant_id = $1
           AND wn.phone_number_id = $2
           AND (
-            d.provider_message_id = $3
-            OR ($4::uuid IS NOT NULL AND d.delivery_key = $4::uuid)
+            ($4::uuid IS NULL AND d.provider_message_id = $3)
+            OR (d.delivery_key = $4::uuid AND (d.provider_message_id IS NULL OR d.provider_message_id = $3))
+          )
+          AND ($10::text IS NULL OR d.recipient_wa_id = $10)
+          AND NOT EXISTS (
+            SELECT 1 FROM whatsapp_deliveries other
+            WHERE other.tenant_id = $1 AND other.provider_message_id = $3 AND other.id <> d.id
           )
 
         UNION
@@ -480,8 +488,13 @@ export async function markDeliveryStatus({
           AND d.automation_run_id IS NOT NULL
           AND wn.phone_number_id = $2
           AND (
-            d.provider_message_id = $3
-            OR ($4::uuid IS NOT NULL AND d.delivery_key = $4::uuid)
+            ($4::uuid IS NULL AND d.provider_message_id = $3)
+            OR (d.delivery_key = $4::uuid AND (d.provider_message_id IS NULL OR d.provider_message_id = $3))
+          )
+          AND ($10::text IS NULL OR d.recipient_wa_id = $10)
+          AND NOT EXISTS (
+            SELECT 1 FROM whatsapp_deliveries other
+            WHERE other.tenant_id = $1 AND other.provider_message_id = $3 AND other.id <> d.id
           )
         LIMIT 1
       )
@@ -510,6 +523,10 @@ export async function markDeliveryStatus({
         updated_at = NOW()
       FROM target
       WHERE d.id = target.id
+        AND d.tenant_id = $1
+        AND (d.provider_message_id IS NULL OR d.provider_message_id = $3)
+        AND ($4::uuid IS NULL OR d.delivery_key = $4::uuid)
+        AND ($10::text IS NULL OR d.recipient_wa_id = $10)
       RETURNING d.*
     `,
     [
@@ -522,8 +539,15 @@ export async function markDeliveryStatus({
       errorDetails.code,
       errorDetails.title,
       errorDetails.details,
+      recipient,
     ],
-  );
+  ).catch((error) => {
+    // Two callbacks can race to bind the same previously unknown provider ID.
+    // The unique constraint chooses one winner. Reject only that collision;
+    // unrelated database failures must still propagate to the webhook retry.
+    if (error.code === "23505" && error.constraint === "uq_whatsapp_deliveries_tenant_provider") return { rows: [] };
+    throw error;
+  });
 
   return result.rows[0] ?? null;
 }

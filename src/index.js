@@ -376,6 +376,7 @@ function extractWebhookEvents(body) {
             ...status,
             phoneNumberId,
             callbackData: status.biz_opaque_callback_data,
+            recipientId: status.recipient_id,
           });
         }
       }

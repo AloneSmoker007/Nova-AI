@@ -749,6 +749,11 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
       assert.equal(replay.state, "READ");
       assert.equal(replay.provider_message_id, sent.provider_message_id);
       assert.equal(replay.attempt_count, 0);
+      const duplicateReceipts = await Promise.all([
+        svc.markDeliveryStatus(callbackFor(f, { status: "delivered" })),
+        svc.markDeliveryStatus(callbackFor(f, { status: "sent" })),
+      ]);
+      assert.ok(duplicateReceipts.every((row) => row.state === "READ" && row.provider_message_id === sent.provider_message_id));
     });
   });
 

@@ -448,6 +448,29 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
       assert.equal((await receipt(target, { status: "read" }, false)).status, 403);
       assert.deepEqual(await getDelivery(target.delivery.id, f.tenant), before);
     });
+    await t.test("unrelated database failures are retriable 500s with no private detail", async () => {
+      const target = await seedTarget();
+      assert.equal((await receipt(target)).status, 200);
+      const before = await getDelivery(target.delivery.id, f.tenant);
+      const originalQuery = dbPool.query;
+      const sentinel = "synthetic-private-callback-database-error";
+      dbPool.query = function (sql, ...args) {
+        if (typeof sql === "string" && sql.includes("WITH target AS") && sql.includes("UPDATE whatsapp_deliveries d")) {
+          const failure = new Error(sentinel);
+          failure.code = "23505";
+          failure.constraint = "unrelated_synthetic_constraint";
+          return Promise.reject(failure);
+        }
+        return originalQuery.call(this, sql, ...args);
+      };
+      try {
+        const response = await receipt(target, { status: "read" });
+        assert.equal(response.status, 500);
+        assert.equal(response.body.message, "Internal server error");
+        assert.ok(!response.text.includes(sentinel));
+      } finally { dbPool.query = originalQuery; }
+      assert.deepEqual(await getDelivery(target.delivery.id, f.tenant), before);
+    });
     assert.equal(providerCalls, 0);
   });
 

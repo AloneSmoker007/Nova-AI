@@ -10,6 +10,8 @@ Current scope reconciliation: [Part 5 evidence matrix](./PART-5-AUDIT-EVIDENCE-M
 
 Further 29 October reproduction found unsent AI replies could dispatch after human takeover, and recovery could send after source deletion. The linked follow-up records the failing test-only CI and the shared request-start eligibility correction. Read the CI at the containing fix commit before accepting the new cases; do not treat the older green result as evidence for them.
 
+The linked follow-up now also records a bounded callback/replay review: valid receipts, all supplied identity consistency, malformed inputs, replay/monotonic behavior and parallel provider binding, through both delivery sources and signed HTTP. Its test-only CI failed before correction; acceptance requires the containing fix commit's green full regression. Completing this defined code-review scope does not sign the live provider, staging or independent-review gates below.
+
 ## Verified branch evidence (2026-10-27)
 
 - Baseline reviewed: PR #163 head `29c79c470ca4f8bd0dca762c0e03d14085026547`. `main` remains separate. Recheck the SHA before reusing this evidence.
