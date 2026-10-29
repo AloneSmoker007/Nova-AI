@@ -31,9 +31,13 @@
     "joi": "^17.13.1",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.16.3",
+    "pg-connection-string": "^2.14.0",
     "pino": "^9.2.0",
     "pino-http": "^10.1.0",
-    "uuid": "^10.0.0"
+    "uuid": "^11.1.1"
+  },
+  "overrides": {
+    "qs": "^6.16.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

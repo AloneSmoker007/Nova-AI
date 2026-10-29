@@ -3,7 +3,6 @@ import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
 import {
   createPayment,
-  listPayments,
   getPayment,
   updatePaymentStatus,
   applyPaymentWebhook,
@@ -20,21 +19,6 @@ function bad(error) {
 }
 
 export function registerTask16Routes(app) {
-  app.get("/api/payments", requireAuth, async (req, res, next) => {
-    try {
-      return res.status(200).json({
-        status: "ok",
-        data: await listPayments(req.user.tenantId, {
-          status: req.query.status,
-          limit: req.query.limit,
-        }),
-      });
-    } catch (error) {
-      if (bad(error)) return res.status(400).json({ status: "error", error: error.message });
-      return next(error);
-    }
-  });
-
   app.get("/api/payments/:paymentId", requireAuth, async (req, res, next) => {
     try {
       const data = await getPayment(req.user.tenantId, req.params.paymentId);
@@ -113,6 +97,13 @@ export function registerTask16Routes(app) {
       });
 
       if (!data) return res.status(404).json({ status: "error", error: "Payment not found" });
+      if (data.rejected) {
+        return res.status(200).json({
+          status: "rejected",
+          reason: data.reason,
+          duplicate: false,
+        });
+      }
       return res.status(200).json({ status: "ok", data });
     } catch (error) {
       if (error instanceof SyntaxError || bad(error)) return res.status(400).json({ status: "error", error: "Invalid payment webhook" });

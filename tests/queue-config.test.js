@@ -37,6 +37,7 @@ test("queue worker settings preserve valid values within configured bounds", () 
   assert.deepEqual(config.limiter, { max: 250, duration: 1000 });
 
   assert.deepEqual(getWorkerConfig({}), {
+    runRetryDelay: 1000,
     concurrency: 5,
     limiter: { max: 20, duration: 1000 },
   });

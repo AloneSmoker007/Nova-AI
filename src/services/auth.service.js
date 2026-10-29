@@ -4,7 +4,7 @@ import { dbPool, isDatabaseConfigured } from "../config/database.js";
 
 const BCRYPT_ROUNDS = 12;
 const JWT_ALGORITHM = "HS256";
-const DEFAULT_EXPIRES_IN = "24h";
+const DEFAULT_EXPIRES_IN = "15m";
 
 // Valid 60-character bcrypt hash at cost 12.
 // Used only to keep bcrypt timing similar for unknown emails.
@@ -43,6 +43,7 @@ export function generateToken(user) {
     sub: user.id,
     tenantId: user.tenant_id,
     role: user.role,
+    tokenVersion: Number.isInteger(user.token_version) ? user.token_version : 0,
   };
 
   return jwt.sign(payload, config.secret, {
@@ -88,7 +89,7 @@ export async function loginUser(email, password) {
   const normalizedEmail = email.toLowerCase().trim();
 
   const result = await dbPool.query(
-    `SELECT id, tenant_id, email, password_hash, role, status
+    `SELECT id, tenant_id, email, password_hash, role, status, token_version
      FROM users
      WHERE email = $1`,
     [normalizedEmail],
@@ -112,6 +113,7 @@ export async function loginUser(email, password) {
 
   return {
     token,
+    tokenVersion: user.token_version,
     user: {
       id: user.id,
       email: user.email,
@@ -131,7 +133,7 @@ export async function getUserById(userId, tenantId) {
   }
 
   const result = await dbPool.query(
-    `SELECT id, tenant_id, email, role, status
+    `SELECT id, tenant_id, email, role, status, token_version
      FROM users
      WHERE id = $1 AND tenant_id = $2`,
     [userId, tenantId],

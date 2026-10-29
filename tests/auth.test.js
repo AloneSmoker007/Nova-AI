@@ -30,6 +30,7 @@ test("JWT contains the expected tenant and role claims", () => {
     id: "11111111-1111-1111-1111-111111111111",
     tenant_id: "22222222-2222-2222-2222-222222222222",
     role: "admin",
+    token_version: 7,
   };
 
   const token = generateToken(user);
@@ -38,7 +39,9 @@ test("JWT contains the expected tenant and role claims", () => {
   assert.equal(decoded.sub, user.id);
   assert.equal(decoded.tenantId, user.tenant_id);
   assert.equal(decoded.role, user.role);
+  assert.equal(decoded.tokenVersion, user.token_version);
   assert.equal(decoded.iss, process.env.JWT_ISSUER);
+  assert.equal(decoded.aud, process.env.JWT_AUDIENCE);
   assert.equal(decoded.aud, process.env.JWT_AUDIENCE);
 });
 

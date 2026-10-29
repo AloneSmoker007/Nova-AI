@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
 
 const MAX_STEPS = 50;
@@ -158,6 +159,8 @@ export async function setWorkflowStatus(tenantId, workflowId, status) {
 export async function startWorkflowRun({tenantId,workflowId,conversationId=null,contactId=null,context={},triggerKey=null}) {
   assertDb(); const t=tenant(tenantId);
   if(!uuid(workflowId)) throw new Error("Invalid workflow ID");
+  if(conversationId!==null&&!uuid(conversationId)) throw new Error("Invalid conversation ID");
+  if(contactId!==null&&!uuid(contactId)) throw new Error("Invalid contact ID");
   const r=await dbPool.query(`INSERT INTO automation_runs(tenant_id,workflow_id,conversation_id,contact_id,status,context,next_run_at,trigger_key)
     SELECT $1,w.id,$3,$4,'queued',$5,NOW(),$6 FROM automation_workflows w
     WHERE w.tenant_id=$1 AND w.id=$2 AND w.status='active' ON CONFLICT (tenant_id,workflow_id,trigger_key) WHERE trigger_key IS NOT NULL DO NOTHING RETURNING *`,[t,workflowId,conversationId,contactId,context,triggerKey]);
@@ -192,14 +195,109 @@ async function executeTag(client,run,step){
   await client.query(`INSERT INTO conversation_tags(tenant_id,conversation_id,tag)
     SELECT $1,c.id,$3 FROM conversations c WHERE c.tenant_id=$1 AND c.id=$2 ON CONFLICT DO NOTHING`,[run.tenant_id,run.conversation_id,step.tag]);
 }
+function webhookOutcomeError(message = "Webhook outcome is unknown; manual reconciliation is required") {
+  const error = new Error(message);
+  error.code = "AUTOMATION_WEBHOOK_OUTCOME_UNKNOWN";
+  return error;
+}
+
+function webhookRequestFingerprint(step, body) {
+  return createHash("sha256")
+    .update(`${step.method}\\n${step.url}\\n${body}`, "utf8")
+    .digest("hex");
+}
+
 async function executeWebhook(step, run, stepIndex) {
+  // Serialize before recording an external attempt. Validation failures here
+  // cannot have caused a remote side effect, so the workflow may safely retry.
+  const body = serializeConfiguredWebhookBody(step);
+  const endpointHost = new URL(step.url).hostname.toLowerCase();
+  const requestFingerprint = webhookRequestFingerprint(step, body);
+  let attemptCount = 1;
+
+  const inserted = await dbPool.query(
+    `INSERT INTO automation_webhook_effects
+       (tenant_id, run_id, step_index, endpoint_host, request_sha256, status, attempt_count)
+     VALUES ($1, $2, $3, $4, $5, 'in_flight', 1)
+     ON CONFLICT (tenant_id, run_id, step_index) DO NOTHING
+     RETURNING id, attempt_count, status`,
+    [run.tenant_id, run.id, stepIndex, endpointHost, requestFingerprint],
+  );
+
+  let effect = inserted.rows[0];
+  if (!effect) {
+    const existingResult = await dbPool.query(
+      `SELECT id, endpoint_host, request_sha256, status, attempt_count, updated_at
+       FROM automation_webhook_effects
+       WHERE tenant_id=$1 AND run_id=$2 AND step_index=$3`,
+      [run.tenant_id, run.id, stepIndex],
+    );
+    effect = existingResult.rows[0];
+    if (!effect) throw new Error("Automation webhook effect record disappeared");
+
+    // A successful remote effect is durable. If the worker crashed before
+    // advancing current_step, resume locally without sending it a second time.
+    if (effect.status === "succeeded") return;
+
+    if (
+      effect.endpoint_host !== endpointHost ||
+      effect.request_sha256 !== requestFingerprint
+    ) {
+      if (["in_flight", "retry_authorized"].includes(effect.status)) {
+        await dbPool.query(
+          `UPDATE automation_webhook_effects
+           SET status='unknown', last_error_code='definition_changed'
+           WHERE id=$1 AND status IN ('in_flight', 'retry_authorized')`,
+          [effect.id],
+        );
+      }
+      throw webhookOutcomeError("Webhook definition changed after an external attempt; manual reconciliation is required");
+    }
+
+    if (effect.status === "unknown") {
+      throw webhookOutcomeError();
+    }
+
+    if (effect.status === "in_flight") {
+      const stale = await dbPool.query(
+        `UPDATE automation_webhook_effects
+         SET status='unknown', last_error_code='process_lost'
+         WHERE id=$1 AND status='in_flight'
+           AND updated_at < NOW() - INTERVAL '15 minutes'
+         RETURNING id`,
+        [effect.id],
+      );
+      if (stale.rowCount === 1) throw webhookOutcomeError();
+      const error = new Error("Webhook request is already in flight; waiting before reconciliation");
+      error.code = "AUTOMATION_WEBHOOK_IN_PROGRESS";
+      throw error;
+    }
+
+    if (effect.status !== "retry_authorized") {
+      throw webhookOutcomeError();
+    }
+
+    const retryClaim = await dbPool.query(
+      `UPDATE automation_webhook_effects
+       SET status='in_flight', attempt_count=attempt_count+1,
+           response_status=NULL, last_error_code=NULL
+       WHERE id=$1 AND status='retry_authorized'
+       RETURNING attempt_count`,
+      [effect.id],
+    );
+    if (retryClaim.rowCount !== 1) {
+      const error = new Error("Webhook effect is being reconciled by another actor");
+      error.code = "AUTOMATION_WEBHOOK_IN_PROGRESS";
+      throw error;
+    }
+    attemptCount = retryClaim.rows[0].attempt_count;
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);
   try {
-    // Only send the JSON body explicitly configured and validated for this
-    // workflow step. Run context can contain customer messages, phone numbers
-    // and summaries, so it must not be implicitly disclosed to an endpoint.
-    const body = serializeConfiguredWebhookBody(step);
+    // Only the explicitly configured, validated JSON body is sent. Customer
+    // history, workflow context, phone numbers and credentials are not added.
     const response = await fetch(step.url, {
       method: step.method,
       headers: {
@@ -210,9 +308,137 @@ async function executeWebhook(step, run, stepIndex) {
       signal: controller.signal,
       redirect: "error",
     });
-    if (!response.ok) throw new Error(`Workflow webhook returned HTTP ${response.status}`);
+
+    if (!response.ok) {
+      const recorded = await dbPool.query(
+        `UPDATE automation_webhook_effects
+         SET status='unknown', response_status=$4, last_error_code='http_error'
+         WHERE tenant_id=$1 AND run_id=$2 AND step_index=$3
+           AND status='in_flight' AND attempt_count=$5
+         RETURNING id`,
+        [run.tenant_id, run.id, stepIndex, response.status, attemptCount],
+      );
+      if (recorded.rowCount !== 1) throw webhookOutcomeError();
+      throw webhookOutcomeError(`Webhook returned HTTP ${response.status}; external outcome requires reconciliation`);
+    }
+
+    const recorded = await dbPool.query(
+      `UPDATE automation_webhook_effects
+       SET status='succeeded', response_status=$4, last_error_code=NULL
+       WHERE tenant_id=$1 AND run_id=$2 AND step_index=$3
+         AND status='in_flight' AND attempt_count=$5
+       RETURNING id`,
+      [run.tenant_id, run.id, stepIndex, response.status, attemptCount],
+    );
+    if (recorded.rowCount !== 1) {
+      const latest = await dbPool.query(
+        "SELECT status FROM automation_webhook_effects WHERE tenant_id=$1 AND run_id=$2 AND step_index=$3",
+        [run.tenant_id, run.id, stepIndex],
+      );
+      if (latest.rows[0]?.status === "succeeded") return;
+      throw webhookOutcomeError();
+    }
+  } catch (error) {
+    // Network resets/timeouts and failed HTTP status codes are ambiguous: a
+    // remote server may have acted before the response was lost. Never retry
+    // this effect automatically. Record only a safe code, not URL/body/errors.
+    if (error.code === "AUTOMATION_WEBHOOK_OUTCOME_UNKNOWN") throw error;
+    await dbPool.query(
+      `UPDATE automation_webhook_effects
+       SET status='unknown',
+           response_status=COALESCE(response_status, $4),
+           last_error_code=$5
+       WHERE tenant_id=$1 AND run_id=$2 AND step_index=$3
+         AND status='in_flight' AND attempt_count=$6`,
+      [
+        run.tenant_id,
+        run.id,
+        stepIndex,
+        Number.isInteger(error.statusCode) ? error.statusCode : null,
+        error.name === "AbortError" ? "timeout" : "request_error",
+        attemptCount,
+      ],
+    ).catch(() => undefined);
+    throw webhookOutcomeError();
   } finally {
     clearTimeout(timer);
+  }
+}
+
+export async function listUnknownWorkflowWebhookEffects(tenantId, limit = 50) {
+  assertDb();
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+  const result = await dbPool.query(
+    `SELECT id, run_id, step_index, endpoint_host, status, attempt_count,
+            response_status, last_error_code, created_at, updated_at
+     FROM automation_webhook_effects
+     WHERE tenant_id=$1 AND status='unknown'
+     ORDER BY updated_at DESC
+     LIMIT $2`,
+    [tenant(tenantId), safeLimit],
+  );
+  return result.rows;
+}
+
+export async function resolveUnknownWorkflowWebhookEffect({
+  tenantId,
+  effectId,
+  resolvedBy,
+  outcome,
+  reason,
+}) {
+  assertDb();
+  const t = tenant(tenantId);
+  if (!uuid(effectId) || !uuid(resolvedBy)) throw new Error("Invalid identifier");
+  if (!["succeeded", "not_sent"].includes(outcome)) throw new Error("Invalid webhook reconciliation outcome");
+  const resolutionReason = text(reason, 500);
+  const client = await dbPool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const effectResult = await client.query(
+      `SELECT id, run_id, step_index, status
+       FROM automation_webhook_effects
+       WHERE tenant_id=$1 AND id=$2
+       FOR UPDATE`,
+      [t, effectId],
+    );
+    const effect = effectResult.rows[0];
+    if (!effect || effect.status !== "unknown") {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    const resolvedState = outcome === "succeeded" ? "succeeded" : "retry_authorized";
+    await client.query(
+      `UPDATE automation_webhook_effects
+       SET status=$3, resolved_by=$4, resolution_reason=$5, resolved_at=NOW(),
+           updated_at=NOW(), last_error_code=NULL
+       WHERE tenant_id=$1 AND id=$2 AND status='unknown'`,
+      [t, effectId, resolvedState, resolvedBy, resolutionReason],
+    );
+
+    const nextStep = outcome === "succeeded" ? effect.step_index + 1 : effect.step_index;
+    const run = await client.query(
+      `UPDATE automation_runs
+       SET status='queued', current_step=$3, next_run_at=NOW(),
+           completed_at=NULL, last_error=NULL, attempts=0,
+           executor_token=NULL, executor_lease_until=NULL, updated_at=NOW()
+       WHERE tenant_id=$1 AND id=$2 AND status='failed'
+       RETURNING id`,
+      [t, effect.run_id, nextStep],
+    );
+    if (run.rowCount !== 1) {
+      throw new Error("Workflow run is no longer eligible for manual reconciliation");
+    }
+
+    await client.query("COMMIT");
+    return { effectId, runId: effect.run_id, outcome, status: resolvedState };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
 }
 export async function scheduleInactivityTriggers(limit = 100) {
@@ -459,7 +685,17 @@ export async function processDueWorkflowRuns(limit = 20) {
         );
       }
     } catch (error) {
-      const retry = run.attempts < MAX_RETRIES;
+      const outcomeUnknown = error?.code === "AUTOMATION_WEBHOOK_OUTCOME_UNKNOWN";
+      const requestStillInFlight = error?.code === "AUTOMATION_WEBHOOK_IN_PROGRESS";
+      // Ambiguous external effects are never retried automatically. A recent
+      // in-flight effect is delayed (without another send) while the owner
+      // finishes or until the 15-minute stale-effect marker forces review.
+      const retry = requestStillInFlight || (!outcomeUnknown && run.attempts < MAX_RETRIES);
+      const safeError = outcomeUnknown
+        ? "Webhook outcome unknown; owner/admin reconciliation required"
+        : requestStillInFlight
+          ? "Webhook request still in flight; waiting before reconciliation"
+          : String(error.message || error).slice(0, 1000);
       // Failure reporting is fenced too: stale executors must not requeue or
       // fail a workflow that a newer executor already owns.
       await dbPool.query(
@@ -484,7 +720,7 @@ export async function processDueWorkflowRuns(limit = 20) {
           run.tenant_id,
           run.id,
           retry ? "queued" : "failed",
-          String(error.message || error).slice(0, 1000),
+          safeError,
           run.executor_token,
         ],
       );

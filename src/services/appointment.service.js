@@ -68,8 +68,21 @@ export async function bookAppointment({tenantId,appointmentTypeId,startsAt,custo
   tenantId=validTenant(tenantId); appointmentTypeId=text(appointmentTypeId,64); const start=date(startsAt); zone=timezone(zone); customerName=text(customerName,160); customerPhone=text(customerPhone,32);
   if(!/^\+?[0-9][0-9 .()-]{6,30}$/.test(customerPhone)) throw new Error("Invalid customer phone");
   if(customerEmail!==null&& (typeof customerEmail!=="string"||customerEmail.length>320)) throw new Error("Invalid customer email");
+  for (const [name, id] of [["contact", contactId], ["conversation", conversationId]]) {
+    if (id !== null && (typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))) {
+      throw new Error(`Invalid ${name} ID`);
+    }
+  }
   const c=await dbPool.connect(); try { await c.query("BEGIN");
     const type=await c.query("SELECT duration_minutes, buffer_minutes FROM appointment_types WHERE tenant_id=$1 AND id=$2 AND active=true FOR SHARE",[tenantId,appointmentTypeId]); if(!type.rows[0]) throw new Error("Appointment type not found");
+    if (contactId !== null) {
+      const contact = await c.query("SELECT id FROM contacts WHERE tenant_id=$1 AND id=$2 FOR SHARE", [tenantId, contactId]);
+      if (!contact.rowCount) throw new Error("Contact not found");
+    }
+    if (conversationId !== null) {
+      const conversation = await c.query("SELECT id FROM conversations WHERE tenant_id=$1 AND id=$2 FOR SHARE", [tenantId, conversationId]);
+      if (!conversation.rowCount) throw new Error("Conversation not found");
+    }
     const end=new Date(start.getTime()+type.rows[0].duration_minutes*60000); const bufferMinutes=type.rows[0].buffer_minutes; const occupiedEnd=new Date(end.getTime()+bufferMinutes*60000); if(start<=new Date()) throw new Error("Appointment must be in the future");
     const hours=await c.query("SELECT 1 FROM business_hours WHERE tenant_id=$1 AND active=true LIMIT 1",[tenantId]);
     if(hours.rowCount){ const open=await c.query("SELECT 1 FROM business_hours WHERE tenant_id=$1 AND active=true AND weekday=EXTRACT(DOW FROM ($2 AT TIME ZONE timezone))::int AND start_time <= (($2 AT TIME ZONE timezone)::time) AND end_time >= (($3 AT TIME ZONE timezone)::time) LIMIT 1",[tenantId,start,occupiedEnd]); if(!open.rowCount) throw new Error("Appointment is outside business hours"); }

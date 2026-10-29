@@ -45,6 +45,7 @@ let server;
 let baseUrl;
 let dbPool;
 let runMigrations;
+let stopBackgroundServices;
 
 function fakeServer() {
   return {
@@ -91,7 +92,9 @@ before(async () => {
   // keep it suppressed so startServer()'s app.listen(PORT) cannot bind a stray
   // port. Serve the real app ourselves via http.createServer(app).
   express.application.listen = function suppressed() { return fakeServer(); };
-  ({ default: app } = await import("../src/index.js"));
+  const appModule = await import("../src/index.js");
+  ({ default: app, stopBackgroundServices } = appModule);
+  await appModule.appStartupPromise;
   server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -124,7 +127,9 @@ before(async () => {
 
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
-  if (dbPool) await dbPool.end();
+  // End the shared pool exactly once, after releasing queue and background work.
+  if (stopBackgroundServices) await stopBackgroundServices({ closeDatabase: true });
+  else if (dbPool) await dbPool.end();
 });
 
 function rawJson(obj) {
@@ -334,18 +339,43 @@ describe("payment webhook tenant isolation (real app + PostgreSQL)", { skip }, (
     assert.equal(await eventKeyCount(TENANT_A, "evt-retention-long-lived"), 1, "the permanent idempotency key must remain");
   });
 
-  it("10. legal and illegal payment status transitions still behave correctly", async () => {
+  it("10. illegal payment transitions are durably rejected, acknowledged, and idempotent", async () => {
     process.env.PAYMENT_WEBHOOK_SECRETS = ALL_KEYS;
-    // Legal: pending -> paid.
+
+    // Legal: pending -> paid remains applied normally.
     const legal = await signedWebhook(TENANT_A, paymentBody(TENANT_A, "pay-a-legal", "paid", "evt-legal-1"), SECRET_A);
     assert.equal(legal.status, 200, `legal transition -> 200, got ${legal.status} ${legal.body}`);
     assert.equal(await paymentStatus(TENANT_A, "pay-a-legal"), "paid");
+    assert.equal(await eventCount(TENANT_A, "evt-legal-1"), 1);
 
-    // Illegal: paid -> pending (pay-a-illegal is already 'paid').
-    const illegal = await signedWebhook(TENANT_A, paymentBody(TENANT_A, "pay-a-illegal", "pending", "evt-illegal-1"), SECRET_A);
-    assert.equal(illegal.status, 400, `illegal transition -> 400, got ${illegal.status} ${illegal.body}`);
+    // Illegal: paid -> pending (pay-a-illegal is already 'paid'). This is a
+    // signed, well-formed provider event, so record the rejected outcome and
+    // ACK it instead of rolling back the idempotency key and provoking retries.
+    const body = paymentBody(TENANT_A, "pay-a-illegal", "pending", "evt-illegal-1");
+    const illegal = await signedWebhook(TENANT_A, body, SECRET_A);
+    assert.equal(illegal.status, 200, `rejected signed event must be acknowledged, got ${illegal.status} ${illegal.body}`);
+    assert.match(illegal.body, /"status":"rejected"/);
+    assert.match(illegal.body, /"reason":"invalid_transition"/);
     assert.equal(await paymentStatus(TENANT_A, "pay-a-illegal"), "paid", "illegal transition must not change the payment");
-    assert.equal(await eventCount(TENANT_A, "evt-illegal-1"), 0, "rejected transition must not leave an event record");
+    assert.equal(await eventCount(TENANT_A, "evt-illegal-1"), 1, "rejected event must be durable");
+
+    const outcome = await dbPool.query(
+      `SELECT processing_result, rejection_reason, processed_at
+       FROM payment_webhook_events
+       WHERE tenant_id=$1 AND provider='stripe' AND event_id=$2`,
+      [TENANT_A, "evt-illegal-1"],
+    );
+    assert.deepEqual(
+      { result: outcome.rows[0]?.processing_result, reason: outcome.rows[0]?.rejection_reason },
+      { result: "rejected", reason: "invalid_transition" },
+    );
+    assert.ok(outcome.rows[0]?.processed_at, "rejection must have a durable processing timestamp");
+
+    const replay = await signedWebhook(TENANT_A, body, SECRET_A);
+    assert.equal(replay.status, 200, "replayed event must be acknowledged idempotently");
+    assert.match(replay.body, /"duplicate":true/);
+    assert.equal(await eventCount(TENANT_A, "evt-illegal-1"), 1, "replay must not create a second audit row");
+    assert.equal(await paymentStatus(TENANT_A, "pay-a-illegal"), "paid");
   });
 
   it("11. the real app entry point reaches the webhook route (not the terminal 404)", async () => {

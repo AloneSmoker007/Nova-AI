@@ -34,7 +34,13 @@ export function createHttpLogger(baseLogger = logger) {
         : uuidv4();
     },
     serializers: {
-      req: (req) => ({ id: req.id, method: req.method, url: req.url }),
+      // Verification/OAuth tokens and private search text can arrive in queries.
+      // Sanitize only the log representation; routing still needs the full URL.
+      req: (req) => ({
+        id: req.id,
+        method: req.method,
+        url: typeof req.url === "string" ? req.url.split(/[?#]/, 1)[0] : undefined,
+      }),
       res: (res) => ({ statusCode: res.statusCode }),
     },
   });

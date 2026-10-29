@@ -201,35 +201,46 @@ export async function ingestWebhookMessage({ message, tenant }) {
   }
 
   const result = await dbPool.query(
-    `INSERT INTO webhook_messages (
+    `WITH replay_key AS (
+       INSERT INTO inbound_webhook_replay_keys
+         (tenant_id, whatsapp_message_id, phone_number_id, first_received_at)
+       VALUES ($1, $4, $3, $9)
+       ON CONFLICT (tenant_id, whatsapp_message_id) DO NOTHING
+       RETURNING whatsapp_message_id
+     ),
+     known_message AS (
+       SELECT 1 FROM messages
+       WHERE tenant_id = $1 AND whatsapp_message_id = $4
+       LIMIT 1
+     )
+     INSERT INTO webhook_messages (
        tenant_id, whatsapp_number_id, phone_number_id, whatsapp_message_id,
        wa_id, profile_name, message_type, body, received_at, state, completed_at
      )
      VALUES (
        $1, $2, $3, $4, $5, $6, $7, $8, $9,
        CASE
-         -- Canonical message history outlives completed inbox payloads. Keep a
-         -- replay terminal even when its old inbox row has been pruned.
-         WHEN EXISTS (
-           SELECT 1 FROM messages
-           WHERE tenant_id = $1 AND whatsapp_message_id = $4
-         ) THEN 'COMPLETED'
+         -- A durable compact key survives the privacy retention of full inbox
+         -- payloads and canonical messages. Only the first delivery that
+         -- creates the key is eligible to enter processing.
+         WHEN EXISTS (SELECT 1 FROM known_message)
+           OR NOT EXISTS (SELECT 1 FROM replay_key)
+         THEN 'COMPLETED'
          ELSE 'RECEIVED'
        END,
        CASE
-         WHEN EXISTS (
-           SELECT 1 FROM messages
-           WHERE tenant_id = $1 AND whatsapp_message_id = $4
-         ) THEN NOW()
+         WHEN EXISTS (SELECT 1 FROM known_message)
+           OR NOT EXISTS (SELECT 1 FROM replay_key)
+         THEN NOW()
          ELSE NULL
        END
      )
-     ON CONFLICT (tenant_id, whatsapp_message_id)
-     DO UPDATE SET updated_at = NOW()
+     ON CONFLICT (tenant_id, whatsapp_message_id) DO NOTHING
      RETURNING id, tenant_id, whatsapp_number_id, phone_number_id,
        whatsapp_message_id, wa_id, profile_name, message_type, body, received_at,
        state, attempts, available_at, lease_until, lease_token, last_error,
-       generated_response, provider_message_id, completed_at`,
+       generated_response, provider_message_id, completed_at,
+       TRUE AS is_new_delivery`,
     [
       tenantId,
       tenant.whatsappNumberId,
@@ -245,7 +256,24 @@ export async function ingestWebhookMessage({ message, tenant }) {
     ],
   );
 
-  return result.rows[0];
+  if (result.rowCount === 1) return result.rows[0];
+
+  // The INSERT may conflict with a currently RECEIVED/PROCESSING row. Read it
+  // in a second statement so PostgreSQL gets a fresh snapshot even when the
+  // ON CONFLICT waited for a concurrent delivery to commit.
+  const existing = await dbPool.query(
+    `SELECT id, tenant_id, whatsapp_number_id, phone_number_id,
+            whatsapp_message_id, wa_id, profile_name, message_type, body, received_at,
+            state, attempts, available_at, lease_until, lease_token, last_error,
+            generated_response, provider_message_id, completed_at,
+            FALSE AS is_new_delivery
+     FROM webhook_messages
+     WHERE tenant_id=$1 AND whatsapp_message_id=$2
+     LIMIT 1`,
+    [tenantId, whatsappMessageId],
+  );
+  if (!existing.rows[0]) throw new Error("Duplicate webhook inbox record could not be resolved");
+  return existing.rows[0];
 }
 
 export async function getInboxMessage(inboxId, tenantId) {

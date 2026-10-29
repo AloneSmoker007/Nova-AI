@@ -82,6 +82,13 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
       [inboxId, tenantId, numberId, phoneNumberId, `wamid.inbound.${inboxId}`, "15550001111", "hello"],
     );
+    // AI delivery authorization now verifies the real canonical source, as the
+    // application creates it before preparing an automatic reply.
+    await dbPool.query(
+      `INSERT INTO messages (tenant_id,conversation_id,whatsapp_message_id,direction,text)
+       VALUES ($1,$2,$3,'inbound','hello')`,
+      [tenantId, conversationId, `wamid.inbound.${inboxId}`],
+    );
 
     const delivery = await svc.prepareDelivery({
       tenantId,
@@ -152,6 +159,68 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
       [deliveryId],
     );
   }
+
+  it("request-start rejects a paused AI conversation and allows an explicit resume", async () => {
+    const f = await seedDelivery();
+    const claim = await svc.claimDelivery(f.delivery.id, f.tenantId);
+    await dbPool.query("UPDATE conversations SET ai_paused=TRUE WHERE id=$1", [f.conversationId]);
+    await assert.rejects(svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count), /paused.*human takeover/);
+    assert.equal((await svc.getDelivery(f.delivery.id, f.tenantId)).provider_request_started_at, null);
+    await dbPool.query("UPDATE conversations SET ai_paused=FALSE WHERE id=$1", [f.conversationId]);
+    await assert.rejects(svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count + 1), /lease is no longer valid/);
+    const started = await svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count);
+    assert.ok(started.provider_request_started_at);
+  });
+
+  it("request-start fails closed if an automatic reply's canonical source no longer exists", async () => {
+    const f = await seedDelivery();
+    const claim = await svc.claimDelivery(f.delivery.id, f.tenantId);
+    await dbPool.query("DELETE FROM messages WHERE tenant_id=$1 AND conversation_id=$2", [f.tenantId, f.conversationId]);
+    await assert.rejects(svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count), /source message is deleted or missing/);
+    assert.equal((await svc.getDelivery(f.delivery.id, f.tenantId)).provider_request_started_at, null);
+  });
+
+  it("AI pause does not silently cancel an explicitly configured non-AI automation delivery", async () => {
+    const f = await seedAutomationDelivery();
+    await dbPool.query("UPDATE conversations SET ai_paused=TRUE WHERE id=$1", [f.conversationId]);
+    const claim = await svc.claimDelivery(f.automationDelivery.id, f.tenantId);
+    const started = await svc.markDeliveryRequestStarted(f.automationDelivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count);
+    assert.ok(started.provider_request_started_at);
+    assert.equal(started.inbox_message_id, null);
+    assert.equal(started.automation_run_id, f.automationRunId);
+  });
+
+  it("a takeover transaction already in progress fences request-start when it commits", async () => {
+    const f = await seedDelivery();
+    const claim = await svc.claimDelivery(f.delivery.id, f.tenantId);
+    const takeover = await dbPool.connect();
+    let start;
+    try {
+      await takeover.query("BEGIN");
+      await takeover.query("UPDATE conversations SET ai_paused=TRUE WHERE id=$1", [f.conversationId]);
+      // Capture rejection immediately; the pending promise must never become
+      // an unhandled rejection while the controlling transaction is held.
+      start = svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count)
+        .then((value) => ({ value }), (error) => ({ error }));
+      let waiting = false;
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const activity = await dbPool.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%UPDATE whatsapp_deliveries AS delivery%'");
+        if (activity.rowCount > 0) { waiting = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(waiting, true, "request-start must wait for the pending conversation policy change");
+      await takeover.query("COMMIT");
+      const outcome = await start;
+      assert.ok(outcome.error, "a committed takeover must reject the pending provider dispatch");
+      assert.match(outcome.error.message, /paused.*human takeover/);
+      assert.equal((await svc.getDelivery(f.delivery.id, f.tenantId)).provider_request_started_at, null);
+    } finally {
+      await takeover.query("ROLLBACK").catch(() => undefined);
+      takeover.release();
+      if (start) await start;
+    }
+  });
 
   it("exports a bounded delivery attempt maximum", () => {
     assert.equal(svc.MAX_DELIVERY_ATTEMPTS, 5);
@@ -647,6 +716,109 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
     const finalDelivery = await svc.getDelivery(delivery.id, tenantId);
     assert.equal(finalDelivery.state, "DELIVERED");
     assert.equal(finalDelivery.attempt_count, 1, "history repair must not claim or resend the delivery");
+  });
+
+  async function callbackFixture(kind) {
+    const f = kind === "automation" ? await seedAutomationDelivery() : await seedDelivery();
+    return { ...f, target: kind === "automation" ? f.automationDelivery : f.delivery };
+  }
+
+  function callbackFor(f, overrides = {}) {
+    return { tenantId: f.tenantId, phoneNumberId: f.phoneNumberId, providerMessageId: `wamid.callback-${f.target.id}`, callbackData: f.target.delivery_key, recipientId: "15550001111", status: "sent", timestamp: Math.floor(Date.now() / 1000), ...overrides };
+  }
+
+  async function siblingDelivery(f) {
+    const inboxId = randomUUID();
+    const messageId = `wamid.sibling-${inboxId}`;
+    await dbPool.query("INSERT INTO webhook_messages (id,tenant_id,whatsapp_number_id,phone_number_id,whatsapp_message_id,wa_id,body,received_at) SELECT $1,tenant_id,whatsapp_number_id,phone_number_id,$2,wa_id,'Sibling source',NOW() FROM webhook_messages WHERE id=$3", [inboxId, messageId, f.inboxId]);
+    await dbPool.query("INSERT INTO messages (tenant_id,conversation_id,whatsapp_message_id,direction,text) VALUES ($1,$2,$3,'inbound','Sibling source')", [f.tenantId, f.conversationId, messageId]);
+    return svc.prepareDelivery({ tenantId: f.tenantId, inboxMessageId: inboxId, conversationId: f.conversationId, recipientWaId: "15550001111", body: "Sibling reply" });
+  }
+
+  it("valid early callbacks, provider-only receipts and replays preserve identity for both delivery sources", async (t) => {
+    for (const kind of ["inbox", "automation"]) await t.test(kind, async () => {
+      const f = await callbackFixture(kind);
+      const sent = await svc.markDeliveryStatus(callbackFor(f));
+      assert.equal(sent.id, f.target.id);
+      assert.equal(sent.state, "SENT");
+      const delivered = await svc.markDeliveryStatus(callbackFor(f, { callbackData: undefined, status: "delivered" }));
+      assert.equal(delivered.state, "DELIVERED");
+      const read = await svc.markDeliveryStatus(callbackFor(f, { status: "read" }));
+      assert.equal(read.state, "READ");
+      const replay = await svc.markDeliveryStatus(callbackFor(f, { status: "sent" }));
+      assert.equal(replay.state, "READ");
+      assert.equal(replay.provider_message_id, sent.provider_message_id);
+      assert.equal(replay.attempt_count, 0);
+      const duplicateReceipts = await Promise.all([
+        svc.markDeliveryStatus(callbackFor(f, { status: "delivered" })),
+        svc.markDeliveryStatus(callbackFor(f, { status: "sent" })),
+      ]);
+      assert.ok(duplicateReceipts.every((row) => row.state === "READ" && row.provider_message_id === sent.provider_message_id));
+    });
+  });
+
+  it("all supplied callback identities must agree before an inbox or automation delivery can change", async (t) => {
+    for (const kind of ["inbox", "automation"]) {
+      const f = await callbackFixture(kind);
+      const foreign = await seedDelivery();
+      await svc.markDeliveryStatus(callbackFor(f));
+      const probes = [
+        ["wrong recipient", { recipientId: "15559990000" }],
+        ["conflicting provider ID", { providerMessageId: "wamid.unrelated-" + randomUUID() }],
+        ["unknown callback key", { callbackData: randomUUID() }],
+        ["foreign callback key", { callbackData: foreign.delivery.delivery_key }],
+        ["malformed callback key", { callbackData: "not-a-uuid" }],
+        ["invalid UUID-shaped callback", { callbackData: "-".repeat(36) }],
+      ];
+      for (const [label, override] of probes) await t.test(`${kind}: ${label}`, async () => {
+        const before = await svc.getDelivery(f.target.id, f.tenantId);
+        const foreignBefore = await svc.getDelivery(foreign.delivery.id, foreign.tenantId);
+        assert.equal(await svc.markDeliveryStatus(callbackFor(f, { status: "read", ...override })), null);
+        assert.deepEqual(await svc.getDelivery(f.target.id, f.tenantId), before, "reject without mutating timestamps, leases, errors or state");
+        assert.deepEqual(await svc.getDelivery(foreign.delivery.id, foreign.tenantId), foreignBefore);
+      });
+    }
+  });
+
+  it("an already-bound provider ID cannot be attached to another delivery", async () => {
+    const f = await callbackFixture("inbox");
+    const sibling = await siblingDelivery(f);
+    await svc.markDeliveryStatus(callbackFor(f));
+    const before = await svc.getDelivery(sibling.id, f.tenantId);
+    assert.equal(await svc.markDeliveryStatus(callbackFor(f, { callbackData: sibling.delivery_key, status: "delivered" })), null);
+    assert.deepEqual(await svc.getDelivery(sibling.id, f.tenantId), before);
+  });
+
+  it("racing callbacks for the same provider ID have one binding winner and no database error", async () => {
+    const f = await callbackFixture("inbox");
+    const sibling = await siblingDelivery(f);
+    const outcomes = await Promise.allSettled([
+      svc.markDeliveryStatus(callbackFor(f)),
+      svc.markDeliveryStatus(callbackFor(f, { callbackData: sibling.delivery_key })),
+    ]);
+    assert.ok(outcomes.every((outcome) => outcome.status === "fulfilled"));
+    assert.equal(outcomes.filter((outcome) => outcome.value !== null).length, 1);
+    assert.equal((await dbPool.query("SELECT COUNT(*)::int AS n FROM whatsapp_deliveries WHERE tenant_id=$1 AND provider_message_id=$2", [f.tenantId, callbackFor(f).providerMessageId])).rows[0].n, 1);
+  });
+
+  it("racing different provider IDs cannot both authorize the same callback key", async () => {
+    const f = await callbackFixture("inbox");
+    const outcomes = await Promise.allSettled([
+      svc.markDeliveryStatus(callbackFor(f)),
+      svc.markDeliveryStatus(callbackFor(f, { providerMessageId: "wamid.conflicting-" + randomUUID() })),
+    ]);
+    assert.ok(outcomes.every((outcome) => outcome.status === "fulfilled"));
+    assert.equal(outcomes.filter((outcome) => outcome.value !== null).length, 1);
+  });
+
+  it("invalid provided recipients reject without touching a known delivery", async (t) => {
+    const f = await callbackFixture("inbox");
+    await svc.markDeliveryStatus(callbackFor(f));
+    for (const recipientId of [false, 15550001111, "", "+15550001111", "1".repeat(16)]) await t.test(String(recipientId), async () => {
+      const before = await svc.getDelivery(f.target.id, f.tenantId);
+      assert.equal(await svc.markDeliveryStatus(callbackFor(f, { recipientId, status: "read" })), null);
+      assert.deepEqual(await svc.getDelivery(f.target.id, f.tenantId), before);
+    });
   });
 
   it("recovers PENDING automation deliveries that have no inbox message", async () => {

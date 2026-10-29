@@ -29,6 +29,9 @@ function readBoundedQueueInteger(env, key, fallback, min, max) {
 
 export function getWorkerConfig(env = process.env) {
   return {
+    // BullMQ's default 15-second error retry sleep can outlive our 10-second
+    // shutdown budget. Keep retries bounded without forcing active jobs closed.
+    runRetryDelay: 1000,
     concurrency: readBoundedQueueInteger(
       env,
       "QUEUE_CONCURRENCY",

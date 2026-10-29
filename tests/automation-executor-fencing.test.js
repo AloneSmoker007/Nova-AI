@@ -128,13 +128,22 @@ describe("automation executor fencing (PostgreSQL)", { skip }, () => {
         "SELECT status, current_step, attempts, executor_token, executor_lease_until FROM automation_runs WHERE tenant_id=$1 AND id=$2",
         [fixture.tenantId, fixture.runId],
       );
-      assert.equal(current.rows[0].status, "completed");
-      assert.equal(current.rows[0].current_step, 2);
+      // The durable effect ledger sees the first request is still in flight.
+      // The replacement executor must park the run, NOT send a duplicate.
+      assert.equal(current.rows[0].status, "queued");
+      assert.equal(current.rows[0].current_step, 0);
       assert.equal(current.rows[0].attempts, 2);
       assert.equal(current.rows[0].executor_token, null);
+      assert.equal(calls.length, 1, "reclaimed executor must not duplicate the in-flight request");
 
-      // Let the original worker return from its slow webhook. Its claim token
-      // is stale, so it must stop instead of executing step 1 or changing state.
+      let effect = await dbPool.query(
+        "SELECT status FROM automation_webhook_effects WHERE tenant_id=$1 AND run_id=$2 AND step_index=0",
+        [fixture.tenantId, fixture.runId],
+      );
+      assert.equal(effect.rows[0]?.status, "in_flight");
+
+      // When the original provider response arrives, the durable effect is
+      // marked succeeded, but its stale executor cannot advance the run.
       releaseFirstFetch();
       await firstExecutor;
 
@@ -142,15 +151,38 @@ describe("automation executor fencing (PostgreSQL)", { skip }, () => {
         "SELECT status, current_step, attempts, executor_token FROM automation_runs WHERE tenant_id=$1 AND id=$2",
         [fixture.tenantId, fixture.runId],
       );
-      assert.equal(current.rows[0].status, "completed");
-      assert.equal(current.rows[0].current_step, 2);
+      assert.equal(current.rows[0].status, "queued");
+      assert.equal(current.rows[0].current_step, 0);
       assert.equal(current.rows[0].attempts, 2);
       assert.equal(current.rows[0].executor_token, null);
 
-      assert.equal(calls.length, 3, "the stale executor must not execute a fourth request for step 1");
+      effect = await dbPool.query(
+        "SELECT status FROM automation_webhook_effects WHERE tenant_id=$1 AND run_id=$2 AND step_index=0",
+        [fixture.tenantId, fixture.runId],
+      );
+      assert.equal(effect.rows[0]?.status, "succeeded");
+
+      // Advance the queued retry clock in this isolated fixture. A new owner
+      // resumes locally from the succeeded effect, never re-sending step 0.
+      await dbPool.query(
+        "UPDATE automation_runs SET next_run_at=NOW()-INTERVAL '1 second' WHERE tenant_id=$1 AND id=$2 AND status='queued'",
+        [fixture.tenantId, fixture.runId],
+      );
+      const resumed = await processDueWorkflowRuns(1);
+      assert.equal(resumed, 1);
+
+      current = await dbPool.query(
+        "SELECT status, current_step, attempts, executor_token FROM automation_runs WHERE tenant_id=$1 AND id=$2",
+        [fixture.tenantId, fixture.runId],
+      );
+      assert.equal(current.rows[0].status, "completed");
+      assert.equal(current.rows[0].current_step, 2);
+      assert.equal(current.rows[0].attempts, 3);
+      assert.equal(current.rows[0].executor_token, null);
+
+      assert.equal(calls.length, 2, "step 0 is sent exactly once; step 1 only by the new owner");
       assert.equal(calls[0].idempotencyKey, fixture.runId + ":0");
-      assert.equal(calls[1].idempotencyKey, fixture.runId + ":0");
-      assert.equal(calls[2].idempotencyKey, fixture.runId + ":1");
+      assert.equal(calls[1].idempotencyKey, fixture.runId + ":1");
     } finally {
       if (typeof releaseFirstFetch === "function") releaseFirstFetch();
       if (firstExecutor) await firstExecutor;

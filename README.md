@@ -86,6 +86,7 @@ The server defaults to port 3000.
 - `GEMINI_MODEL` — Gemini model override.
 - `META_GRAPH_API_VERSION` — Meta Graph API version; defaults to `v23.0`.
 - `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_EXPIRES_IN` — JWT configuration.
+- `TRUST_PROXY_HOPS` — number of explicitly trusted reverse-proxy hops (default 0; configure only for your deployment topology). This controls forwarded client IPs used by IP-based rate limits.
 - `LOG_LEVEL` — Pino log level.
 - `WHATSAPP_DELIVERY_RETRY_WINDOW_SECONDS` — delivery recovery window.
 
@@ -119,7 +120,7 @@ The endpoint verifies the `x-nova-payment-signature` HMAC-SHA256 over the **raw*
 - `POST /webhook` — Meta WhatsApp webhook receiver.
 - `POST /api/auth/login` — login.
 - `POST /api/auth/refresh` — rotate refresh token.
-- `POST /api/auth/logout` — revoke refresh token.
+- `POST /api/auth/logout` — revoke the account's refresh sessions and invalidate older access JWTs. Password/role changes invalidate both access and refresh credentials; rotation preserves the original credential version. Migration 035 revokes legacy unversioned refresh tokens, so users must sign in again after their existing access expires.
 - `GET /api/auth/me` — authenticated user details.
 - `GET /api/conversations` — tenant-scoped conversations.
 - `GET /api/usage` — tenant usage summary.

@@ -10,6 +10,26 @@ permissions:
   contents: read
 
 jobs:
+  production-network:
+    name: Disposable production TLS and proxy smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci
+      # Finite synthetic tests only. Internal Docker network, no public ports,
+      # cloud resources, provider credentials, paid requests or artifacts.
+      - name: Verify production TLS, HTTPS proxy, outages and shutdown
+        run: timeout --signal=TERM --kill-after=20s 360s bash scripts/production-network-smoke.sh
+
   quality:
     name: Lint, syntax check, and tests
     runs-on: ubuntu-latest
@@ -37,6 +57,11 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Release gate: fail on known HIGH/CRITICAL vulnerabilities in dependencies
+      # shipped to production. Development-only advisories are triaged separately.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
   migrations:
     name: Migration chain against PostgreSQL 15
     runs-on: ubuntu-latest
@@ -56,12 +81,23 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
     # tests/migration-postgres.test.js maps MIGRATION_TEST_DATABASE_URL onto
     # DATABASE_URL before importing the migration runner, then applies the full
     # chain to a fresh database and re-runs it to prove the second run is a no-op.
     env:
       MIGRATION_TEST_DATABASE_URL: postgres://nova:nova@127.0.0.1:5432/nova_migration_test
       MIGRATION_TEST_ALLOW_RESET: "1"
+      REDIS_URL: redis://127.0.0.1:6379
 
     steps:
       - name: Checkout repository
@@ -93,17 +129,30 @@ jobs:
       - name: Run automation SQL integration tests
         run: node --test tests/automation-postgres.test.js
 
+      # External side effects require a durable result ledger. This live-PG suite
+      # proves success replay skips duplicate POSTs and ambiguous outcomes are
+      # parked until an owner/admin records a manual reconciliation decision.
+      - name: Run automation webhook effect integration tests
+        run: node --test tests/automation-webhook-effects.test.js
+
       # TASK-03 regression coverage: per-tenant payment webhook authentication,
       # tested against the real application and PostgreSQL. This suite resets
       # the shared test schema, so it runs as a separate serialized step.
       - name: Run payment webhook tenant-isolation integration tests
-        run: node --test tests/payment-webhook-tenant-isolation.test.js
+        run: timeout 120s node --test tests/payment-webhook-tenant-isolation.test.js
 
       # TASK-04 regression coverage: outbound WhatsApp delivery retries,
       # attempt caps, lease fencing and monotonic state transitions.
-      # Run in its own serialized step because the suite resets public schema.
-      - name: Run WhatsApp delivery reliability integration tests
-        run: node --test tests/delivery-reliability.test.js
+      # Both suites reset public schema and run serially. Collect both results
+      # to expose service and raw HTTP callback failures in one run; any failure
+      # still exits nonzero and blocks CI. External providers are not called.
+      - name: Run delivery reliability and HTTP callback authorization integration tests
+        shell: bash
+        run: |
+          callback_gate_status=0
+          timeout 120s node --test tests/delivery-reliability.test.js || callback_gate_status=1
+          timeout 120s node --test tests/api-tenant-http.test.js || callback_gate_status=1
+          exit "$callback_gate_status"
 
       # TASK-07 regression coverage: message-scoped AI signal idempotency.
       # This suite also resets public schema, so keep it serialized.
@@ -125,6 +174,21 @@ jobs:
       - name: Run refresh token replay integration tests
         run: node --test tests/refresh-token-replay.test.js
 
+      # Final-gate auth regression: issued access JWTs must fail after logout,
+      # role change, password change, and refresh-token reuse.
+      - name: Run access-token revocation integration tests
+        run: node --test tests/access-token-revocation.test.js
+
+      # Real ingress/dispatcher/worker/database/Redis with SDK-level model and
+      # Meta HTTP transport substitutes. This is not live provider evidence.
+      - name: Run AI output to outbound delivery boundary integration tests
+        run: timeout 120s node --test tests/ai-outbound-boundary.test.js
+
+      # Privacy regression: deleted customer messages must not be copied into
+      # future handoff summaries or persisted AI summary context.
+      - name: Run deleted-message handoff privacy integration tests
+        run: node --test tests/handoff-deleted-message.test.js
+
       # TASK-27/TASK-29/TASK-30 coverage: canonical inbound IDs, post-retention replay,
       # and monotonic activity timestamps. This suite resets public schema; keep it serialized
       # before the final inbox lease-recovery integration suite.
@@ -140,3 +204,53 @@ jobs:
       # This suite also resets public schema, so run it serialized and last in this job.
       - name: Run webhook dead-letter operations integration tests
         run: node --test tests/webhook-dead-letter-operations.test.js
+
+      # Final-gate usage regression: enforce reservation ownership, stale-worker
+      # fencing, and cleanup when an AI operation reaches dead letter without output.
+      - name: Run AI reservation fencing integration tests
+        run: node --test tests/usage-reservation-fencing.test.js
+
+      # Final-gate Redis check: prove BullMQ terminal job IDs can be re-enqueued
+      # against a live Redis service rather than a deterministic queue double.
+      - name: Run live Redis and BullMQ re-enqueue integration test
+        run: node --test tests/bullmq-redis-integration.test.js
+
+      # N-13 regression: prove real-app test startup/teardown exits naturally
+      # even with BOTH the PostgreSQL pool and BullMQ Redis worker enabled.
+      - name: Verify Task 16 natural exit with PostgreSQL and Redis
+        env:
+          DATABASE_URL: postgres://nova:nova@127.0.0.1:5432/nova_migration_test
+        run: timeout 120s node --test tests/task16-route-behavior.test.js
+
+      # Part 5.15-B backup/restore gate: create two disposable databases on
+      # the local PostgreSQL 15 service, verify encrypted backup and restore,
+      # reject wrong keys and tampering, then drop both test databases.
+      # Use the exact PostgreSQL 15 utilities already installed in our
+      # throwaway service container. Newer pg_dump (for example PG18) can emit
+      # settings that PostgreSQL 15 cannot restore.
+      - name: Use PostgreSQL 15 client utilities for backup smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pg15-client"
+          for utility in pg_dump pg_restore; do
+            cat > "$RUNNER_TEMP/pg15-client/$utility" <<'PG_WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec docker exec -i \
+            -e "PGHOST=127.0.0.1" \
+            -e "PGPORT=5432" \
+            -e "PGUSER=${PGUSER}" \
+            -e "PGPASSWORD=${PGPASSWORD}" \
+            -e "PGDATABASE=${PGDATABASE}" \
+            "${TEST_POSTGRES_CONTAINER}" "${0##*/}" "$@"
+          PG_WRAPPER
+            chmod +x "$RUNNER_TEMP/pg15-client/$utility"
+          done
+          echo "$RUNNER_TEMP/pg15-client" >> "$GITHUB_PATH"
+
+      - name: Verify encrypted backup and restore on throwaway databases
+        env:
+          NOVA_BACKUP_TEST_ALLOW_CREATE_DATABASES: "YES"
+          TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: timeout 180s node --test tests/backup-restore-roundtrip.test.js

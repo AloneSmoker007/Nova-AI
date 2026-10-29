@@ -1,0 +1,314 @@
+import assert from "node:assert/strict";
+import { after, before, describe, it } from "node:test";
+import { randomUUID } from "node:crypto";
+
+const integrationUrl = process.env.MIGRATION_TEST_DATABASE_URL || "";
+const allowReset = process.env.MIGRATION_TEST_ALLOW_RESET === "1";
+const skip = integrationUrl && allowReset
+  ? false
+  : "Set MIGRATION_TEST_DATABASE_URL and MIGRATION_TEST_ALLOW_RESET=1 to run this test";
+
+describe("handoff summary privacy (PostgreSQL)", { skip }, () => {
+  let dbPool;
+  let runMigrations;
+  let persistInboundMessage;
+  let persistDeletedInboundMessage;
+  let getConversationMessages;
+  let handoffConversation;
+  let runRetentionCleanup;
+  let rememberCustomerPreference;
+
+  before(async () => {
+    process.env.DATABASE_URL = integrationUrl;
+    ({ runMigrations } = await import("../src/database/migrate.js"));
+    ({ dbPool } = await import("../src/config/database.js"));
+    ({ persistInboundMessage, persistDeletedInboundMessage } = await import("../src/services/message-persistence.service.js"));
+    ({ getConversationMessages } = await import("../src/services/conversation.service.js"));
+    ({ handoffConversation } = await import("../src/services/handoff.service.js"));
+    ({ runRetentionCleanup } = await import("../src/services/retention.service.js"));
+    ({ rememberCustomerPreference } = await import("../src/services/advanced-ai.service.js"));
+
+    assert.ok(dbPool, "dbPool must use the integration database URL");
+    await dbPool.query("DROP SCHEMA IF EXISTS public CASCADE");
+    await dbPool.query("CREATE SCHEMA public");
+    const migrated = await runMigrations();
+    assert.equal(migrated.configured, true);
+  });
+
+  after(async () => {
+    if (dbPool) await dbPool.end();
+  });
+
+  it("omits deleted message text from a newly generated handoff summary", async () => {
+    const tenantId = randomUUID();
+    const userId = randomUUID();
+    const phoneNumberId = "provider-" + randomUUID();
+    const waId = "1555" + String(Math.floor(Math.random() * 1e7)).padStart(7, "0");
+
+    await dbPool.query("INSERT INTO tenants (id, name) VALUES ($1, $2)", [
+      tenantId,
+      "handoff-deleted-" + tenantId,
+    ]);
+    const number = await dbPool.query(
+      `INSERT INTO whatsapp_numbers (tenant_id, phone_number_id, display_phone_number)
+       VALUES ($1, $2, $3) RETURNING id`,
+      [tenantId, phoneNumberId, "+15550000007"],
+    );
+    await dbPool.query(
+      `INSERT INTO users (id, tenant_id, email, password_hash, role, status)
+       VALUES ($1, $2, $3, $4, 'owner', 'active')`,
+      [userId, tenantId, `handoff-${userId}@example.test`, "test-only-password-hash"],
+    );
+
+    const deletedWhatsAppMessageId = "wamid-" + randomUUID();
+    const first = await persistInboundMessage({
+      tenantId,
+      whatsappNumberId: number.rows[0].id,
+      waId,
+      profileName: "Handoff privacy test",
+      whatsappMessageId: deletedWhatsAppMessageId,
+      messageType: "text",
+      body: "DELETED_PRIVATE_TEXT_7f42",
+      receivedAt: new Date("2026-10-13T10:00:00.000Z"),
+    });
+    const second = await persistInboundMessage({
+      tenantId,
+      whatsappNumberId: number.rows[0].id,
+      waId,
+      profileName: "Handoff privacy test",
+      whatsappMessageId: "wamid-" + randomUUID(),
+      messageType: "text",
+      body: "ACTIVE_MESSAGE_SHOULD_REMAIN",
+      receivedAt: new Date("2026-10-13T10:01:00.000Z"),
+    });
+
+    assert.equal(first.conversationId, second.conversationId, "the two messages must share a conversation");
+
+    await dbPool.query(
+      `INSERT INTO contact_ai_memory
+         (tenant_id, contact_id, memory_key, memory_value, confidence, source, source_message_id)
+       VALUES ($1,$2,'source-test','DELETED_PRIVATE_TEXT_7f42',0.8,'conversation',$3)`,
+      [tenantId, first.contactId, first.messageId],
+    );
+    await dbPool.query(
+      `INSERT INTO conversation_ai_signals
+         (tenant_id, conversation_id, message_id, intent, sentiment, priority)
+       VALUES ($1,$2,$3,'support','negative',4)`,
+      [tenantId, first.conversationId, first.messageId],
+    );
+    await dbPool.query(
+      `INSERT INTO conversation_ai_summaries (tenant_id, conversation_id, summary)
+       VALUES ($1,$2,'Old summary contains DELETED_PRIVATE_TEXT_7f42')`,
+      [tenantId, first.conversationId],
+    );
+    await dbPool.query(
+      `INSERT INTO ai_copilot_drafts (tenant_id, conversation_id, author_user_id, draft)
+       VALUES ($1,$2,$3,'Old draft contains DELETED_PRIVATE_TEXT_7f42')`,
+      [tenantId, first.conversationId, userId],
+    );
+
+    await persistDeletedInboundMessage({
+      tenantId,
+      whatsappNumberId: number.rows[0].id,
+      waId,
+      profileName: "Handoff privacy test",
+      whatsappMessageId: deletedWhatsAppMessageId,
+      deletedAt: new Date("2026-10-14T10:00:00.000Z"),
+    });
+
+    const visibleMessages = await getConversationMessages(tenantId, first.conversationId);
+    assert.equal(visibleMessages.length, 1);
+    assert.match(visibleMessages[0].text, /ACTIVE_MESSAGE_SHOULD_REMAIN/);
+    assert.doesNotMatch(JSON.stringify(visibleMessages), /DELETED_PRIVATE_TEXT_7f42/);
+
+    for (const [table, key] of [
+      ["contact_ai_memory", "source_message_id"],
+      ["conversation_ai_signals", "message_id"],
+    ]) {
+      const purged = await dbPool.query(
+        `SELECT count(*)::int AS count FROM ${table} WHERE tenant_id=$1 AND ${key}=$2`,
+        [tenantId, first.messageId],
+      );
+      assert.equal(purged.rows[0].count, 0, `${table} must be purged for the deleted source message`);
+    }
+    for (const table of ["conversation_ai_summaries", "ai_copilot_drafts"]) {
+      const purged = await dbPool.query(
+        `SELECT count(*)::int AS count FROM ${table} WHERE tenant_id=$1 AND conversation_id=$2`,
+        [tenantId, first.conversationId],
+      );
+      assert.equal(purged.rows[0].count, 0, `${table} must be invalidated after a message deletion`);
+    }
+
+    const result = await handoffConversation(tenantId, first.conversationId, userId, "privacy regression");
+    assert.doesNotMatch(result.summary, /DELETED_PRIVATE_TEXT_7f42/);
+    assert.match(result.summary, /ACTIVE_MESSAGE_SHOULD_REMAIN/);
+
+    const saved = await dbPool.query(
+      "SELECT summary FROM conversation_ai_summaries WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at DESC LIMIT 1",
+      [tenantId, first.conversationId],
+    );
+    assert.equal(saved.rowCount, 1);
+    assert.doesNotMatch(saved.rows[0].summary, /DELETED_PRIVATE_TEXT_7f42/);
+    assert.match(saved.rows[0].summary, /ACTIVE_MESSAGE_SHOULD_REMAIN/);
+  });
+
+  it("rejects forged or deleted AI memory source-message provenance", async () => {
+    const tenantId = randomUUID();
+    const numberId = "provider-" + randomUUID();
+    const firstWaId = "15550001001";
+    const secondWaId = "15550001002";
+    const firstWamid = "wamid-" + randomUUID();
+
+    await dbPool.query("INSERT INTO tenants (id, name) VALUES ($1, $2)", [
+      tenantId, "memory-source-" + tenantId,
+    ]);
+    const number = await dbPool.query(
+      `INSERT INTO whatsapp_numbers (tenant_id, phone_number_id, display_phone_number)
+       VALUES ($1, $2, $3) RETURNING id`,
+      [tenantId, numberId, "+15550000123"],
+    );
+    const common = {
+      tenantId, whatsappNumberId: number.rows[0].id,
+      profileName: "Memory provenance test", messageType: "text",
+      receivedAt: new Date("2026-10-13T10:00:00.000Z"),
+    };
+    const first = await persistInboundMessage({
+      ...common, waId: firstWaId, whatsappMessageId: firstWamid,
+      body: "My name is Alice.",
+    });
+    const second = await persistInboundMessage({
+      ...common, waId: secondWaId, whatsappMessageId: "wamid-" + randomUUID(),
+      body: "My name is Bob.",
+    });
+    assert.notEqual(first.contactId, second.contactId);
+
+    // Same tenant is not enough: a source must belong to this contact.
+    const forged = await rememberCustomerPreference(
+      tenantId, first.contactId, "name", "Forged", 0.9, second.messageId,
+    );
+    assert.equal(forged, null);
+    const missing = await dbPool.query(
+      "SELECT count(*)::int AS count FROM contact_ai_memory WHERE tenant_id=$1 AND contact_id=$2",
+      [tenantId, first.contactId],
+    );
+    assert.equal(missing.rows[0].count, 0);
+
+    const valid = await rememberCustomerPreference(
+      tenantId, first.contactId, "name", "Alice", 0.9, first.messageId,
+    );
+    assert.equal(valid.source_message_id, first.messageId);
+
+    await persistDeletedInboundMessage({
+      tenantId, whatsappNumberId: number.rows[0].id,
+      waId: firstWaId, profileName: "Memory provenance test",
+      whatsappMessageId: firstWamid,
+      deletedAt: new Date("2026-10-14T10:00:00.000Z"),
+    });
+    const deleted = await rememberCustomerPreference(
+      tenantId, first.contactId, "name", "Resurrected", 0.9, first.messageId,
+    );
+    assert.equal(deleted, null);
+    const remaining = await dbPool.query(
+      "SELECT count(*)::int AS count FROM contact_ai_memory WHERE tenant_id=$1 AND contact_id=$2",
+      [tenantId, first.contactId],
+    );
+    assert.equal(remaining.rows[0].count, 0);
+  });
+
+  it("retention cleanup prunes stale memory, AI signals, summaries, and copilot drafts", async () => {
+    const tenantId = randomUUID();
+    const userId = randomUUID();
+    const phoneNumberId = "provider-" + randomUUID();
+    const waId = "1555" + String(Math.floor(Math.random() * 1e7)).padStart(7, "0");
+    const original = {
+      memory: process.env.RETENTION_AI_MEMORY_DAYS,
+      signals: process.env.RETENTION_AI_SIGNALS_DAYS,
+      summaries: process.env.RETENTION_AI_SUMMARIES_DAYS,
+      drafts: process.env.RETENTION_AI_DRAFTS_DAYS,
+    };
+
+    try {
+      process.env.RETENTION_AI_MEMORY_DAYS = "7";
+      process.env.RETENTION_AI_SIGNALS_DAYS = "7";
+      process.env.RETENTION_AI_SUMMARIES_DAYS = "7";
+      process.env.RETENTION_AI_DRAFTS_DAYS = "7";
+
+      await dbPool.query("INSERT INTO tenants (id, name) VALUES ($1, $2)", [
+        tenantId,
+        "ai-retention-" + tenantId,
+      ]);
+      const number = await dbPool.query(
+        `INSERT INTO whatsapp_numbers (tenant_id, phone_number_id, display_phone_number)
+         VALUES ($1, $2, $3) RETURNING id`,
+        [tenantId, phoneNumberId, "+15550000008"],
+      );
+      await dbPool.query(
+        `INSERT INTO users (id, tenant_id, email, password_hash, role, status)
+         VALUES ($1, $2, $3, $4, 'owner', 'active')`,
+        [userId, tenantId, `retention-${userId}@example.test`, "test-only-password-hash"],
+      );
+      const message = await persistInboundMessage({
+        tenantId,
+        whatsappNumberId: number.rows[0].id,
+        waId,
+        profileName: "AI retention test",
+        whatsappMessageId: "wamid-" + randomUUID(),
+        messageType: "text",
+        body: "Retain canonical message independently from AI artifacts",
+        receivedAt: new Date(),
+      });
+
+      await dbPool.query(
+        `INSERT INTO contact_ai_memory
+           (tenant_id, contact_id, memory_key, memory_value, updated_at, last_confirmed_at)
+         VALUES ($1, $2, 'old-preference', 'old value', NOW() - INTERVAL '8 days', NOW() - INTERVAL '8 days')`,
+        [tenantId, message.contactId],
+      );
+      await dbPool.query(
+        `INSERT INTO conversation_ai_signals
+           (tenant_id, conversation_id, message_id, intent, created_at)
+         VALUES ($1, $2, $3, 'general', NOW() - INTERVAL '8 days')`,
+        [tenantId, message.conversationId, message.messageId],
+      );
+      await dbPool.query(
+        `INSERT INTO conversation_ai_summaries
+           (tenant_id, conversation_id, summary, created_at)
+         VALUES ($1, $2, 'old summary', NOW() - INTERVAL '8 days')`,
+        [tenantId, message.conversationId],
+      );
+      await dbPool.query(
+        `INSERT INTO ai_copilot_drafts
+           (tenant_id, conversation_id, author_user_id, draft, status, updated_at)
+         VALUES ($1, $2, $3, 'old draft', 'discarded', NOW() - INTERVAL '8 days')`,
+        [tenantId, message.conversationId, userId],
+      );
+
+      const counts = await runRetentionCleanup();
+      assert.ok(counts.aiMemory >= 1);
+      assert.ok(counts.aiSignals >= 1);
+      assert.ok(counts.aiSummaries >= 1);
+      assert.ok(counts.aiDrafts >= 1);
+
+      const remaining = await dbPool.query(
+        `SELECT
+           (SELECT count(*)::int FROM contact_ai_memory WHERE tenant_id=$1) AS memory,
+           (SELECT count(*)::int FROM conversation_ai_signals WHERE tenant_id=$1) AS signals,
+           (SELECT count(*)::int FROM conversation_ai_summaries WHERE tenant_id=$1) AS summaries,
+           (SELECT count(*)::int FROM ai_copilot_drafts WHERE tenant_id=$1) AS drafts`,
+        [tenantId],
+      );
+      assert.deepEqual(remaining.rows[0], { memory: 0, signals: 0, summaries: 0, drafts: 0 });
+    } finally {
+      for (const [key, value] of Object.entries({
+        RETENTION_AI_MEMORY_DAYS: original.memory,
+        RETENTION_AI_SIGNALS_DAYS: original.signals,
+        RETENTION_AI_SUMMARIES_DAYS: original.summaries,
+        RETENTION_AI_DRAFTS_DAYS: original.drafts,
+      })) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+});

@@ -39,6 +39,14 @@ export async function requireAuth(req, res, next) {
       return res.status(401).json({ error: "Invalid or expired token" });
     }
 
+    // Legacy tokens without tokenVersion map to version 0. Once logout, a
+    // password change, or a role change bumps the account version, every older
+    // access JWT is rejected on the next request.
+    const currentTokenVersion = Number.isInteger(user.token_version) ? user.token_version : 0;
+    if ((decoded.tokenVersion ?? 0) !== currentTokenVersion) {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+
     const tenantActive = await isTenantActive(user.tenant_id);
     if (!tenantActive) {
       return res.status(401).json({ error: "Invalid or expired token" });

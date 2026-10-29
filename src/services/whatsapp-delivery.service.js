@@ -22,7 +22,7 @@ function validateTenantId(tenantId) {
 }
 
 function validateUuid(value) {
-  return typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value.trim());
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
 }
 
 function getRetryWindowSeconds() {
@@ -233,7 +233,7 @@ export async function markDeliveryRequestStarted(deliveryId, tenantId, leaseToke
 
   const result = await dbPool.query(
     `
-      UPDATE whatsapp_deliveries
+      UPDATE whatsapp_deliveries AS delivery
       SET
         provider_request_started_at = NOW(),
         updated_at = NOW()
@@ -244,12 +244,57 @@ export async function markDeliveryRequestStarted(deliveryId, tenantId, leaseToke
         AND attempt_count = $4
         AND lease_until > NOW()
         AND provider_request_started_at IS NULL
+        AND (
+          delivery.inbox_message_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM webhook_messages inbox
+            JOIN messages source
+              ON source.tenant_id = inbox.tenant_id
+             AND source.whatsapp_message_id = inbox.whatsapp_message_id
+             AND source.direction = 'inbound'
+            JOIN conversations conversation
+              ON conversation.tenant_id = source.tenant_id
+             AND conversation.id = source.conversation_id
+            WHERE inbox.id = delivery.inbox_message_id
+              AND inbox.tenant_id = delivery.tenant_id
+              AND conversation.id = delivery.conversation_id
+              AND source.deleted_at IS NULL
+              AND conversation.ai_paused = FALSE
+            FOR SHARE OF conversation, source
+          )
+        )
       RETURNING *
     `,
     [deliveryId.trim(), tenantId.trim(), leaseToken.trim(), attemptCount],
   );
 
   if (result.rowCount !== 1) {
+    // Explain a denied AI send without exposing message text. The eligibility
+    // check itself is part of the fenced UPDATE above, so both ordinary sends
+    // and recovery must honor committed handoff/deletion before request-start.
+    const policy = await dbPool.query(
+      `SELECT conversation.ai_paused, source.id AS source_id, source.deleted_at
+       FROM whatsapp_deliveries delivery
+       LEFT JOIN webhook_messages inbox
+         ON inbox.id = delivery.inbox_message_id AND inbox.tenant_id = delivery.tenant_id
+       LEFT JOIN messages source
+         ON source.tenant_id = inbox.tenant_id
+        AND source.whatsapp_message_id = inbox.whatsapp_message_id
+        AND source.direction = 'inbound'
+        AND source.conversation_id = delivery.conversation_id
+       LEFT JOIN conversations conversation
+         ON conversation.id = delivery.conversation_id AND conversation.tenant_id = delivery.tenant_id
+       WHERE delivery.id = $1 AND delivery.tenant_id = $2 AND delivery.inbox_message_id IS NOT NULL`,
+      [deliveryId.trim(), tenantId.trim()],
+    );
+    const current = policy.rows[0];
+    if (current && (!current.source_id || current.deleted_at)) {
+      throw new Error("Automatic AI reply suppressed: source message is deleted or missing");
+    }
+    if (current && current.ai_paused !== false) {
+      throw new Error("Automatic AI reply suppressed: conversation is paused for human takeover or missing");
+    }
     throw new Error("WhatsApp delivery lease is no longer valid");
   }
 
@@ -374,6 +419,7 @@ export async function markDeliveryStatus({
   phoneNumberId,
   providerMessageId,
   callbackData,
+  recipientId,
   status,
   timestamp,
   errors,
@@ -392,12 +438,14 @@ export async function markDeliveryStatus({
     return null;
   }
 
+  const hasCallback = callbackData !== undefined && callbackData !== null;
+  if (hasCallback && !validateUuid(callbackData)) return null;
+  const hasRecipient = recipientId !== undefined && recipientId !== null;
+  if (hasRecipient && (typeof recipientId !== "string" || !/^\d{7,15}$/.test(recipientId.trim()))) return null;
+  const callbackKey = hasCallback ? callbackData.trim() : null;
+  const recipient = hasRecipient ? recipientId.trim() : null;
   const statusAt = normalizeStatusTimestamp(timestamp) ?? new Date();
   const errorDetails = normalizeErrorDetails(errors);
-  const callbackKey =
-    typeof callbackData === "string" && validateUuid(callbackData)
-      ? callbackData.trim()
-      : null;
 
   const result = await dbPool.query(
     `
@@ -413,8 +461,13 @@ export async function markDeliveryStatus({
         WHERE d.tenant_id = $1
           AND wn.phone_number_id = $2
           AND (
-            d.provider_message_id = $3
-            OR ($4::uuid IS NOT NULL AND d.delivery_key = $4::uuid)
+            ($4::uuid IS NULL AND d.provider_message_id = $3)
+            OR (d.delivery_key = $4::uuid AND (d.provider_message_id IS NULL OR d.provider_message_id = $3))
+          )
+          AND ($10::text IS NULL OR d.recipient_wa_id = $10)
+          AND NOT EXISTS (
+            SELECT 1 FROM whatsapp_deliveries other
+            WHERE other.tenant_id = $1 AND other.provider_message_id = $3 AND other.id <> d.id
           )
 
         UNION
@@ -435,8 +488,13 @@ export async function markDeliveryStatus({
           AND d.automation_run_id IS NOT NULL
           AND wn.phone_number_id = $2
           AND (
-            d.provider_message_id = $3
-            OR ($4::uuid IS NOT NULL AND d.delivery_key = $4::uuid)
+            ($4::uuid IS NULL AND d.provider_message_id = $3)
+            OR (d.delivery_key = $4::uuid AND (d.provider_message_id IS NULL OR d.provider_message_id = $3))
+          )
+          AND ($10::text IS NULL OR d.recipient_wa_id = $10)
+          AND NOT EXISTS (
+            SELECT 1 FROM whatsapp_deliveries other
+            WHERE other.tenant_id = $1 AND other.provider_message_id = $3 AND other.id <> d.id
           )
         LIMIT 1
       )
@@ -465,6 +523,10 @@ export async function markDeliveryStatus({
         updated_at = NOW()
       FROM target
       WHERE d.id = target.id
+        AND d.tenant_id = $1
+        AND (d.provider_message_id IS NULL OR d.provider_message_id = $3)
+        AND ($4::uuid IS NULL OR d.delivery_key = $4::uuid)
+        AND ($10::text IS NULL OR d.recipient_wa_id = $10)
       RETURNING d.*
     `,
     [
@@ -477,8 +539,15 @@ export async function markDeliveryStatus({
       errorDetails.code,
       errorDetails.title,
       errorDetails.details,
+      recipient,
     ],
-  );
+  ).catch((error) => {
+    // Two callbacks can race to bind the same previously unknown provider ID.
+    // The unique constraint chooses one winner. Reject only that collision;
+    // unrelated database failures must still propagate to the webhook retry.
+    if (error.code === "23505" && error.constraint === "uq_whatsapp_deliveries_tenant_provider") return { rows: [] };
+    throw error;
+  });
 
   return result.rows[0] ?? null;
 }

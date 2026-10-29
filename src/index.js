@@ -10,13 +10,14 @@ import { checkDatabaseReadiness, closeDatabaseConnection, isDatabaseConfigured, 
 import { logger, createHttpLogger } from "./config/logger.js";
 import { runMigrations } from "./database/migrate.js";
 import { generateCopilotDraftReply, generateGeminiReply } from "./services/gemini.service.js";
+import { inspectGeneratedAiOutput } from "./services/ai-output-safety.service.js";
 import {
   isAmbiguousWhatsAppSendError,
   sendWhatsAppMessage,
 } from "./services/whatsapp.service.js";
 import { resolveTenantByPhoneNumberId, isTenantActive } from "./services/tenant.service.js";
 import { decryptSecret } from "./services/secrets.service.js";
-import { persistInboundMessage, persistOutboundMessage, persistDeletedInboundMessage } from "./services/message-persistence.service.js";
+import { persistInboundMessage, persistOutboundMessage, persistDeletedInboundMessage, isInboundMessageDeleted } from "./services/message-persistence.service.js";
 import { getBusinessBrain, upsertBusinessBrain } from "./services/business-brain.service.js";
 import { analyzeCustomerMessage, buildAdvancedAiContext, getCustomerMemory, rememberCustomerPreference, recordAiSignal, syncCustomerMemoryFromMessage } from "./services/advanced-ai.service.js";
 import { loginUser, getUserById, generateToken } from "./services/auth.service.js";
@@ -61,10 +62,10 @@ import {
 } from "./services/whatsapp-delivery.service.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireRole } from "./middleware/require-role.js";
-import { registerInboundUsage, getUsageSummary, reserveAiUsage, releaseAiUsage } from "./services/usage.service.js";
+import { registerInboundUsage, getUsageSummary, reserveAiUsage, commitAiUsage, releaseAiUsage } from "./services/usage.service.js";
 import { listConversations, getConversationMessages, updateConversation, markConversationRead, addConversationNote, setConversationTags } from "./services/conversation.service.js";
 import { getHandoffState, handoffConversation, pauseAi, resumeAi, assignConversationRoundRobin, saveCopilotDraft, listCopilotDrafts, getLatestHandoffSummary, buildCopilotContext, setUserSkills } from "./services/handoff.service.js";
-import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers } from "./services/automation.service.js";
+import { createWorkflow, listWorkflows, setWorkflowStatus, startWorkflowRun, triggerWorkflows, processDueWorkflowRuns, scheduleInactivityTriggers, listUnknownWorkflowWebhookEffects, resolveUnknownWorkflowWebhookEffect } from "./services/automation.service.js";
 import { createAppointmentType, listAppointmentTypes, setBusinessHours, getBusinessHours, listAppointments, getAppointment, bookAppointment, updateAppointmentStatus, buildCalendarLinks, buildIcs } from "./services/appointment.service.js";
 import { startRetentionScheduler } from "./services/retention.service.js";
 import { getDashboardSummary } from "./services/dashboard.service.js";
@@ -72,6 +73,7 @@ import { listContacts } from "./services/contact.service.js";
 import { listPayments } from "./services/payment.service.js";
 import { registerTask16Routes } from "./task16.routes.js";
 import { getServerPort } from "./config/server.js";
+import { getTrustProxySetting } from "./config/trust-proxy.js";
 
 const app = express();
 const PORT = getServerPort();
@@ -80,6 +82,7 @@ const IS_PRODUCTION = NODE_ENV === "production";
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 let startupComplete = false;
+let stopRetentionSchedulerHandle = null;
 
 const REQUIRED_ENV_VARS = [
   "GEMINI_API_KEY",
@@ -99,7 +102,7 @@ if (missingEnvVars.length > 0) {
 const httpLogger = createHttpLogger(logger);
 
 app.disable("x-powered-by");
-app.set("trust proxy", 1);
+app.set("trust proxy", getTrustProxySetting());
 app.use(helmet());
 app.use(compression());
 app.use(httpLogger);
@@ -115,6 +118,14 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { status: "error", error: "Too many login attempts. Please try again later." },
+});
+
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: "error", error: "Too many refresh attempts. Please try again later." },
 });
 
 // Development-only Gemini diagnostics can incur provider cost. Keep the route
@@ -269,7 +280,10 @@ app.post("/webhook", webhookLimiter, async (req, res, next) => {
       const inboxMessage = await ingestWebhookMessage({ message, tenant });
       // The retained canonical-message guard may mark a replay COMPLETED on
       // insertion. It must not launch automation side effects a second time.
-      if (inboxMessage.state !== "COMPLETED") {
+      if (inboxMessage.state !== "COMPLETED" && inboxMessage.is_new_delivery !== false) {
+        // Duplicate provider deliveries can return an existing RECEIVED or
+        // PROCESSING inbox row. Only the INSERT winner may create automation
+        // runs; inbox processing itself remains independently lease-fenced.
         await triggerWorkflows({
           tenantId: tenant.tenantId,
           triggerType: "message_received",
@@ -362,6 +376,7 @@ function extractWebhookEvents(body) {
             ...status,
             phoneNumberId,
             callbackData: status.biz_opaque_callback_data,
+            recipientId: status.recipient_id,
           });
         }
       }
@@ -369,6 +384,17 @@ function extractWebhookEvents(body) {
   }
 
   return { messages, deletedMessages, statuses };
+}
+
+function requireSafeAutomaticReply(value) {
+  const decision = inspectGeneratedAiOutput(value);
+  if (!decision.safe) {
+    const error = new Error("Automatic AI reply suppressed: cached output failed safety policy");
+    error.code = "UNSAFE_AI_REPLY";
+    error.outputSafetyReason = decision.reason;
+    throw error;
+  }
+  return value.trim();
 }
 
 async function processInboxMessage(inboxId, log = logger) {
@@ -422,6 +448,17 @@ async function processInboxMessage(inboxId, log = logger) {
       return;
     }
 
+    // A delete notification can race with a queued/retried inbound job. Never
+    // let a previously deleted message recreate memory, signals or an AI reply.
+    if (persistedInbound.deleted || await isInboundMessageDeleted(message.tenant_id, persistedInbound.messageId)) {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.info(
+        { inboxId: message.id, tenantId: message.tenant_id, whatsappMessageId: message.whatsapp_message_id },
+        "Skipped deleted inbound message",
+      );
+      return;
+    }
+
     if (!persistedInbound.duplicate) {
       await registerInboundUsage({
         tenantId: message.tenant_id,
@@ -456,6 +493,7 @@ async function processInboxMessage(inboxId, log = logger) {
         tenantId: message.tenant_id,
         contactId: persistedInbound.contactId,
         messageText: message.body,
+        sourceMessageId: persistedInbound.messageId,
       });
       if (savedMemories.length > 0) {
         log.info(
@@ -501,6 +539,25 @@ async function processInboxMessage(inboxId, log = logger) {
         throw usageError;
       }
 
+      if (aiReservation.inProgress) {
+        const reservationBusy = new Error("AI generation reservation is already active; retry later");
+        reservationBusy.code = "AI_RESERVATION_IN_PROGRESS";
+        throw reservationBusy;
+      }
+
+      // A committed reservation with no saved response means Gemini may have
+      // been charged but the durable response was not recorded. Do not invoke
+      // Gemini again on a durable-inbox retry; leave the conversation for a
+      // human rather than creating an unmetered duplicate provider call.
+      if (aiReservation.committed && !message.generated_response) {
+        await markCompleted(message.id, message.tenant_id, leaseToken, null);
+        log.warn(
+          { inboxId: message.id, tenantId: message.tenant_id, conversationId: persistedInbound.conversationId },
+          "AI usage was already committed without a saved reply; handed off for manual review",
+        );
+        return;
+      }
+
       if (!aiReservation.allowed) {
         // Same safe fallback as the AI-paused path: no reply is sent, nothing
         // pretends an AI response went out, the message stays visible in the
@@ -520,6 +577,7 @@ async function processInboxMessage(inboxId, log = logger) {
         return;
       }
 
+      let providerCallStarted = false;
       try {
         let brain = null;
         try {
@@ -554,36 +612,117 @@ async function processInboxMessage(inboxId, log = logger) {
           ? { ...brain, advancedContext }
           : { advancedContext };
 
+        // After dispatch, provider spend may have occurred even if the
+        // request errors or the customer deletes the source message.
+        providerCallStarted = true;
         reply = await generateGeminiReply(message.body, aiBrain);
+
+        // Recheck after the provider call. If Meta's deletion webhook landed
+        // while Gemini was generating, do not persist/send its text, but retain
+        // the usage charge because provider work has already occurred.
+        if (await isInboundMessageDeleted(message.tenant_id, persistedInbound.messageId)) {
+          try {
+            await commitAiUsage({
+              tenantId: message.tenant_id,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+            });
+          } catch (commitError) {
+            log.warn(
+              { error: commitError.message, tenantId: message.tenant_id, inboxId: message.id },
+              "Deleted source prevented reply persistence; provider usage remains for reconciliation",
+            );
+          }
+          await markCompleted(message.id, message.tenant_id, leaseToken, null);
+          return;
+        }
+
         reply = await saveGeneratedResponse(message.id, message.tenant_id, leaseToken, reply);
+
+        // Persisting the generated response is the durable success boundary.
+        // Failure to clear reservation metadata must not release a billable
+        // successful generation; the reconciler can finalize it from this row.
+        if (aiReservation.reservationToken) {
+          try {
+            await commitAiUsage({
+              tenantId: message.tenant_id,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+            });
+          } catch (commitError) {
+            log.warn(
+              { tenantId: message.tenant_id, inboxId: message.id, error: commitError.message },
+              "AI reply saved but reservation finalization will be reconciled",
+            );
+          }
+        }
       } catch (aiError) {
-        // Any failure after reservation but before a successful durable AI response
-        // must release the reservation. This includes context/signal/memory work,
-        // Gemini failures, and saveGeneratedResponse failures.
-        try {
-          await releaseAiUsage({
-            tenantId: message.tenant_id,
-            messageId: persistedInbound.messageId,
-            whatsappMessageId: message.whatsapp_message_id,
-          });
-        } catch (releaseError) {
-          log.warn(
-            { error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id },
-            "Failed to release reserved AI usage",
-          );
+        if (providerCallStarted) {
+          // Gemini may have processed the request even if generation or saving
+          // failed. Conservatively count the operation rather than allowing a
+          // durable-inbox retry to incur unmetered provider spend.
+          try {
+            await commitAiUsage({
+              tenantId: message.tenant_id,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+            });
+          } catch (commitError) {
+            log.warn(
+              { error: commitError.message, tenantId: message.tenant_id, inboxId: message.id },
+              "AI provider may have been charged; usage reservation remains for reconciliation",
+            );
+          }
+        } else {
+          // Failures during local context preparation happen before dispatch
+          // and can safely release the reservation for a retry.
+          try {
+            await releaseAiUsage({
+              tenantId: message.tenant_id,
+              messageId: persistedInbound.messageId,
+              whatsappMessageId: message.whatsapp_message_id,
+              eventKey: aiReservation.eventKey,
+              reservationToken: aiReservation.reservationToken,
+            });
+          } catch (releaseError) {
+            log.warn(
+              { error: releaseError.message, tenantId: message.tenant_id, inboxId: message.id },
+              "Failed to release pre-provider AI usage reservation",
+            );
+          }
         }
         throw aiError;
       }
     }
 
+    if (await isInboundMessageDeleted(message.tenant_id, persistedInbound.messageId)) {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.info(
+        { inboxId: message.id, tenantId: message.tenant_id, whatsappMessageId: message.whatsapp_message_id },
+        "Skipped reply after inbound message deletion",
+      );
+      return;
+    }
+
+    // Stored replies may predate the current output policy. Re-authorize an
+    // unsent cached result before copying it into a new delivery intent.
+    if (!message.provider_message_id) requireSafeAutomaticReply(reply);
+
     if (message.provider_message_id) {
+      const accepted = await dbPool.query(
+        `SELECT id, body, last_attempt_at FROM whatsapp_deliveries
+         WHERE tenant_id=$1 AND inbox_message_id=$2 AND provider_message_id=$3 LIMIT 1`,
+        [message.tenant_id, message.id, message.provider_message_id],
+      );
+      const actualDelivery = accepted.rows[0];
       await persistOutboundMessage({
         tenantId: message.tenant_id,
         conversationId: persistedInbound.conversationId,
         whatsappMessageId: message.provider_message_id,
         messageType: "text",
-        body: reply,
-        sentAt: new Date(),
+        body: actualDelivery ? actualDelivery.body.trim() : reply,
+        sentAt: actualDelivery?.last_attempt_at || new Date(),
+        deliveryId: actualDelivery?.id,
       });
       await markCompleted(message.id, message.tenant_id, leaseToken, message.provider_message_id);
       return;
@@ -611,7 +750,7 @@ async function processInboxMessage(inboxId, log = logger) {
           conversationId: persistedInbound.conversationId,
           whatsappMessageId: currentDelivery.provider_message_id,
           messageType: "text",
-          body: reply,
+          body: currentDelivery.body.trim(),
           sentAt: currentDelivery.last_attempt_at || new Date(),
           deliveryId: currentDelivery.id,
         });
@@ -633,6 +772,9 @@ async function processInboxMessage(inboxId, log = logger) {
     const accessToken = decryptSecret(tenant.accessTokenEncrypted);
 
     try {
+      // A retained delivery body can differ from the inbox's cached response.
+      // Validate the exact payload to be sent before recording request-start.
+      const outboundBody = requireSafeAutomaticReply(deliveryClaim.delivery.body);
       await markDeliveryRequestStarted(
         delivery.id,
         message.tenant_id,
@@ -641,7 +783,7 @@ async function processInboxMessage(inboxId, log = logger) {
       );
       const sentMessage = await sendWhatsAppMessage({
         to: deliveryClaim.delivery.recipient_wa_id,
-        message: deliveryClaim.delivery.body,
+        message: outboundBody,
         accessToken,
         phoneNumberId: tenant.phoneNumberId,
         callbackData: deliveryClaim.delivery.delivery_key,
@@ -672,7 +814,7 @@ async function processInboxMessage(inboxId, log = logger) {
         conversationId: persistedInbound.conversationId,
         whatsappMessageId: providerMessageId,
         messageType: "text",
-        body: reply,
+        body: outboundBody,
         sentAt: new Date(),
         deliveryId: completedDelivery.id,
       });
@@ -714,6 +856,14 @@ async function processInboxMessage(inboxId, log = logger) {
       return;
     }
   } catch (error) {
+    if (error.code === "UNSAFE_AI_REPLY") {
+      await markCompleted(message.id, message.tenant_id, leaseToken, null);
+      log.warn(
+        { inboxId: message.id, tenantId: message.tenant_id, reason: error.outputSafetyReason },
+        "Unsafe cached AI reply left unsent for human review",
+      );
+      return;
+    }
     const retryState = await markRetry(message.id, message.tenant_id, leaseToken, error);
     if (!retryState) {
       log.warn({ inboxId: message.id, tenantId: message.tenant_id }, "Unable to update durable inbox failure state");
@@ -789,6 +939,9 @@ async function recoverPendingDeliveries() {
         const accessToken = decryptSecret(tenant.accessTokenEncrypted);
 
         try {
+          const outboundBody = delivery.inbox_message_id
+            ? requireSafeAutomaticReply(delivery.body)
+            : delivery.body.trim();
           await markDeliveryRequestStarted(
             delivery.id,
             delivery.tenant_id,
@@ -797,7 +950,7 @@ async function recoverPendingDeliveries() {
           );
           const sentMessage = await sendWhatsAppMessage({
             to: delivery.recipient_wa_id,
-            message: delivery.body,
+            message: outboundBody,
             accessToken,
             phoneNumberId: tenant.phoneNumberId,
             callbackData: delivery.delivery_key,
@@ -821,7 +974,7 @@ async function recoverPendingDeliveries() {
             conversationId: delivery.conversation_id,
             whatsappMessageId: providerMessageId,
             messageType: "text",
-            body: delivery.body,
+            body: outboundBody,
             sentAt: new Date(),
             deliveryId: completedDelivery.id,
           });
@@ -866,7 +1019,7 @@ async function recoverPendingDeliveries() {
           conversationId: row.conversation_id,
           whatsappMessageId: row.provider_message_id,
           messageType: "text",
-          body: row.body,
+          body: row.body.trim(),
           sentAt: row.last_attempt_at || row.created_at || new Date(),
           deliveryId: row.id,
         });
@@ -961,7 +1114,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
     const { error, value } = loginSchema.validate(req.body);
     if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
     const result = await loginUser(value.email, value.password);
-    const refreshToken = await issueRefreshToken(result.user.id, result.user.tenantId);
+    const refreshToken = await issueRefreshToken(result.user.id, result.user.tenantId, result.tokenVersion);
     return res.status(200).json({ status: "ok", token: result.token, refreshToken, user: result.user });
   } catch (error) {
     if (error.message === "Invalid credentials") return res.status(401).json({ status: "error", error: "Invalid credentials" });
@@ -969,7 +1122,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
   }
 });
 
-app.post("/api/auth/refresh", async (req, res) => {
+app.post("/api/auth/refresh", refreshLimiter, async (req, res) => {
   const { error, value } = refreshSchema.validate(req.body);
   if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
 
@@ -978,6 +1131,9 @@ app.post("/api/auth/refresh", async (req, res) => {
     if (!rotatedToken) return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
     const user = await getUserById(rotatedToken.userId, rotatedToken.tenantId);
     if (!user || user.status !== "active" || !(await isTenantActive(rotatedToken.tenantId))) return res.status(401).json({ status: "error", error: "Account is inactive" });
+    // A credential/logout change may race with rotation. A rotated token keeps
+    // its original version; never mint a new-version access JWT from it.
+    if (user.token_version !== rotatedToken.tokenVersion) return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
     const token = generateToken(user);
     return res.status(200).json({ status: "ok", token, refreshToken: rotatedToken.refreshToken, user: { id: user.id, email: user.email, role: user.role, tenantId: user.tenant_id } });
   } catch (error) {
@@ -990,11 +1146,14 @@ app.post("/api/auth/logout", async (req, res) => {
   const { error, value } = refreshSchema.validate(req.body);
   if (error) return res.status(400).json({ status: "error", error: "Invalid request" });
   try {
-    await revokeRefreshToken(value.refreshToken);
+    const revoked = await revokeRefreshToken(value.refreshToken);
+    if (!revoked) {
+      return res.status(401).json({ status: "error", error: "Invalid or expired refresh token" });
+    }
     return res.sendStatus(204);
   } catch (error) {
     req.log.error({ error: error.message }, "Logout request failed");
-    return res.sendStatus(204);
+    return res.status(503).json({ status: "error", error: "Logout could not be completed" });
   }
 });
 
@@ -1233,6 +1392,11 @@ app.get("/api/conversations/:conversationId/copilot/drafts", requireAuth, async 
 
 app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async (req, res, next) => {
   try {
+    // Reject missing/foreign context before reserving quota or constructing
+    // any model request. Database foreign keys remain the final backstop.
+    if (!(await getHandoffState(req.user.tenantId, req.params.conversationId))) {
+      return res.status(404).json({ status: "error", error: "Conversation not found" });
+    }
     // Copilot drafts are billable Gemini operations: reserve quota from the
     // tenant's shared monthly AI limit before any context work or provider
     // call, mirroring the inbound AI gate.
@@ -1241,11 +1405,15 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
       conversationId: req.params.conversationId,
       type: "copilot_draft",
     });
+    if (aiReservation.inProgress) {
+      return res.status(409).json({ status: "error", error: "An AI draft operation is already in progress" });
+    }
     if (!aiReservation.allowed) {
       return res.status(429).json({ status: "error", error: "AI usage hard limit reached" });
     }
 
     let saved;
+    let providerCallStarted = false;
     try {
       const messages = await getConversationMessages(req.user.tenantId, req.params.conversationId, { limit: 12, offset: 0 });
       const summary = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
@@ -1254,18 +1422,89 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
         summary: summary?.summary,
         lastMessages: messages,
       });
+      const sourceMessageIds = messages.map((message) => message.id).filter(Boolean);
+      // Once dispatched, a timeout/network error cannot prove Gemini did
+      // not process the request, so retain quota for uncertain provider spend.
+      providerCallStarted = true;
       const draft = await generateCopilotDraftReply({
         businessBrain: brain,
         copilotContext,
       });
-      saved = await saveCopilotDraft(req.user.tenantId, req.params.conversationId, req.user.id, draft);
+
+      // The user can delete a message while Gemini is generating. Require the
+      // entire source set and the exact summary snapshot to remain valid before
+      // persisting a draft that could be sent later.
+      if (sourceMessageIds.length > 0) {
+        const currentSources = await dbPool.query(
+          `SELECT count(*)::int AS count
+           FROM messages
+           WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL`,
+          [req.user.tenantId, sourceMessageIds],
+        );
+        if (currentSources.rows[0].count !== sourceMessageIds.length) {
+          throw new Error("Conversation messages changed or were deleted while drafting; retry");
+        }
+      }
+      const currentSummary = await getLatestHandoffSummary(req.user.tenantId, req.params.conversationId);
+      if (currentSummary?.id !== summary?.id) {
+        throw new Error("Conversation summary changed while drafting; retry");
+      }
+
+      saved = await saveCopilotDraft(
+        req.user.tenantId,
+        req.params.conversationId,
+        req.user.id,
+        draft,
+        aiReservation.eventKey,
+        { sourceMessageIds, expectedSummaryId: summary?.id ?? null },
+      );
+      if (aiReservation.reservationToken) {
+        try {
+          await commitAiUsage({
+            tenantId: req.user.tenantId,
+            eventKey: aiReservation.eventKey,
+            reservationToken: aiReservation.reservationToken,
+            type: "copilot_draft",
+          });
+        } catch (commitError) {
+          logger.warn(
+            { tenantId: req.user.tenantId, conversationId: req.params.conversationId, error: commitError.message },
+            "Copilot draft saved but reservation finalization will be reconciled",
+          );
+        }
+      }
     } catch (error) {
-      // Any post-reservation failure (context, provider, or persistence) must
-      // not leave a reservation behind; failed attempts consume no quota.
-      try {
-        await releaseAiUsage({ tenantId: req.user.tenantId, eventKey: aiReservation.eventKey, type: "copilot_draft" });
-      } catch {
-        // Release failure leaves a bounded orphan (one unit); nothing else to do.
+      if (providerCallStarted) {
+        // Gemini may have spent quota even if drafting/persistence failed.
+        // Commit conservatively to avoid a retry receiving an unmetered call.
+        try {
+          await commitAiUsage({
+            tenantId: req.user.tenantId,
+            eventKey: aiReservation.eventKey,
+            reservationToken: aiReservation.reservationToken,
+            type: "copilot_draft",
+          });
+        } catch (commitError) {
+          logger.warn(
+            { tenantId: req.user.tenantId, conversationId: req.params.conversationId, error: commitError.message },
+            "Copilot provider may have been charged; usage reservation remains for reconciliation",
+          );
+        }
+      } else {
+        // Context/validation failures before dispatch cannot incur Gemini spend.
+        try {
+          await releaseAiUsage({
+            tenantId: req.user.tenantId,
+            eventKey: aiReservation.eventKey,
+            reservationToken: aiReservation.reservationToken,
+            type: "copilot_draft",
+          });
+        } catch (releaseError) {
+          logger.warn(
+            { tenantId: req.user.tenantId, conversationId: req.params.conversationId, error: releaseError.message },
+            "Failed to release pre-provider Copilot usage reservation",
+          );
+        }
       }
       throw error;
     }
@@ -1326,8 +1565,13 @@ app.post("/api/automations/:workflowId/run", requireAuth, requireRole("owner", "
       contactId: req.body?.contactId,
       context: req.body?.context || {},
     });
+    if (!data) return res.status(404).json({ status: "error", error: "Workflow or context not found or inactive" });
     return res.status(202).json({ status: "ok", data });
   } catch (error) {
+    // Keep the service/database tenant FK contract intact. Translate its
+    // rejection at the API boundary without exposing constraint details.
+    if (error.code === "23503") return res.status(404).json({ status: "error", error: "Workflow or context not found" });
+    if (error.code === "22P02") return res.status(400).json({ status: "error", error: "Invalid identifier" });
     if (error.message.startsWith("Invalid") || error.message.includes("not found")) return res.status(400).json({ status: "error", error: error.message });
     return next(error);
   }
@@ -1335,6 +1579,34 @@ app.post("/api/automations/:workflowId/run", requireAuth, requireRole("owner", "
 
 app.get("/api/automations/health", requireAuth, requireRole("owner", "admin"), async (req, res) => {
   return res.status(200).json({ status: "ok", scheduler: "enabled" });
+});
+
+app.get("/api/automations/webhook-effects/unknown", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const data = await listUnknownWorkflowWebhookEffects(req.user.tenantId, req.query.limit);
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message });
+    return next(error);
+  }
+});
+
+app.post("/api/automations/webhook-effects/:effectId/resolve", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const data = await resolveUnknownWorkflowWebhookEffect({
+      tenantId: req.user.tenantId,
+      effectId: req.params.effectId,
+      resolvedBy: req.user.id,
+      outcome: req.body?.outcome,
+      reason: req.body?.reason,
+    });
+    if (!data) return res.status(409).json({ status: "error", error: "Webhook effect is not awaiting reconciliation" });
+    return res.status(200).json({ status: "ok", data });
+  } catch (error) {
+    if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message });
+    if (error.message.includes("no longer eligible")) return res.status(409).json({ status: "error", error: error.message });
+    return next(error);
+  }
 });
 
 app.get("/api/appointments/types", requireAuth, async (req, res, next) => {
@@ -1416,7 +1688,7 @@ app.get("/api/appointments/:appointmentId/ics", requireAuth, async (req, res, ne
   } catch (error) { return next(error); }
 });
 
-app.get("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next) => {
+app.get("/api/contacts/:contactId/ai-memory", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
   try {
     const data = await getCustomerMemory(req.user.tenantId, req.params.contactId);
     return res.status(200).json({ status: "ok", data });
@@ -1425,7 +1697,7 @@ app.get("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next
   }
 });
 
-app.post("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, next) => {
+app.post("/api/contacts/:contactId/ai-memory", requireAuth, requireRole("owner", "admin"), async (req, res, next) => {
   try {
     const data = await rememberCustomerPreference(
       req.user.tenantId,
@@ -1434,6 +1706,7 @@ app.post("/api/contacts/:contactId/ai-memory", requireAuth, async (req, res, nex
       req.body?.value,
       req.body?.confidence,
     );
+    if (!data) return res.status(404).json({ status: "error", error: "Contact not found" });
     return res.status(201).json({ status: "ok", data });
   } catch (error) {
     if (error.message.startsWith("Invalid")) return res.status(400).json({ status: "error", error: error.message });
@@ -1486,8 +1759,70 @@ if (!IS_PRODUCTION) {
       try {
         const { error, value } = geminiTestSchema.validate(req.body);
         if (error) return res.status(400).json({ status: "error", message: "Invalid request body" });
-        const reply = await generateGeminiReply(value.message);
-        return res.status(200).json({ status: "ok", reply });
+
+        const aiReservation = await reserveAiUsage({
+          tenantId: req.user.tenantId,
+          type: "ai_diagnostic",
+        });
+        if (aiReservation.inProgress) {
+          return res.status(409).json({ status: "error", message: "An AI diagnostic is already in progress" });
+        }
+        if (!aiReservation.allowed) {
+          return res.status(429).json({ status: "error", message: "AI usage hard limit reached" });
+        }
+
+        let providerCallStarted = false;
+        try {
+          providerCallStarted = true;
+          const reply = await generateGeminiReply(value.message);
+          if (aiReservation.reservationToken) {
+            try {
+              await commitAiUsage({
+                tenantId: req.user.tenantId,
+                eventKey: aiReservation.eventKey,
+                reservationToken: aiReservation.reservationToken,
+                type: "ai_diagnostic",
+              });
+            } catch (commitError) {
+              req.log.warn(
+                { error: commitError.message, tenantId: req.user.tenantId },
+                "Diagnostic reply returned but usage finalization will be reconciled",
+              );
+            }
+          }
+          return res.status(200).json({ status: "ok", reply });
+        } catch (error) {
+          if (providerCallStarted) {
+            try {
+              await commitAiUsage({
+                tenantId: req.user.tenantId,
+                eventKey: aiReservation.eventKey,
+                reservationToken: aiReservation.reservationToken,
+                type: "ai_diagnostic",
+              });
+            } catch (commitError) {
+              req.log.warn(
+                { error: commitError.message, tenantId: req.user.tenantId },
+                "Diagnostic provider may have been charged; usage reservation remains for reconciliation",
+              );
+            }
+          } else {
+            try {
+              await releaseAiUsage({
+                tenantId: req.user.tenantId,
+                eventKey: aiReservation.eventKey,
+                reservationToken: aiReservation.reservationToken,
+                type: "ai_diagnostic",
+              });
+            } catch (releaseError) {
+              req.log.warn(
+                { error: releaseError.message, tenantId: req.user.tenantId },
+                "Failed to release pre-provider diagnostic reservation",
+              );
+            }
+          }
+          throw error;
+        }
       } catch (error) {
         return next(error);
       }
@@ -1503,8 +1838,21 @@ app.use((req, res) => res.status(404).json({ status: "error", message: "Route no
 app.use((error, req, res, next) => {
   req.log?.error({ error: error.message }, "Unhandled application error");
   if (res.headersSent) return next(error);
-  return res.status(500).json({ status: "error", message: IS_PRODUCTION ? "Internal server error" : error.message });
+  // Internal details belong in server logs, not the public API response.
+  // Fail closed even if NODE_ENV is unset or misconfigured.
+  return res.status(500).json({ status: "error", message: "Internal server error" });
 });
+
+// Integration tests import the composed app and must release its queue,
+// recovery, retention, and optional database resources without force-exit.
+export async function stopBackgroundServices({ closeDatabase = false } = {}) {
+  await appStartupPromise;
+  await stopInboxRecovery();
+  stopRetentionSchedulerHandle?.();
+  stopRetentionSchedulerHandle = null;
+  await closeQueue();
+  if (closeDatabase) await closeDatabaseConnection();
+}
 
 async function startServer() {
   if (IS_PRODUCTION || process.env.DATABASE_URL) {
@@ -1526,7 +1874,7 @@ async function startServer() {
     logger.info("WhatsApp queue worker started");
   }
 
-  const stopRetentionScheduler = startRetentionScheduler();
+  stopRetentionSchedulerHandle = startRetentionScheduler();
   if (isDatabaseConfigured()) startInboxRecovery();
 
   startupComplete = true;
@@ -1538,9 +1886,10 @@ async function startServer() {
     shuttingDown = true;
     startupComplete = false;
     logger.info(`Received ${signal}, shutting down gracefully`);
+    let shutdownStage = "inbox_recovery";
 
     const forceTimer = setTimeout(() => {
-      logger.error("Forced shutdown after 10 seconds");
+      logger.error({ shutdownStage }, "Forced shutdown after 10 seconds");
       process.exit(1);
     }, 10_000);
     forceTimer.unref();
@@ -1551,6 +1900,7 @@ async function startServer() {
 
       // Stop accepting HTTP traffic and wait for in-flight requests before
       // closing Redis/BullMQ and PostgreSQL.
+      shutdownStage = "http_drain";
       await new Promise((resolve, reject) => {
         server.close((error) => {
           if (error) reject(error);
@@ -1558,8 +1908,11 @@ async function startServer() {
         });
       });
 
-      stopRetentionScheduler?.();
+      stopRetentionSchedulerHandle?.();
+      stopRetentionSchedulerHandle = null;
+      shutdownStage = "queue_close";
       await closeQueue();
+      shutdownStage = "database_close";
       await closeDatabaseConnection();
 
       clearTimeout(forceTimer);
@@ -1567,7 +1920,7 @@ async function startServer() {
       process.exit(0);
     } catch (shutdownError) {
       clearTimeout(forceTimer);
-      logger.error({ error: shutdownError.message }, "Graceful shutdown error");
+      logger.error({ error: shutdownError.message, shutdownStage }, "Graceful shutdown error");
       process.exit(1);
     }
   }
@@ -1594,7 +1947,7 @@ async function startServer() {
     process.exit(1);
   });
 }
-startServer().catch((error) => {
+export const appStartupPromise = startServer().catch((error) => {
   logger.fatal({ error: error.message }, "Nova-AI failed to start");
   process.exit(1);
 });

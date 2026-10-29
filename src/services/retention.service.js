@@ -1,5 +1,6 @@
 import { dbPool, isDatabaseConfigured } from "../config/database.js";
 import { logger } from "../config/logger.js";
+import { reconcileExpiredAiUsageReservations } from "./usage.service.js";
 
 const DEFAULT_RETENTION_DAYS = 90;
 const MIN_RETENTION_DAYS = 7;
@@ -41,6 +42,10 @@ export function getRetentionConfig() {
     ocrDocumentsDays: getDays("RETENTION_OCR_DOCUMENTS_DAYS", DEFAULT_RETENTION_DAYS),
     paymentEventsDays: getDays("RETENTION_PAYMENT_EVENTS_DAYS", DEFAULT_RETENTION_DAYS),
     expiredRefreshTokensDays: getDays("RETENTION_EXPIRED_REFRESH_TOKENS_DAYS", 30),
+    aiMemoryDays: getDays("RETENTION_AI_MEMORY_DAYS", 365),
+    aiSignalsDays: getDays("RETENTION_AI_SIGNALS_DAYS", 365),
+    aiSummariesDays: getDays("RETENTION_AI_SUMMARIES_DAYS", 365),
+    aiDraftsDays: getDays("RETENTION_AI_DRAFTS_DAYS", 365),
     cleanupIntervalMs: getCleanupIntervalMs(),
   };
 }
@@ -61,12 +66,20 @@ export async function runRetentionCleanup() {
     ["ocrDocuments", `DELETE FROM ocr_documents WHERE created_at < NOW() - ($1 * INTERVAL '1 day')`, config.ocrDocumentsDays],
     ["paymentEvents", `DELETE FROM payment_webhook_events WHERE received_at < NOW() - ($1 * INTERVAL '1 day')`, config.paymentEventsDays],
     ["expiredRefreshTokens", `DELETE FROM refresh_tokens WHERE expires_at < NOW() - ($1 * INTERVAL '1 day')`, config.expiredRefreshTokensDays],
+    ["aiMemory", `DELETE FROM contact_ai_memory WHERE updated_at < NOW() - ($1 * INTERVAL '1 day')`, config.aiMemoryDays],
+    ["aiSignals", `DELETE FROM conversation_ai_signals WHERE created_at < NOW() - ($1 * INTERVAL '1 day')`, config.aiSignalsDays],
+    ["aiSummaries", `DELETE FROM conversation_ai_summaries WHERE created_at < NOW() - ($1 * INTERVAL '1 day')`, config.aiSummariesDays],
+    ["aiDrafts", `DELETE FROM ai_copilot_drafts WHERE updated_at < NOW() - ($1 * INTERVAL '1 day')`, config.aiDraftsDays],
   ];
 
   for (const [name, sql, days] of queries) {
     const result = await dbPool.query(sql, [days]);
     results[name] = result.rowCount;
   }
+
+  const reservations = await reconcileExpiredAiUsageReservations();
+  results.aiReservationsFinalized = reservations.committed;
+  results.aiReservationsReleased = reservations.released;
 
   logger.info({ results, config }, "Retention cleanup completed");
   return results;

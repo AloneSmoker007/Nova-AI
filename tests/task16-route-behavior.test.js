@@ -36,6 +36,7 @@ const TASK16_ROUTES = [
 let app;
 let server;
 let baseUrl;
+let stopBackgroundServices;
 const realListen = express.application.listen;
 
 function fakeServer() {
@@ -52,13 +53,16 @@ function fakeServer() {
 before(async () => {
   express.application.listen = function suppressed() { return fakeServer(); };
   try {
-    ({ default: app } = await import("../src/index.js"));
+    const appModule = await import("../src/index.js");
+    ({ default: app, stopBackgroundServices } = appModule);
+    // Startup can await migrations. Do not restore listen before it resumes.
+    await appModule.appStartupPromise;
   } finally {
     // express() mixins application methods onto the app instance, so the
     // instance holds its own copy of `listen` captured at construction time.
     // Restoring the prototype alone is not enough - restore it on the instance.
     express.application.listen = realListen;
-    app.listen = realListen;
+    if (app) app.listen = realListen;
   }
   server = app.listen(0);
   await new Promise((resolve) => server.on("listening", resolve));
@@ -68,6 +72,7 @@ before(async () => {
 
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
+  if (stopBackgroundServices) await stopBackgroundServices({ closeDatabase: true });
 });
 
 function request(method, path, body) {
@@ -91,6 +96,17 @@ function request(method, path, body) {
     req.end(payload ?? undefined);
   });
 }
+
+test("payments list route is registered exactly once and remains authenticated", () => {
+  const matches = app._router.stack
+    .map((layer) => layer.route)
+    .filter((route) => route?.path === "/api/payments" && route.methods?.get);
+  assert.equal(matches.length, 1, "the duplicate Task 16 GET /api/payments route must not shadow the canonical route");
+  assert.ok(
+    matches[0].stack.some((layer) => layer.handle.name === "requireAuth"),
+    "payments list must require authentication",
+  );
+});
 
 test("compiled Express stack places every Task 16 route before the terminal 404", () => {
   assert.ok(app, "the production app must be importable");
@@ -168,6 +184,31 @@ test("development Gemini diagnostics reject anonymous calls and rate-limit repea
   const limited = await send();
   assert.equal(limited.status, 429, `sixth diagnostic call must be rate-limited, got ${limited.status} ${limited.body}`);
   assert.match(limited.body, /Too many AI diagnostic requests/);
+});
+
+test("unhandled API errors never disclose internals in the default environment", () => {
+  assert.ok(app, "real composed app must be imported");
+  const errorLayers = app._router.stack.filter((layer) => layer.handle?.length === 4);
+  assert.ok(errorLayers.length > 0, "the real app must register an error handler");
+  const publicErrorHandler = errorLayers.at(-1).handle;
+
+  const secret = "private-db.internal:5432 password=should-not-leak";
+  let statusCode = null;
+  let payload = null;
+  publicErrorHandler(
+    new Error(secret),
+    { log: { error() {} } },
+    {
+      headersSent: false,
+      status(code) { statusCode = code; return this; },
+      json(body) { payload = body; return this; },
+    },
+    (error) => { throw error; },
+  );
+
+  assert.equal(statusCode, 500);
+  assert.deepEqual(payload, { status: "error", message: "Internal server error" });
+  assert.doesNotMatch(JSON.stringify(payload), /private-db|password|should-not-leak/);
 });
 
 test("the terminal 404 still handles genuinely unknown routes", async () => {

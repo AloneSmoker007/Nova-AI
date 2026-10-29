@@ -17,13 +17,23 @@ function normalizeText(value, max) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
-function sanitizeMemoryValue(value) {
+export function sanitizeMemoryValue(value) {
   const raw = String(value ?? "");
   const cleaned = raw
     .split("")
     .map((ch) => {
       const code = ch.charCodeAt(0);
-      if (code <= 0x08 || code === 0x0B || code === 0x0C || (code >= 0x0E && code <= 0x1F) || code === 0x7F) {
+      if (
+        code <= 0x08 ||
+        code === 0x0B ||
+        code === 0x0C ||
+        (code >= 0x0E && code <= 0x1F) ||
+        code === 0x7F ||
+        code === 0x200B ||
+        code === 0xFEFF ||
+        (code >= 0x202A && code <= 0x202E) ||
+        (code >= 0x2066 && code <= 0x2069)
+      ) {
         return " ";
       }
       return ch;
@@ -88,6 +98,25 @@ export async function analyzeCustomerMessage(text, businessBrain = null) {
 const TRAILING_COPULA = /\s+(?:hai|hun|hoon|ho)\s*$/i;
 const TRAILING_KEYWORD = /\s+(?:chahiye|mujhe|need|want|wants|looking\s+for)\s*$/i;
 
+// Auto-extracted customer facts are untrusted. Refuse to persist obvious
+// instructions masquerading as a name, budget, or service preference.
+// This is defense in depth; model prompts must still treat all memory as data.
+const MEMORY_DIRECTIVE_PATTERNS = [
+  /\b(?:ignore|disregard|override)\s+(?:(?:all|any|the|your|previous|prior|system|developer)\s+){0,5}(?:instructions?|rules?|prompts?)\b/i,
+  /\b(?:reveal|show|print|leak|expose)\s+(?:(?:me|your|the|hidden|internal|full)\s+){0,4}(?:system|developer)\s+(?:prompts?|instructions?|rules?)\b/i,
+  /\b(?:you\s+are\s+now|act\s+as)\s+(?:the\s+)?(?:system|developer|administrator)\b/i,
+];
+
+function isInstructionLikeMemoryFact(value) {
+  const normalized = String(value ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    // Instruction words separated by hyphens still read as directives to a model.
+    // Compare against a normalized copy, retaining ordinary hyphenated names as stored.
+    .replace(/[\p{Pd}_]+/gu, " ");
+  return MEMORY_DIRECTIVE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function trimTrailingCopula(name) {
   return name.replace(TRAILING_COPULA, "");
 }
@@ -145,7 +174,7 @@ export function extractCustomerPreferencesFromText(text) {
     const normalizedKey = candidate.key.toLowerCase();
     const normalizedValue = normalizeText(candidate.value, MAX_MEMORY_VALUE).toLowerCase();
     const dedupeKey = `${normalizedKey}:${normalizedValue}`;
-    if (!dedupeKey || seen.has(dedupeKey)) continue;
+    if (!normalizedValue || seen.has(dedupeKey) || isInstructionLikeMemoryFact(candidate.value)) continue;
     seen.add(dedupeKey);
     deduped.push({
       key: normalizedKey,
@@ -171,43 +200,112 @@ export async function getCustomerMemory(tenantId, contactId) {
   return result.rows;
 }
 
-export async function rememberCustomerPreference(tenantId, contactId, key, value, confidence = 0.7) {
+export async function rememberCustomerPreference(
+  tenantId,
+  contactId,
+  key,
+  value,
+  confidence = 0.7,
+  sourceMessageId = null,
+  queryable = dbPool,
+) {
   assertDatabase();
   if (!validId(tenantId) || !validId(contactId)) throw new Error("Invalid tenant or contact ID");
+  if (sourceMessageId !== null && !validId(sourceMessageId)) throw new Error("Invalid source message ID");
+
   const memoryKey = normalizeText(key, MAX_MEMORY_KEY).toLowerCase();
   const memoryValue = sanitizeMemoryValue(value);
   const score = Number(confidence);
   if (!memoryKey || !memoryValue || !Number.isFinite(score) || score < 0 || score > 1) {
     throw new Error("Invalid customer memory");
   }
-  const result = await dbPool.query(
-    `INSERT INTO contact_ai_memory (tenant_id, contact_id, memory_key, memory_value, confidence, source)
-     VALUES ($1, $2, $3, $4, $5, 'conversation')
+
+  // The same transaction that locks a source message writes its derived memory.
+  // A concurrent deletion either waits and purges this row, or the source lock
+  // observes the already-deleted message and prevents the write entirely.
+  const result = await queryable.query(
+    `INSERT INTO contact_ai_memory
+       (tenant_id, contact_id, memory_key, memory_value, confidence, source, source_message_id)
+     SELECT $1, $2, $3, $4, $5,
+            CASE WHEN $6::uuid IS NULL THEN 'manual' ELSE 'conversation' END,
+            $6::uuid
+     FROM contacts contact
+     WHERE contact.tenant_id=$1 AND contact.id=$2
+       AND ($6::uuid IS NULL OR EXISTS (
+       SELECT 1 FROM messages m
+       JOIN conversations c
+         ON c.tenant_id=m.tenant_id AND c.id=m.conversation_id
+       WHERE m.tenant_id=$1 AND m.id=$6::uuid
+         AND c.contact_id=$2 AND m.direction='inbound'
+         AND m.deleted_at IS NULL
+       FOR SHARE OF m
+     ))
      ON CONFLICT (tenant_id, contact_id, memory_key) DO UPDATE SET
        memory_value = EXCLUDED.memory_value,
        confidence = EXCLUDED.confidence,
+       source = EXCLUDED.source,
+       source_message_id = EXCLUDED.source_message_id,
        last_confirmed_at = NOW(),
        updated_at = NOW()
-     RETURNING memory_key, memory_value, confidence`,
-    [tenantId, contactId, memoryKey, memoryValue, score],
+     RETURNING memory_key, memory_value, confidence, source, source_message_id`,
+    [tenantId, contactId, memoryKey, memoryValue, score, sourceMessageId],
   );
-  return result.rows[0];
+  return result.rows[0] || null;
 }
 
-export async function syncCustomerMemoryFromMessage({ tenantId, contactId, messageText }) {
+export async function syncCustomerMemoryFromMessage({
+  tenantId,
+  contactId,
+  messageText,
+  sourceMessageId = null,
+}) {
   if (!validId(tenantId) || !validId(contactId)) {
     throw new Error("Invalid tenant or contact ID");
   }
+  if (!validId(sourceMessageId)) return [];
   const safeText = normalizeText(messageText, 2000);
   if (!safeText) return [];
 
   const candidates = extractCustomerPreferencesFromText(safeText);
-  const saved = [];
-  for (const candidate of candidates) {
-    const row = await rememberCustomerPreference(tenantId, contactId, candidate.key, candidate.value, candidate.confidence);
-    if (row) saved.push(row);
+  if (!candidates.length) return [];
+
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+    const source = await client.query(
+      `SELECT c.contact_id, m.deleted_at
+       FROM messages m
+       JOIN conversations c ON c.tenant_id=m.tenant_id AND c.id=m.conversation_id
+       WHERE m.tenant_id=$1 AND m.id=$2
+       FOR UPDATE OF m`,
+      [tenantId, sourceMessageId],
+    );
+    if (!source.rows[0] || source.rows[0].deleted_at || source.rows[0].contact_id !== contactId) {
+      await client.query("COMMIT");
+      return [];
+    }
+
+    const saved = [];
+    for (const candidate of candidates) {
+      const row = await rememberCustomerPreference(
+        tenantId,
+        contactId,
+        candidate.key,
+        candidate.value,
+        candidate.confidence,
+        sourceMessageId,
+        client,
+      );
+      if (row) saved.push(row);
+    }
+    await client.query("COMMIT");
+    return saved;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
-  return saved;
 }
 
 export async function recordAiSignal(tenantId, conversationId, messageId, signal) {
@@ -215,29 +313,52 @@ export async function recordAiSignal(tenantId, conversationId, messageId, signal
   if (!validId(tenantId) || !validId(conversationId) || !validId(messageId)) {
     throw new Error("Invalid AI signal identifiers");
   }
-  const result = await dbPool.query(
-    `INSERT INTO conversation_ai_signals
-      (tenant_id, conversation_id, message_id, intent, sentiment, priority, detected_language,
-       preferred_language, negotiation_requested, competitor_comparison_requested)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-     ON CONFLICT (tenant_id, message_id) WHERE message_id IS NOT NULL DO UPDATE SET
-       conversation_id = EXCLUDED.conversation_id,
-       intent = EXCLUDED.intent,
-       sentiment = EXCLUDED.sentiment,
-       priority = EXCLUDED.priority,
-       detected_language = EXCLUDED.detected_language,
-       preferred_language = EXCLUDED.preferred_language,
-       negotiation_requested = EXCLUDED.negotiation_requested,
-       competitor_comparison_requested = EXCLUDED.competitor_comparison_requested
-     RETURNING id, intent, sentiment, priority, detected_language, preferred_language,
-               negotiation_requested, competitor_comparison_requested, created_at`,
-    [
-      tenantId, conversationId, messageId, signal.intent, signal.sentiment, signal.priority,
-      signal.detectedLanguage, signal.preferredLanguage, signal.negotiationRequested,
-      signal.competitorComparisonRequested,
-    ],
-  );
-  return result.rows[0];
+
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+    const source = await client.query(
+      `SELECT deleted_at
+       FROM messages
+       WHERE tenant_id=$1 AND id=$2 AND conversation_id=$3
+       FOR UPDATE`,
+      [tenantId, messageId, conversationId],
+    );
+    if (!source.rows[0] || source.rows[0].deleted_at) {
+      await client.query("COMMIT");
+      return null;
+    }
+
+    const result = await client.query(
+      `INSERT INTO conversation_ai_signals
+        (tenant_id, conversation_id, message_id, intent, sentiment, priority, detected_language,
+         preferred_language, negotiation_requested, competitor_comparison_requested)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ON CONFLICT (tenant_id, message_id) WHERE message_id IS NOT NULL DO UPDATE SET
+         conversation_id = EXCLUDED.conversation_id,
+         intent = EXCLUDED.intent,
+         sentiment = EXCLUDED.sentiment,
+         priority = EXCLUDED.priority,
+         detected_language = EXCLUDED.detected_language,
+         preferred_language = EXCLUDED.preferred_language,
+         negotiation_requested = EXCLUDED.negotiation_requested,
+         competitor_comparison_requested = EXCLUDED.competitor_comparison_requested
+       RETURNING id, intent, sentiment, priority, detected_language, preferred_language,
+                 negotiation_requested, competitor_comparison_requested, created_at`,
+      [
+        tenantId, conversationId, messageId, signal.intent, signal.sentiment, signal.priority,
+        signal.detectedLanguage, signal.preferredLanguage, signal.negotiationRequested,
+        signal.competitorComparisonRequested,
+      ],
+    );
+    await client.query("COMMIT");
+    return result.rows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export function buildAdvancedAiContext({ signal, memories = [], businessBrain = null } = {}) {
