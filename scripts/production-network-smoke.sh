@@ -21,7 +21,7 @@ cleanup() {
     docker logs --tail 15 "$db_name" 2>/dev/null || true
     docker logs --tail 15 "$edge_name" 2>/dev/null || true
   fi
-  docker rm -fv "$edge_name" "$app_name" "$redis_name" "$db_name" >/dev/null 2>&1 || true
+  docker rm -fv "$network_name-probe" "$edge_name" "$app_name" "$redis_name" "$db_name" >/dev/null 2>&1 || true
   docker network rm "$network_name" >/dev/null 2>&1 || true
   # PostgreSQL's private key has container ownership.
   docker run --rm --network none -v "$network_tmp:/cleanup" postgres:15 \
@@ -116,7 +116,7 @@ done
 docker exec "$db_name" pg_isready -U nova -d nova_network >/dev/null
 
 probe() {
-  docker run --rm --network "$network_name" --env-file "$network_tmp/app.env" \
+  docker run --rm --name "$network_name-probe" --network "$network_name" --env-file "$network_tmp/app.env" \
     -e "NOVA_NETWORK_PHASE=$1" -v "$PWD:/app:ro" -w /app \
     -v "$network_tmp/ca.crt:/certs/ca.crt:ro" \
     -v "$network_tmp/wrong-ca.crt:/certs/wrong-ca.crt:ro" \

@@ -1886,9 +1886,10 @@ async function startServer() {
     shuttingDown = true;
     startupComplete = false;
     logger.info(`Received ${signal}, shutting down gracefully`);
+    let shutdownStage = "inbox_recovery";
 
     const forceTimer = setTimeout(() => {
-      logger.error("Forced shutdown after 10 seconds");
+      logger.error({ shutdownStage }, "Forced shutdown after 10 seconds");
       process.exit(1);
     }, 10_000);
     forceTimer.unref();
@@ -1899,6 +1900,7 @@ async function startServer() {
 
       // Stop accepting HTTP traffic and wait for in-flight requests before
       // closing Redis/BullMQ and PostgreSQL.
+      shutdownStage = "http_drain";
       await new Promise((resolve, reject) => {
         server.close((error) => {
           if (error) reject(error);
@@ -1908,7 +1910,9 @@ async function startServer() {
 
       stopRetentionSchedulerHandle?.();
       stopRetentionSchedulerHandle = null;
+      shutdownStage = "queue_close";
       await closeQueue();
+      shutdownStage = "database_close";
       await closeDatabaseConnection();
 
       clearTimeout(forceTimer);
@@ -1916,7 +1920,7 @@ async function startServer() {
       process.exit(0);
     } catch (shutdownError) {
       clearTimeout(forceTimer);
-      logger.error({ error: shutdownError.message }, "Graceful shutdown error");
+      logger.error({ error: shutdownError.message, shutdownStage }, "Graceful shutdown error");
       process.exit(1);
     }
   }
