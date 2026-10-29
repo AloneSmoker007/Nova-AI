@@ -15,6 +15,10 @@ const PROVIDER_TOKEN = /\b(?:AIza[0-9A-Za-z_-]{25,}|sk-[A-Za-z0-9_-]{20,}|gh[pou
 // JSON and quoted object fields put a closing quote between the label and colon.
 const CREDENTIAL_ASSIGNMENT =
   /\b(?:api[\s_-]?key|client[\s_-]?secret|access[\s_-]?token|refresh[\s_-]?token|password)["']?\s*[:=]\s*["']?[^\s"'<>]{12,}/i;
+// Quoted JSON/object credential values may contain spaces and still be secrets.
+// Detect the entire quoted field; do not require a long whitespace-free first token.
+const QUOTED_CREDENTIAL_FIELD =
+  /\b(?:api[\s_-]?key|client[\s_-]?secret|access[\s_-]?token|refresh[\s_-]?token|password)["']\s*:\s*(["'])(?:(?!\1)[^\r\n])+\1/i;
 const INSTRUCTION_DISCLOSURE =
   /\b(?:here(?:'s| is)|below is|my|the)\s+(?:the\s+)?(?:hidden\s+)?(?:system prompt|system instructions|developer instructions)\b/i;
 const INTERNAL_MEMORY_MARKUP = /<\/?(?:customer_memory|memory)(?:\s|>|\/)/i;
@@ -59,6 +63,7 @@ export function inspectGeneratedAiOutput(value, maxLength = 4096) {
     ["bearer_token", BEARER_TOKEN],
     ["provider_token", PROVIDER_TOKEN],
     ["credential_assignment", CREDENTIAL_ASSIGNMENT],
+    ["credential_assignment", QUOTED_CREDENTIAL_FIELD],
     ["system_instruction_disclosure", INSTRUCTION_DISCLOSURE],
     ["internal_memory_markup", INTERNAL_MEMORY_MARKUP],
   ];

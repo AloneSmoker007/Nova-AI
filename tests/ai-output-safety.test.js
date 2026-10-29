@@ -109,6 +109,26 @@ test("credentials containing punctuation fail closed without rejecting ordinary 
   assert.equal(inspectGeneratedAiOutput("Use the password reset option to update your account.").safe, true);
 });
 
+test("quoted credential values containing whitespace are blocked without blocking business JSON", () => {
+  const examples = [
+    JSON.stringify({ password: "My passphrase is strong" }),
+    JSON.stringify({ api_key: "SYNTHETIC KEY MATERIAL" }),
+    JSON.stringify({ client_secret: "abc$def 12345" }),
+    JSON.stringify({ access_token: "synthetic token with spaces" }, null, 2),
+    "'refresh_token': 'short value !'",
+  ];
+
+  for (const value of examples) {
+    const decision = enforceGeneratedAiOutput(value);
+    assert.equal(decision.safe, false, value);
+    assert.equal(decision.reason, "credential_assignment", value);
+    assert.equal(decision.text, SAFE_AI_FALLBACK, value);
+  }
+
+  assert.equal(inspectGeneratedAiOutput(JSON.stringify({ appointment: "tomorrow at 3 PM" })).safe, true);
+  assert.equal(inspectGeneratedAiOutput("Use the password reset option to update your account.").safe, true);
+});
+
 test("quoted business data and password guidance still pass the output gate", () => {
   for (const value of [
     JSON.stringify({ appointment: "tomorrow at 3 PM", status: "confirmed" }),
