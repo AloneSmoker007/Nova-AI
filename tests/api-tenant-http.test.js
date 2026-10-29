@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
 import express from "express";
 
@@ -11,6 +11,7 @@ const PUBLIC_API = new Set([
   "POST /api/auth/login", "POST /api/auth/refresh", "POST /api/auth/logout",
   "POST /api/payments/webhook/:tenantId",
 ]);
+const META_STATUS_SECRET = "synthetic-http-callback-signature-secret";
 const TABLES = [
   "users", "whatsapp_numbers", "contacts", "conversations", "messages", "conversation_notes", "conversation_tags",
   "contact_ai_memory", "conversation_ai_summaries", "ai_copilot_drafts", "payments",
@@ -32,6 +33,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
     process.env.JWT_SECRET = "http-matrix-synthetic-jwt-secret-32chars";
     process.env.JWT_ISSUER = "nova-ai";
     process.env.JWT_AUDIENCE = "nova-ai-api";
+    process.env.META_APP_SECRET = META_STATUS_SECRET;
     // No provider credential is needed or exercised. All HTTP probes below
     // target our loopback server; fail any attempted external fetch locally.
     delete process.env.GEMINI_API_KEY;
@@ -97,7 +99,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
     return f;
   }
 
-  function request(actor, method, path, body) {
+  function request(actor, method, path, body, extraHeaders = {}) {
     requestCount += 1;
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
@@ -110,6 +112,7 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
         headers: {
           ...(actor?.token ? { Authorization: `Bearer ${actor.token}` } : {}),
           ...(payload ? { "Content-Type": "application/json", "Content-Length": payload.length } : {}),
+          ...extraHeaders,
         },
       }, (res) => {
         let text = "";
@@ -391,6 +394,60 @@ describe("real HTTP tenant/resource/role authorization (PostgreSQL)", { skip }, 
       assert.equal(limited.status, 429, path);
       assert.ok(Number(limited.headers["retry-after"]) > 0, "clients must receive retry guidance");
     }
+    assert.equal(providerCalls, 0);
+  });
+
+  it("signed status HTTP callbacks enforce raw recipient and correlation fields", async (t) => {
+    const f = fixtures[0];
+    const phone = "15550005401";
+    await dbPool.query("UPDATE whatsapp_numbers SET phone_number_id=$2 WHERE id=$1", [f.number, phone]);
+    const { prepareDelivery, getDelivery } = await import("../src/services/whatsapp-delivery.service.js");
+    async function seedTarget() {
+      const inbox = randomUUID();
+      await dbPool.query("INSERT INTO webhook_messages (id,tenant_id,whatsapp_number_id,phone_number_id,whatsapp_message_id,wa_id,body,received_at,state) VALUES ($1,$2,$3,$4,$5,'15550001111','Synthetic receipt source',NOW(),'DEAD_LETTER')", [inbox, f.tenant, f.number, phone, "wamid.http-source-" + inbox]);
+      const delivery = await prepareDelivery({ tenantId: f.tenant, inboxMessageId: inbox, conversationId: f.conversation, recipientWaId: "15550001111", body: "Synthetic receipt reply" });
+      return { delivery, providerId: "wamid.http-receipt-" + randomUUID() };
+    }
+    async function receipt(target, override = {}, validSignature = true) {
+      const body = { object: "whatsapp_business_account", entry: [{ changes: [{ field: "messages", value: { metadata: { phone_number_id: phone }, statuses: [{ id: target.providerId, status: "sent", recipient_id: "15550001111", biz_opaque_callback_data: target.delivery.delivery_key, timestamp: String(Math.floor(Date.now() / 1000)), ...override }] } }] }] };
+      const signature = createHmac("sha256", validSignature ? META_STATUS_SECRET : "wrong-synthetic-secret").update(JSON.stringify(body)).digest("hex");
+      return request({ ip: "127.0.0.42" }, "POST", "/webhook", body, { "X-Hub-Signature-256": "sha256=" + signature });
+    }
+    await t.test("valid progression and replay", async () => {
+      const target = await seedTarget();
+      for (const status of ["sent", "delivered", "read", "sent"]) assert.equal((await receipt(target, { status })).status, 200);
+      const row = await getDelivery(target.delivery.id, f.tenant);
+      assert.equal(row.state, "READ");
+      assert.equal(row.provider_message_id, target.providerId);
+      assert.equal(row.attempt_count, 0);
+    });
+    const invalid = [
+      ["wrong raw recipient_id", { recipient_id: "15559990000" }],
+      ["conflicting provider id", { id: "wamid.http-unrelated-" + randomUUID() }],
+      ["unknown callback key", { biz_opaque_callback_data: randomUUID() }],
+      ["malformed callback UUID", { biz_opaque_callback_data: "-".repeat(36) }],
+    ];
+    for (const [label, override] of invalid) await t.test(label, async () => {
+      const target = await seedTarget();
+      assert.equal((await receipt(target)).status, 200);
+      const before = await getDelivery(target.delivery.id, f.tenant);
+      const response = await receipt(target, { status: "read", ...override });
+      assert.equal(response.status, 200, "an authenticated but inconsistent receipt is safely ignored");
+      assert.deepEqual(await getDelivery(target.delivery.id, f.tenant), before);
+    });
+    await t.test("known provider ID with absent callback data", async () => {
+      const target = await seedTarget();
+      assert.equal((await receipt(target)).status, 200);
+      assert.equal((await receipt(target, { status: "delivered", biz_opaque_callback_data: undefined })).status, 200);
+      assert.equal((await getDelivery(target.delivery.id, f.tenant)).state, "DELIVERED");
+    });
+    await t.test("invalid signature never changes a known delivery", async () => {
+      const target = await seedTarget();
+      assert.equal((await receipt(target)).status, 200);
+      const before = await getDelivery(target.delivery.id, f.tenant);
+      assert.equal((await receipt(target, { status: "read" }, false)).status, 403);
+      assert.deepEqual(await getDelivery(target.delivery.id, f.tenant), before);
+    });
     assert.equal(providerCalls, 0);
   });
 

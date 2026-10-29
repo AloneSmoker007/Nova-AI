@@ -123,9 +123,16 @@ jobs:
 
       # TASK-04 regression coverage: outbound WhatsApp delivery retries,
       # attempt caps, lease fencing and monotonic state transitions.
-      # Run in its own serialized step because the suite resets public schema.
-      - name: Run WhatsApp delivery reliability integration tests
-        run: node --test tests/delivery-reliability.test.js
+      # Both suites reset public schema and run serially. Collect both results
+      # to expose service and raw HTTP callback failures in one run; any failure
+      # still exits nonzero and blocks CI. External providers are not called.
+      - name: Run delivery reliability and HTTP callback authorization integration tests
+        shell: bash
+        run: |
+          callback_gate_status=0
+          timeout 120s node --test tests/delivery-reliability.test.js || callback_gate_status=1
+          timeout 120s node --test tests/api-tenant-http.test.js || callback_gate_status=1
+          exit "$callback_gate_status"
 
       # TASK-07 regression coverage: message-scoped AI signal idempotency.
       # This suite also resets public schema, so keep it serialized.
@@ -151,12 +158,6 @@ jobs:
       # role change, password change, and refresh-token reuse.
       - name: Run access-token revocation integration tests
         run: node --test tests/access-token-revocation.test.js
-
-      # Real composed HTTP app + two synthetic tenants and three DB-backed
-      # roles. This suite resets public schema; keep it serialized like the
-      # other integration files. External provider calls are forbidden.
-      - name: Run HTTP tenant and role authorization matrix
-        run: timeout 120s node --test tests/api-tenant-http.test.js
 
       # Real ingress/dispatcher/worker/database/Redis with SDK-level model and
       # Meta HTTP transport substitutes. This is not live provider evidence.

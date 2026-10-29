@@ -718,6 +718,104 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
     assert.equal(finalDelivery.attempt_count, 1, "history repair must not claim or resend the delivery");
   });
 
+  async function callbackFixture(kind) {
+    const f = kind === "automation" ? await seedAutomationDelivery() : await seedDelivery();
+    return { ...f, target: kind === "automation" ? f.automationDelivery : f.delivery };
+  }
+
+  function callbackFor(f, overrides = {}) {
+    return { tenantId: f.tenantId, phoneNumberId: f.phoneNumberId, providerMessageId: `wamid.callback-${f.target.id}`, callbackData: f.target.delivery_key, recipientId: "15550001111", status: "sent", timestamp: Math.floor(Date.now() / 1000), ...overrides };
+  }
+
+  async function siblingDelivery(f) {
+    const inboxId = randomUUID();
+    const messageId = `wamid.sibling-${inboxId}`;
+    await dbPool.query("INSERT INTO webhook_messages (id,tenant_id,whatsapp_number_id,phone_number_id,whatsapp_message_id,wa_id,body,received_at) SELECT $1,tenant_id,whatsapp_number_id,phone_number_id,$2,wa_id,'Sibling source',NOW() FROM webhook_messages WHERE id=$3", [inboxId, messageId, f.inboxId]);
+    await dbPool.query("INSERT INTO messages (tenant_id,conversation_id,whatsapp_message_id,direction,text) VALUES ($1,$2,$3,'inbound','Sibling source')", [f.tenantId, f.conversationId, messageId]);
+    return svc.prepareDelivery({ tenantId: f.tenantId, inboxMessageId: inboxId, conversationId: f.conversationId, recipientWaId: "15550001111", body: "Sibling reply" });
+  }
+
+  it("valid early callbacks, provider-only receipts and replays preserve identity for both delivery sources", async (t) => {
+    for (const kind of ["inbox", "automation"]) await t.test(kind, async () => {
+      const f = await callbackFixture(kind);
+      const sent = await svc.markDeliveryStatus(callbackFor(f));
+      assert.equal(sent.id, f.target.id);
+      assert.equal(sent.state, "SENT");
+      const delivered = await svc.markDeliveryStatus(callbackFor(f, { callbackData: undefined, status: "delivered" }));
+      assert.equal(delivered.state, "DELIVERED");
+      const read = await svc.markDeliveryStatus(callbackFor(f, { status: "read" }));
+      assert.equal(read.state, "READ");
+      const replay = await svc.markDeliveryStatus(callbackFor(f, { status: "sent" }));
+      assert.equal(replay.state, "READ");
+      assert.equal(replay.provider_message_id, sent.provider_message_id);
+      assert.equal(replay.attempt_count, 0);
+    });
+  });
+
+  it("all supplied callback identities must agree before an inbox or automation delivery can change", async (t) => {
+    for (const kind of ["inbox", "automation"]) {
+      const f = await callbackFixture(kind);
+      const foreign = await seedDelivery();
+      await svc.markDeliveryStatus(callbackFor(f));
+      const probes = [
+        ["wrong recipient", { recipientId: "15559990000" }],
+        ["conflicting provider ID", { providerMessageId: "wamid.unrelated-" + randomUUID() }],
+        ["unknown callback key", { callbackData: randomUUID() }],
+        ["foreign callback key", { callbackData: foreign.delivery.delivery_key }],
+        ["malformed callback key", { callbackData: "not-a-uuid" }],
+        ["invalid UUID-shaped callback", { callbackData: "-".repeat(36) }],
+      ];
+      for (const [label, override] of probes) await t.test(`${kind}: ${label}`, async () => {
+        const before = await svc.getDelivery(f.target.id, f.tenantId);
+        const foreignBefore = await svc.getDelivery(foreign.delivery.id, foreign.tenantId);
+        assert.equal(await svc.markDeliveryStatus(callbackFor(f, { status: "read", ...override })), null);
+        assert.deepEqual(await svc.getDelivery(f.target.id, f.tenantId), before, "reject without mutating timestamps, leases, errors or state");
+        assert.deepEqual(await svc.getDelivery(foreign.delivery.id, foreign.tenantId), foreignBefore);
+      });
+    }
+  });
+
+  it("an already-bound provider ID cannot be attached to another delivery", async () => {
+    const f = await callbackFixture("inbox");
+    const sibling = await siblingDelivery(f);
+    await svc.markDeliveryStatus(callbackFor(f));
+    const before = await svc.getDelivery(sibling.id, f.tenantId);
+    assert.equal(await svc.markDeliveryStatus(callbackFor(f, { callbackData: sibling.delivery_key, status: "delivered" })), null);
+    assert.deepEqual(await svc.getDelivery(sibling.id, f.tenantId), before);
+  });
+
+  it("racing callbacks for the same provider ID have one binding winner and no database error", async () => {
+    const f = await callbackFixture("inbox");
+    const sibling = await siblingDelivery(f);
+    const outcomes = await Promise.allSettled([
+      svc.markDeliveryStatus(callbackFor(f)),
+      svc.markDeliveryStatus(callbackFor(f, { callbackData: sibling.delivery_key })),
+    ]);
+    assert.ok(outcomes.every((outcome) => outcome.status === "fulfilled"));
+    assert.equal(outcomes.filter((outcome) => outcome.value !== null).length, 1);
+    assert.equal((await dbPool.query("SELECT COUNT(*)::int AS n FROM whatsapp_deliveries WHERE tenant_id=$1 AND provider_message_id=$2", [f.tenantId, callbackFor(f).providerMessageId])).rows[0].n, 1);
+  });
+
+  it("racing different provider IDs cannot both authorize the same callback key", async () => {
+    const f = await callbackFixture("inbox");
+    const outcomes = await Promise.allSettled([
+      svc.markDeliveryStatus(callbackFor(f)),
+      svc.markDeliveryStatus(callbackFor(f, { providerMessageId: "wamid.conflicting-" + randomUUID() })),
+    ]);
+    assert.ok(outcomes.every((outcome) => outcome.status === "fulfilled"));
+    assert.equal(outcomes.filter((outcome) => outcome.value !== null).length, 1);
+  });
+
+  it("invalid provided recipients reject without touching a known delivery", async (t) => {
+    const f = await callbackFixture("inbox");
+    await svc.markDeliveryStatus(callbackFor(f));
+    for (const recipientId of [false, 15550001111, "", "+15550001111", "1".repeat(16)]) await t.test(String(recipientId), async () => {
+      const before = await svc.getDelivery(f.target.id, f.tenantId);
+      assert.equal(await svc.markDeliveryStatus(callbackFor(f, { recipientId, status: "read" })), null);
+      assert.deepEqual(await svc.getDelivery(f.target.id, f.tenantId), before);
+    });
+  });
+
   it("recovers PENDING automation deliveries that have no inbox message", async () => {
     const { delivery, automationDelivery, tenantId } = await seedAutomationDelivery();
     assert.equal(automationDelivery.inbox_message_id, null);
