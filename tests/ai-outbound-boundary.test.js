@@ -39,8 +39,10 @@ describe("AI output boundary through the real webhook worker and delivery pipeli
       assert.ok(url.pathname.endsWith(":generateContent"));
       modelRequests.push(JSON.parse(options.body));
       assert.ok(responses.length, "each model call must have an explicit synthetic response");
+      const next = responses.shift();
+      const text = typeof next === "function" ? await next() : next;
       return new Response(JSON.stringify({
-        candidates: [{ content: { role: "model", parts: [{ text: responses.shift() }] }, finishReason: "STOP" }],
+        candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     };
     axios.post = async (url, body, options) => {
@@ -59,8 +61,9 @@ describe("AI output boundary through the real webhook worker and delivery pipeli
     await runMigrations();
     fixtures = [];
     for (const [index, label] of ["Alpha", "Beta"].entries()) {
-      const f = { tenant: randomUUID(), number: randomUUID(), phone: `1555000990${index}`, wa: `1555000880${index}`, canary: `PRIVATE_BRAIN_${label}_${randomUUID()}` };
+      const f = { tenant: randomUUID(), number: randomUUID(), owner: randomUUID(), phone: `1555000990${index}`, wa: `1555000880${index}`, canary: `PRIVATE_BRAIN_${label}_${randomUUID()}` };
       await dbPool.query("INSERT INTO tenants (id,name) VALUES ($1,$2)", [f.tenant, label]);
+      await dbPool.query("INSERT INTO users (id,tenant_id,email,password_hash,role) VALUES ($1,$2,$3,'synthetic-hash','owner')", [f.owner, f.tenant, `${f.owner}@example.test`]);
       await dbPool.query("INSERT INTO whatsapp_numbers (id,tenant_id,phone_number_id,access_token_encrypted) VALUES ($1,$2,$3,$4)", [f.number, f.tenant, f.phone, encryptSecret(accessToken)]);
       await dbPool.query("INSERT INTO tenant_business_brain (tenant_id,business_name,description,hours) VALUES ($1,$2,$2,$3::jsonb)", [f.tenant, f.canary, JSON.stringify({ monday: "9am to 5pm" })]);
       fixtures.push(f);
@@ -196,10 +199,93 @@ describe("AI output boundary through the real webhook worker and delivery pipeli
     });
   }
 
+  it("human takeover during model generation suppresses the unsent automatic reply", async () => {
+    const f = fixtures[0];
+    const { pauseAi, resumeAi } = await import("../src/services/handoff.service.js");
+    let conversationId;
+    const beforeCalls = modelRequests.length;
+    const beforeSends = metaRequests.length;
+    responses.push(async () => {
+      const row = await dbPool.query("SELECT c.id FROM conversations c JOIN contacts ct ON ct.tenant_id=c.tenant_id AND ct.id=c.contact_id WHERE c.tenant_id=$1 AND ct.wa_id=$2", [f.tenant, f.wa]);
+      conversationId = row.rows[0].id;
+      await pauseAi(f.tenant, conversationId, f.owner, "Synthetic takeover while Gemini is running");
+      return "Our Monday opening hours are 9am to 5pm.";
+    });
+    try {
+      const id = `wamid.synthetic-takeover-${randomUUID()}`;
+      assert.equal(await postWebhook(payload(f, id)), 200);
+      const inbox = await completed(id);
+      assert.ok(conversationId, "the takeover must have executed during the actual SDK call");
+      assert.equal(modelRequests.length, beforeCalls + 1);
+      assert.equal(metaRequests.length, beforeSends, "a completed takeover must prevent the subsequent automatic send");
+      assert.equal(inbox.provider_message_id, null);
+      assert.equal((await dbPool.query("SELECT COUNT(*)::int AS n FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND direction='outbound' AND created_at >= $3", [f.tenant, conversationId, inbox.created_at])).rows[0].n, 0);
+    } finally {
+      if (conversationId) await resumeAi(f.tenant, conversationId, f.owner);
+    }
+  });
+
+  it("an explicit resume allows a fresh automatic reply", async () => {
+    const f = fixtures[0];
+    const beforeSends = metaRequests.length;
+    const reply = "Our Monday opening hours are 9am to 5pm.";
+    responses.push(reply);
+    const id = `wamid.synthetic-resumed-${randomUUID()}`;
+    assert.equal(await postWebhook(payload(f, id)), 200);
+    const inbox = await completed(id);
+    assert.equal(inbox.generated_response, reply);
+    assert.equal(metaRequests.length, beforeSends + 1);
+    assert.equal(metaRequests.at(-1).body.text.body, reply);
+  });
+
+  for (const [index, block] of ["paused", "deleted", "allowed"].entries()) {
+    it(`pre-request delivery recovery respects ${block} source/conversation state`, async () => {
+      const f = fixtures[index % 2];
+      const wa = `1555000770${index}`;
+      const id = `wamid.synthetic-recovery-${randomUUID()}`;
+      const reply = "This cached reply must follow the current conversation policy.";
+      const { persistInboundMessage, persistDeletedInboundMessage } = await import("../src/services/message-persistence.service.js");
+      const { prepareDelivery, claimDelivery } = await import("../src/services/whatsapp-delivery.service.js");
+      const { pauseAi } = await import("../src/services/handoff.service.js");
+      const source = await persistInboundMessage({ tenantId: f.tenant, whatsappNumberId: f.number, waId: wa, whatsappMessageId: id, body: "What are your hours?", receivedAt: new Date() });
+      const inbox = (await dbPool.query("INSERT INTO webhook_messages (tenant_id,whatsapp_number_id,phone_number_id,whatsapp_message_id,wa_id,body,received_at,state,completed_at,generated_response) VALUES ($1,$2,$3,$4,$5,'What are your hours?',NOW(),'COMPLETED',NOW(),$6) RETURNING *", [f.tenant, f.number, f.phone, id, wa, reply])).rows[0];
+      const delivery = await prepareDelivery({ tenantId: f.tenant, inboxMessageId: inbox.id, conversationId: source.conversationId, recipientWaId: wa, body: reply });
+      const initialClaim = await claimDelivery(delivery.id, f.tenant);
+      assert.equal(initialClaim.claimed, true);
+      if (block === "paused") await pauseAi(f.tenant, source.conversationId, f.owner);
+      if (block === "deleted") await persistDeletedInboundMessage({ tenantId: f.tenant, whatsappNumberId: f.number, waId: wa, whatsappMessageId: id });
+      const beforeCalls = modelRequests.length;
+      const beforeSends = metaRequests.length;
+      // Only after the block is committed, simulate a crashed worker whose
+      // lease expired before any provider request. Recovery may now claim it.
+      await dbPool.query("UPDATE whatsapp_deliveries SET lease_until=NOW()-INTERVAL '1 hour',last_attempt_at=NOW()-INTERVAL '2 hours' WHERE id=$1", [delivery.id]);
+      let recovered;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        recovered = (await dbPool.query("SELECT * FROM whatsapp_deliveries WHERE id=$1", [delivery.id])).rows[0];
+        if (["SENT", "FAILED", "UNKNOWN", "DELIVERED", "READ"].includes(recovered.state)) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.equal(recovered.state, block === "allowed" ? "SENT" : "FAILED");
+      assert.equal(recovered.attempt_count, 2, "the actual recovery dispatcher must have claimed the stale attempt");
+      assert.equal(modelRequests.length, beforeCalls, "delivery recovery must not generate another reply");
+      assert.equal(metaRequests.length, beforeSends + (block === "allowed" ? 1 : 0));
+      if (block !== "allowed") {
+        assert.equal(recovered.provider_message_id, null);
+        assert.equal(recovered.provider_request_started_at, null);
+        assert.match(recovered.last_error, block === "paused" ? /paused|handoff|human/i : /deleted|source/i);
+        assert.equal((await dbPool.query("SELECT COUNT(*)::int AS n FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND direction='outbound'", [f.tenant, source.conversationId])).rows[0].n, 0);
+      } else {
+        assert.equal(metaRequests.at(-1).body.to, wa);
+        assert.equal(metaRequests.at(-1).body.text.body, reply);
+      }
+    });
+  }
+
   it("records the transport boundary without any external provider call", (t) => {
     assert.equal(responses.length, 0);
-    assert.equal(modelRequests.length, 2);
-    assert.equal(metaRequests.length, 2);
-    t.diagnostic("2 Gemini SDK responses and 2 Meta sends simulated; real PostgreSQL + Redis + signed HTTP; 0 external provider calls");
+    assert.equal(modelRequests.length, 4);
+    assert.equal(metaRequests.length, 4);
+    t.diagnostic("4 Gemini SDK responses and 4 Meta sends simulated; real PostgreSQL + Redis + signed HTTP, takeover and deletion recovery; 0 external provider calls");
   });
 });
