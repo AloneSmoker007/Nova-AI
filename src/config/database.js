@@ -1,5 +1,7 @@
 import pg from "pg";
 import fs from "node:fs";
+import { checkServerIdentity } from "node:tls";
+import { parse as parseConnectionString } from "pg-connection-string";
 import { logger } from "./logger.js";
 
 const { Pool } = pg;
@@ -45,16 +47,29 @@ export function getPoolConfig(env = process.env) {
   }
 
   const sslCa = readSslCa(env.DATABASE_SSL_CA);
+  // pg reparses connectionString after merging the explicit options, allowing
+  // URI sslmode/ssl flags to replace ssl and even disable TLS. Parse once in
+  // production, then apply the deployment policy to the final driver options.
+  const connectionOptions = isProduction
+    ? parseConnectionString(env.DATABASE_URL)
+    : { connectionString: env.DATABASE_URL };
+  if (isProduction) delete connectionOptions.connectionString;
+  const urlSsl = typeof connectionOptions.ssl === "object" && connectionOptions.ssl
+    ? connectionOptions.ssl
+    : {};
   const sslConfig = isProduction
-    ? sslCa
-      ? { ca: sslCa, rejectUnauthorized: true }
-      : { rejectUnauthorized: true }
+    ? {
+        ...urlSsl,
+        ...(sslCa ? { ca: sslCa } : {}),
+        rejectUnauthorized: true,
+        checkServerIdentity,
+      }
     : sslCa
       ? { ca: sslCa }
       : undefined;
 
   return {
-    connectionString: env.DATABASE_URL,
+    ...connectionOptions,
     max: readBoundedIntegerEnv(env, "DB_POOL_MAX", DEFAULT_DB_POOL_MAX, 1, 100),
     idleTimeoutMillis: readBoundedIntegerEnv(
       env,

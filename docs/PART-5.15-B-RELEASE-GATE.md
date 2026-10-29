@@ -12,6 +12,8 @@ Further 29 October reproduction found unsent AI replies could dispatch after hum
 
 The linked follow-up now also records a bounded callback/replay review: valid receipts, all supplied identity consistency, malformed inputs, replay/monotonic behavior and parallel provider binding, through both delivery sources and signed HTTP. Its test-only CI failed before correction; acceptance requires the containing fix commit's green full regression. Completing this defined code-review scope does not sign the live provider, staging or independent-review gates below.
 
+A subsequent zero-spend deployment check reproduced a production database TLS policy override at `8ef0b7b898ffcbf9ba48e27491bcc533669a6c7b`. The linked follow-up records actual-driver/loopback failures, parse-once enforcement and legitimate controls. Verify the containing fix commit's CI. Production endpoints relying on plaintext or unverifiable certificates now fail closed; do not relax verification to fit a free provider. The owner's current incremental spending limit is **USD 0**; use verified free allowances only, with no paid upgrades or overages.
+
 ## Verified branch evidence (2026-10-27)
 
 - Baseline reviewed: PR #163 head `29c79c470ca4f8bd0dca762c0e03d14085026547`. `main` remains separate. Recheck the SHA before reusing this evidence.
@@ -32,6 +34,7 @@ These results establish **automated test confidence**, not safe live provider be
 | Meta WhatsApp Cloud API | **UNTESTED live** | Owner-approved test phone/number and credentials, signed webhook delivery, duplicated inbound event, outbound status, ambiguous send, retry, human takeover |
 | Gemini and paid AI provider | **UNTESTED live** | Owner-approved bounded test budget; prompt-injection / output-redaction checks, quota reservation and provider-failure exercise |
 | Deployment network controls | **NO production signoff** | Confirm exact public reverse-proxy hop count; no direct path that permits spoofed forwarding headers; HTTPS, private database/Redis and rate-limit behavior in the actual topology |
+| Railway incident credential recovery | **MISSING EVIDENCE** | Follow Railway's [October 21 incident guidance](https://blog.railway.com/p/preliminary-report-october-security-incident): establish whether sensitive variables stored before the incident were rotated/revoked after containment; confirm provider activity and dependent configuration. Variable-name presence and absence of an email do not establish safety or rotation. |
 | Per-tenant payment signing rollout | **NO production signoff** | Confirm every active tenant signer has the correct unique `PAYMENT_WEBHOOK_SECRETS` entry; stage coordinated switch away from `PAYMENT_WEBHOOK_SECRET`; verify rejection of old/unknown/cross-tenant signatures and replay |
 | Backup operations | **SMOKE PASS; ops NOT SIGNED** | Verified offsite encrypted copies, retention, access control, independent key recovery, scheduled restore drill, `pg_dump` / server version compatibility, RPO/RTO |
 | Monitoring and rollback | **NO production signoff** | Alerts for webhook queue/dead letter, payment failures, Redis/Postgres readiness and AI budget; migration rollback/roll-forward plan; owner drill |
