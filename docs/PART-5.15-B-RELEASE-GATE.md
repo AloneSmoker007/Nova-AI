@@ -16,6 +16,14 @@ A subsequent zero-spend deployment check reproduced a production database TLS po
 
 ## Disposable production network regression (29 October 2026)
 
+The subsequent [HTTP logging privacy follow-up](./PART-5-HTTP-AUTH-REVIEW.md)
+reproduced Meta verification tokens leaking through raw request URL queries.
+Access logging now retains path/method/request ID/status while leaving the
+actual request untouched. Six focused regressions, including successful and
+rejected verification through the real composed app, passed locally; acceptance
+requires the containing commit's full CI. Proxy/provider log policy and live
+webhook delivery are still not signed off.
+
 `scripts/production-network-smoke.sh` adds a bounded CI-only topology: the real
 production bootstrap, PostgreSQL 15, authenticated Redis 7 and an HTTPS Nginx
 proxy on an internal Docker network. All certificates and application secrets

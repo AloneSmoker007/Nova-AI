@@ -2,6 +2,33 @@
 
 **Release gate remains NO-GO.** This sequential review expands deterministic evidence for Parts 5.1–5.3, 5.6 and 5.14. It is not an independent review or a live Meta/Gemini test.
 
+## Webhook verification query privacy (29 October)
+
+At `e20d70d42701060e209cb51eccbefc5d1cbdd437`, the real HTTP logger
+serialized `req.url` with its query. A successful Meta-style GET verification
+therefore logged the synthetic `hub.verify_token` and challenge; rejected
+verification and private API search queries were also retained. Existing
+object/header redaction did not sanitize the URL string. This demonstrates a
+log-disclosure path, not proof that actual production credentials were leaked.
+
+The six new behavioral cases reported **1 pass / 5 fail** before correction.
+The fix logs only the request path, preserving method, request ID, status and
+the original URL/query used by routing. Query text is deliberately unavailable
+in access logs on every route; operators should use safe structured fields
+instead of adding raw queries back. No dependency or schema change is needed.
+
+After correction, local Node 24 checks passed **6/6**, including a child
+process running the actual composed Nova app: a valid verification still returns
+the challenge with 200, and an invalid token still returns 403, while neither
+query appears in its logs. Encoded/repeated query keys, ordinary query routing
+and a query-free control are covered. Full local quality passed **218/0/2**
+among 220 records, and lint passed. Read the containing commit's full CI before
+accepting the PostgreSQL/Redis and production-network regression scope.
+
+This does not sanitize reverse-proxy/provider logs, arbitrary application error
+messages, secrets placed in URL paths or malicious request IDs. Deployment and
+live signed-webhook evidence remain separate release requirements.
+
 ## Verified follow-up evidence
 
 - HTTP/auth corrections passed at `a1387e5a54358d88f9eefacbd05d9578d4e6e7ae` in [CI #40756385327](https://github.com/AloneSmoker007/Nova-AI/actions/runs/40756385327). The database job reported 545 pass / 0 fail / 0 skip, including 436 HTTP matrix records and 11 auth integration cases.
