@@ -10,6 +10,26 @@ permissions:
   contents: read
 
 jobs:
+  production-network:
+    name: Disposable production TLS and proxy smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci
+      # Finite synthetic tests only. Internal Docker network, no public ports,
+      # cloud resources, provider credentials, paid requests or artifacts.
+      - name: Verify production TLS, HTTPS proxy, outages and shutdown
+        run: timeout --signal=TERM --kill-after=20s 360s bash scripts/production-network-smoke.sh
+
   quality:
     name: Lint, syntax check, and tests
     runs-on: ubuntu-latest

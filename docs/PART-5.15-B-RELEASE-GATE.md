@@ -14,6 +14,31 @@ The linked follow-up now also records a bounded callback/replay review: valid re
 
 A subsequent zero-spend deployment check reproduced a production database TLS policy override at `8ef0b7b898ffcbf9ba48e27491bcc533669a6c7b`. The linked follow-up records actual-driver/loopback failures, parse-once enforcement and legitimate controls. Verify the containing fix commit's CI. Production endpoints relying on plaintext or unverifiable certificates now fail closed; do not relax verification to fit a free provider. The owner's current incremental spending limit is **USD 0**; use verified free allowances only, with no paid upgrades or overages.
 
+## Disposable production network regression (29 October 2026)
+
+`scripts/production-network-smoke.sh` adds a bounded CI-only topology: the real
+production bootstrap, PostgreSQL 15, authenticated Redis 7 and an HTTPS Nginx
+proxy on an internal Docker network. All certificates and application secrets
+are generated for the run; no ports are published, app containers have no
+external route, no customer data or real provider credentials are supplied,
+and containers, volumes and temporary keys are removed on exit. It uses the
+existing public repository's standard runner, not persistent hosting.
+
+The explicit `tests/production-network.smoke.js` phases cover successful SQL
+with verified TLS despite URL overrides, unrelated CA and hostname rejection,
+production migrations/readiness over verified HTTPS, authentication, signature
+checks, absent production diagnostics and spoofed forwarding-header login
+limits through one proxy. Separate dependency stops/restarts exercise readiness
+failure/recovery while liveness remains available; the harness requires a
+successful bounded SIGTERM exit. Acceptance requires the containing commit's
+new network job **and** the existing quality and PostgreSQL/Redis jobs to pass.
+
+This is synthetic topology regression, not publicly deployed HTTPS, Render
+compatibility, a real provider request, an independent review or operational
+signoff. The actual deployment's ingress paths/hop count, private service
+certificates, backups, monitoring, credential recovery and other open gates
+below remain unverified. **Final release decision remains NO-GO.**
+
 ## Verified branch evidence (2026-10-27)
 
 - Baseline reviewed: PR #163 head `29c79c470ca4f8bd0dca762c0e03d14085026547`. `main` remains separate. Recheck the SHA before reusing this evidence.
