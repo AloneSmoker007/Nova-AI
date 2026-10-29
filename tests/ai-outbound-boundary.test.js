@@ -282,10 +282,172 @@ describe("AI output boundary through the real webhook worker and delivery pipeli
     });
   }
 
+  let cachedSequence = 0;
+  async function seedCachedReply({ reply, deliveryBody, recovery = false, accepted = false }) {
+    const f = fixtures[cachedSequence % 2];
+    const wa = String(15550006000 + cachedSequence++);
+    const id = `wamid.synthetic-cached-${randomUUID()}`;
+    const { persistInboundMessage } = await import("../src/services/message-persistence.service.js");
+    const deliveryService = await import("../src/services/whatsapp-delivery.service.js");
+    const source = await persistInboundMessage({ tenantId: f.tenant, whatsappNumberId: f.number, waId: wa, whatsappMessageId: id, body: "What are your hours?", receivedAt: new Date() });
+    // Keep the inbox out of background dispatch until the complete fixture is
+    // ready. These are legacy/pre-upgrade caches, intentionally not generated
+    // through the current SDK output filter.
+    const inbox = (await dbPool.query("INSERT INTO webhook_messages (tenant_id,whatsapp_number_id,phone_number_id,whatsapp_message_id,wa_id,body,received_at,state,generated_response) VALUES ($1,$2,$3,$4,$5,'What are your hours?',NOW(),'DEAD_LETTER',$6) RETURNING *", [f.tenant, f.number, f.phone, id, wa, reply])).rows[0];
+    let delivery;
+    if (deliveryBody !== undefined) {
+      delivery = await deliveryService.prepareDelivery({ tenantId: f.tenant, inboxMessageId: inbox.id, conversationId: source.conversationId, recipientWaId: wa, body: deliveryBody });
+      if (recovery || accepted) {
+        const claim = await deliveryService.claimDelivery(delivery.id, f.tenant);
+        assert.equal(claim.claimed, true);
+        if (accepted) {
+          await deliveryService.markDeliveryRequestStarted(delivery.id, f.tenant, claim.leaseToken, claim.delivery.attempt_count);
+          await deliveryService.markDeliverySent(delivery.id, f.tenant, claim.leaseToken, `wamid.synthetic-prior-accepted-${randomUUID()}`, claim.delivery.attempt_count);
+        }
+      }
+    }
+    return { ...f, wa, id, inbox, source, delivery };
+  }
+
+  async function activateCachedReply(f) {
+    await dbPool.query("UPDATE webhook_messages SET state='RECEIVED' WHERE id=$1", [f.inbox.id]);
+    const { enqueueWhatsAppMessage } = await import("../src/services/queue.service.js");
+    await enqueueWhatsAppMessage({ inboxId: f.inbox.id });
+    return completed(f.id);
+  }
+
+  async function settledDelivery(id) {
+    let row;
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      row = (await dbPool.query("SELECT * FROM whatsapp_deliveries WHERE id=$1", [id])).rows[0];
+      if (["SENT", "FAILED", "UNKNOWN", "DELIVERED", "READ"].includes(row?.state)) return row;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.fail(`Delivery did not settle; state=${row?.state}`);
+  }
+
+  async function withHistoryRepairBarrier(action) {
+    // Exercise the inbox worker's own history write deterministically. A
+    // simultaneous repair scan must not hide a wrong-body write by winning
+    // first. Every query still executes against PostgreSQL after release.
+    const originalQuery = dbPool.query;
+    let release;
+    const barrier = new Promise((resolve) => { release = resolve; });
+    const deadline = setTimeout(release, 10_000);
+    dbPool.query = function (query, ...args) {
+      if (typeof query === "string" && query.includes("FROM whatsapp_deliveries d") && query.includes("NOT EXISTS")) {
+        return barrier.then(() => originalQuery.call(this, query, ...args));
+      }
+      return originalQuery.call(this, query, ...args);
+    };
+    try { return await action(); }
+    finally { release(); clearTimeout(deadline); dbPool.query = originalQuery; }
+  }
+
+  it("unsafe legacy inbox output is quarantined without regeneration, delivery creation or send", async () => {
+    const beforeCalls = modelRequests.length;
+    const beforeSends = metaRequests.length;
+    const f = await seedCachedReply({ reply: JSON.stringify({ access_token: secretCanary }) });
+    const inbox = await activateCachedReply(f);
+    assert.equal(modelRequests.length, beforeCalls);
+    assert.equal(metaRequests.length, beforeSends);
+    assert.equal(inbox.provider_message_id, null);
+    assert.equal((await dbPool.query("SELECT COUNT(*)::int AS n FROM whatsapp_deliveries WHERE inbox_message_id=$1", [f.inbox.id])).rows[0].n, 0);
+    assert.equal((await dbPool.query("SELECT COUNT(*)::int AS n FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND direction='outbound'", [f.tenant, f.source.conversationId])).rows[0].n, 0);
+  });
+
+  it("a safe inbox cache cannot authorize an unsafe existing delivery body", async () => {
+    const beforeCalls = modelRequests.length;
+    const beforeSends = metaRequests.length;
+    const f = await seedCachedReply({ reply: "Our Monday hours are 9am to 5pm.", deliveryBody: JSON.stringify({ access_token: secretCanary }) });
+    await activateCachedReply(f);
+    const delivery = await settledDelivery(f.delivery.id);
+    assert.equal(delivery.state, "FAILED");
+    assert.equal(delivery.provider_request_started_at, null);
+    assert.equal(delivery.provider_message_id, null);
+    assert.equal(modelRequests.length, beforeCalls);
+    assert.equal(metaRequests.length, beforeSends);
+    assert.equal((await dbPool.query("SELECT COUNT(*)::int AS n FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND direction='outbound'", [f.tenant, f.source.conversationId])).rows[0].n, 0);
+  });
+
+  it("pre-request recovery cannot resend an unsafe legacy AI delivery body", async () => {
+    const beforeCalls = modelRequests.length;
+    const beforeSends = metaRequests.length;
+    const f = await seedCachedReply({ reply: "Our Monday hours are 9am to 5pm.", deliveryBody: JSON.stringify({ access_token: secretCanary }), recovery: true });
+    await dbPool.query("UPDATE webhook_messages SET state='COMPLETED',completed_at=NOW() WHERE id=$1", [f.inbox.id]);
+    await dbPool.query("UPDATE whatsapp_deliveries SET lease_until=NOW()-INTERVAL '1 hour',last_attempt_at=NOW()-INTERVAL '2 hours' WHERE id=$1", [f.delivery.id]);
+    const delivery = await settledDelivery(f.delivery.id);
+    assert.equal(delivery.state, "FAILED");
+    assert.equal(delivery.attempt_count, 2);
+    assert.equal(delivery.provider_request_started_at, null);
+    assert.equal(delivery.provider_message_id, null);
+    assert.equal(modelRequests.length, beforeCalls);
+    assert.equal(metaRequests.length, beforeSends);
+    assert.equal((await dbPool.query("SELECT COUNT(*)::int AS n FROM messages WHERE tenant_id=$1 AND conversation_id=$2 AND direction='outbound'", [f.tenant, f.source.conversationId])).rows[0].n, 0);
+  });
+
+  it("an ordinary safe cached inbox reply is sent without another model call", async () => {
+    const beforeCalls = modelRequests.length;
+    const beforeSends = metaRequests.length;
+    const reply = "Our Monday hours are 9am to 5pm.";
+    const f = await seedCachedReply({ reply });
+    const inbox = await activateCachedReply(f);
+    assert.equal(modelRequests.length, beforeCalls);
+    assert.equal(metaRequests.length, beforeSends + 1);
+    assert.equal(metaRequests.at(-1).body.text.body, reply);
+    assert.equal((await dbPool.query("SELECT text FROM messages WHERE tenant_id=$1 AND whatsapp_message_id=$2", [f.tenant, inbox.provider_message_id])).rows[0].text, reply);
+  });
+
+  it("outbound history records the actual retained delivery body when safe caches differ", async () => {
+    await withHistoryRepairBarrier(async () => {
+    const beforeCalls = modelRequests.length;
+    const beforeSends = metaRequests.length;
+    const actual = "The original durable delivery says Monday hours are 9am to 5pm.";
+    const f = await seedCachedReply({ reply: "A different cached reply that was never dispatched.", deliveryBody: actual });
+    const inbox = await activateCachedReply(f);
+    assert.equal(modelRequests.length, beforeCalls);
+    assert.equal(metaRequests.length, beforeSends + 1);
+    assert.equal(metaRequests.at(-1).body.text.body, actual);
+    assert.equal((await dbPool.query("SELECT text FROM messages WHERE tenant_id=$1 AND whatsapp_message_id=$2", [f.tenant, inbox.provider_message_id])).rows[0].text, actual);
+    });
+  });
+
+  it("history repair for an accepted delivery preserves its actual body without resending", async () => {
+    await withHistoryRepairBarrier(async () => {
+    const beforeCalls = modelRequests.length;
+    const beforeSends = metaRequests.length;
+    const actual = "The original accepted reply says Monday hours are 9am to 5pm.";
+    const f = await seedCachedReply({ reply: "A different inbox cache, not the accepted provider message.", deliveryBody: actual, accepted: true });
+    const inbox = await activateCachedReply(f);
+    assert.equal(modelRequests.length, beforeCalls);
+    assert.equal(metaRequests.length, beforeSends);
+    assert.equal((await dbPool.query("SELECT text FROM messages WHERE tenant_id=$1 AND whatsapp_message_id=$2", [f.tenant, inbox.provider_message_id])).rows[0].text, actual);
+    });
+  });
+
+  it("explicit non-AI automation text keeps its existing send policy during recovery", async () => {
+    const beforeCalls = modelRequests.length;
+    const beforeSends = metaRequests.length;
+    const f = await seedCachedReply({ reply: "Unused inbox cache." });
+    const { pauseAi } = await import("../src/services/handoff.service.js");
+    await pauseAi(f.tenant, f.source.conversationId, f.owner);
+    const workflow = randomUUID();
+    const run = randomUUID();
+    const actual = "password=SYNTHETIC_AUTOMATION_REFERENCE_12345";
+    await dbPool.query("INSERT INTO automation_workflows (id,tenant_id,name,trigger_type,status,definition) VALUES ($1,$2,'Synthetic configured message','manual','active','{\"steps\":[]}')", [workflow, f.tenant]);
+    await dbPool.query("INSERT INTO automation_runs (id,tenant_id,workflow_id,conversation_id,status) VALUES ($1,$2,$3,$4,'completed')", [run, f.tenant, workflow, f.source.conversationId]);
+    const delivery = (await dbPool.query("INSERT INTO whatsapp_deliveries (tenant_id,conversation_id,recipient_wa_id,body,automation_run_id,automation_step) VALUES ($1,$2,$3,$4,$5,0) RETURNING *", [f.tenant, f.source.conversationId, f.wa, actual, run])).rows[0];
+    assert.equal((await settledDelivery(delivery.id)).state, "SENT");
+    assert.equal(modelRequests.length, beforeCalls);
+    assert.equal(metaRequests.length, beforeSends + 1);
+    assert.equal(metaRequests.at(-1).body.text.body, actual);
+  });
+
   it("records the transport boundary without any external provider call", (t) => {
     assert.equal(responses.length, 0);
     assert.equal(modelRequests.length, 4);
-    assert.equal(metaRequests.length, 4);
-    t.diagnostic("4 Gemini SDK responses and 4 Meta sends simulated; real PostgreSQL + Redis + signed HTTP, takeover and deletion recovery; 0 external provider calls");
+    assert.equal(metaRequests.length, 7);
+    t.diagnostic("4 Gemini SDK responses and 7 Meta sends simulated; real PostgreSQL + Redis + signed HTTP, takeover/deletion/cache recovery; 0 external provider calls");
   });
 });
