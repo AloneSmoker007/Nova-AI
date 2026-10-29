@@ -7,11 +7,14 @@ import https from "node:https";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import pg from "pg";
+import IORedis from "ioredis";
+import { Queue, Worker } from "bullmq";
 import { getPoolConfig, closeDatabaseConnection } from "../src/config/database.js";
+import { getWorkerConfig } from "../src/services/queue.service.js";
 
 const phase = process.env.NOVA_NETWORK_PHASE;
 assert.equal(process.env.NODE_ENV, "production");
-assert.ok(["tls", "https", "unavailable", "recovered"].includes(phase), "explicit smoke phase required");
+assert.ok(["tls", "worker-shutdown", "https", "unavailable", "recovered"].includes(phase), "explicit smoke phase required");
 const ca = fs.readFileSync("/certs/ca.crt");
 const wrongCaPath = "/certs/wrong-ca.crt";
 
@@ -73,6 +76,76 @@ if (phase === "tls") {
     const url = new URL(process.env.DATABASE_URL);
     url.hostname = "db-wrong";
     await assert.rejects(databaseProbe({ DATABASE_URL: url.toString() }), { code: "ERR_TLS_CERT_ALTNAME_INVALID" });
+  });
+} else if (phase === "worker-shutdown") {
+  test("worker closes within the grace budget while its connection-error retry is sleeping", { timeout: 20000 }, async () => {
+    const connection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
+    const worker = new Worker(`retry-smoke-${crypto.randomUUID()}`, async () => {}, {
+      connection, autorun: false, ...getWorkerConfig(),
+    });
+    let running;
+    try {
+      await worker.waitUntilReady();
+      // Inject exactly one connection failure at the SDK backend boundary.
+      // Real Worker.run/close, retry timing and Redis connections remain intact.
+      const backend = worker.getBackend();
+      const originalMove = backend.moveToActive.bind(backend);
+      backend.moveToActive = async () => {
+        backend.moveToActive = originalMove;
+        throw Object.assign(new Error("synthetic ECONNREFUSED"), { code: "ECONNREFUSED" });
+      };
+      let enteredRetry;
+      const sleeping = new Promise((resolve) => { enteredRetry = resolve; });
+      const originalDelay = worker.delay.bind(worker);
+      worker.delay = (ms, controller) => {
+        enteredRetry();
+        return originalDelay(ms, controller);
+      };
+      running = worker.run();
+      await sleeping;
+      const started = performance.now();
+      await worker.close();
+      await running;
+      assert.ok(performance.now() - started < 3000, "idle error retry must not exhaust the 10-second process grace period");
+    } finally {
+      await worker.close();
+      await running;
+      await connection.quit();
+    }
+  });
+  test("graceful close still waits for an active job to finish", { timeout: 10000 }, async () => {
+    const connection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
+    const name = `drain-smoke-${crypto.randomUUID()}`;
+    const queue = new Queue(name, { connection });
+    let startedJob;
+    let finishJob;
+    const started = new Promise((resolve) => { startedJob = resolve; });
+    const finish = new Promise((resolve) => { finishJob = resolve; });
+    let completed = 0;
+    const worker = new Worker(name, async () => {
+      startedJob();
+      await finish;
+      completed++;
+    }, { connection, ...getWorkerConfig() });
+    try {
+      await queue.add("synthetic", {});
+      await started;
+      let closed = false;
+      const closing = worker.close().then(() => { closed = true; });
+      await delay(50);
+      assert.equal(closed, false, "active job must not be force-closed");
+      finishJob();
+      await closing;
+      assert.equal(completed, 1);
+      const jobs = await queue.getCompleted();
+      assert.equal(jobs.length, 1);
+    } finally {
+      finishJob();
+      await worker.close();
+      await queue.obliterate({ force: true });
+      await queue.close();
+      await connection.quit();
+    }
   });
 } else if (phase === "https") {
   test("production bootstrap migrates and becomes ready through verified HTTPS", async () => {

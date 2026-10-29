@@ -33,6 +33,20 @@ failure/recovery while liveness remains available; the harness requires a
 successful bounded SIGTERM exit. Acceptance requires the containing commit's
 new network job **and** the existing quality and PostgreSQL/Redis jobs to pass.
 
+The first network run at `aacb0a42531ba4b5a0f60a38cf00acfcde0ff676`
+([CI #40870204940](https://github.com/AloneSmoker007/Nova-AI/actions/runs/40870204940))
+passed all 17 Node assertions but hit the real process's 10-second forced
+shutdown after dependency restarts. A diagnostic-only follow-up passed, so the
+failure is timing-dependent. Inspection and a local probe of the locked BullMQ
+retry implementation showed that its default 15-second connection-error sleep
+can outlive that shutdown budget. The application worker now uses a one-second
+retry delay, preserving normal graceful `close()` and the 10-second process
+limit. A deterministic SDK-boundary fault test runs a real worker/Redis
+connection through retry and close; a real active-job control proves close
+still waits for work. Shutdown timeout/errors now identify the blocked stage.
+These mitigations require the containing fix commit's green CI; the earlier
+passing diagnostic run alone is not proof that the timing issue was corrected.
+
 This is synthetic topology regression, not publicly deployed HTTPS, Render
 compatibility, a real provider request, an independent review or operational
 signoff. The actual deployment's ingress paths/hop count, private service

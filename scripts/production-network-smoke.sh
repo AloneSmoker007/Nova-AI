@@ -123,6 +123,7 @@ probe() {
     node:20-bookworm-slim node --test tests/production-network.smoke.js
 }
 probe tls
+probe worker-shutdown
 docker run -d --name "$app_name" --network "$network_name" --network-alias app \
   --env-file "$network_tmp/app.env" -v "$PWD:/app:ro" -w /app \
   -v "$network_tmp/ca.crt:/certs/ca.crt:ro" node:20-bookworm-slim node src/bootstrap.js >/dev/null
