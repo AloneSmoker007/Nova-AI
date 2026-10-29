@@ -233,7 +233,7 @@ export async function markDeliveryRequestStarted(deliveryId, tenantId, leaseToke
 
   const result = await dbPool.query(
     `
-      UPDATE whatsapp_deliveries
+      UPDATE whatsapp_deliveries AS delivery
       SET
         provider_request_started_at = NOW(),
         updated_at = NOW()
@@ -244,12 +244,57 @@ export async function markDeliveryRequestStarted(deliveryId, tenantId, leaseToke
         AND attempt_count = $4
         AND lease_until > NOW()
         AND provider_request_started_at IS NULL
+        AND (
+          delivery.inbox_message_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM webhook_messages inbox
+            JOIN messages source
+              ON source.tenant_id = inbox.tenant_id
+             AND source.whatsapp_message_id = inbox.whatsapp_message_id
+             AND source.direction = 'inbound'
+            JOIN conversations conversation
+              ON conversation.tenant_id = source.tenant_id
+             AND conversation.id = source.conversation_id
+            WHERE inbox.id = delivery.inbox_message_id
+              AND inbox.tenant_id = delivery.tenant_id
+              AND conversation.id = delivery.conversation_id
+              AND source.deleted_at IS NULL
+              AND conversation.ai_paused = FALSE
+            FOR SHARE OF conversation, source
+          )
+        )
       RETURNING *
     `,
     [deliveryId.trim(), tenantId.trim(), leaseToken.trim(), attemptCount],
   );
 
   if (result.rowCount !== 1) {
+    // Explain a denied AI send without exposing message text. The eligibility
+    // check itself is part of the fenced UPDATE above, so both ordinary sends
+    // and recovery must honor committed handoff/deletion before request-start.
+    const policy = await dbPool.query(
+      `SELECT conversation.ai_paused, source.id AS source_id, source.deleted_at
+       FROM whatsapp_deliveries delivery
+       LEFT JOIN webhook_messages inbox
+         ON inbox.id = delivery.inbox_message_id AND inbox.tenant_id = delivery.tenant_id
+       LEFT JOIN messages source
+         ON source.tenant_id = inbox.tenant_id
+        AND source.whatsapp_message_id = inbox.whatsapp_message_id
+        AND source.direction = 'inbound'
+        AND source.conversation_id = delivery.conversation_id
+       LEFT JOIN conversations conversation
+         ON conversation.id = delivery.conversation_id AND conversation.tenant_id = delivery.tenant_id
+       WHERE delivery.id = $1 AND delivery.tenant_id = $2 AND delivery.inbox_message_id IS NOT NULL`,
+      [deliveryId.trim(), tenantId.trim()],
+    );
+    const current = policy.rows[0];
+    if (current && (!current.source_id || current.deleted_at)) {
+      throw new Error("Automatic AI reply suppressed: source message is deleted or missing");
+    }
+    if (current && current.ai_paused !== false) {
+      throw new Error("Automatic AI reply suppressed: conversation is paused for human takeover or missing");
+    }
     throw new Error("WhatsApp delivery lease is no longer valid");
   }
 

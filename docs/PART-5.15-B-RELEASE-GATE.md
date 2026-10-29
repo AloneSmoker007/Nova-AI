@@ -8,6 +8,8 @@ Current scope reconciliation: [Part 5 evidence matrix](./PART-5-AUDIT-EVIDENCE-M
 
 29 October: the [HTTP/auth and AI outbound follow-up](./PART-5-HTTP-AUTH-REVIEW.md) records reproduced failures, corrections and exact-SHA CI. At `157512fa14f7c467a1a2641565f0d07afb4559f7`, [CI #40757466666](https://github.com/AloneSmoker007/Nova-AI/actions/runs/40757466666) passed both jobs: quality 197 pass / 0 fail / 2 summarized skips and serialized PostgreSQL/Redis 549 pass / 0 fail / 0 skip. The 633-request HTTP matrix and real worker's synthetic output-to-delivery checks passed. External provider transports were simulated; independent and external/staging gates remain unsigned. Recheck the CI of any later commit.
 
+Further 29 October reproduction found unsent AI replies could dispatch after human takeover, and recovery could send after source deletion. The linked follow-up records the failing test-only CI and the shared request-start eligibility correction. Read the CI at the containing fix commit before accepting the new cases; do not treat the older green result as evidence for them.
+
 ## Verified branch evidence (2026-10-27)
 
 - Baseline reviewed: PR #163 head `29c79c470ca4f8bd0dca762c0e03d14085026547`. `main` remains separate. Recheck the SHA before reusing this evidence.

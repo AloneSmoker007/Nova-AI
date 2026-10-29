@@ -82,6 +82,13 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
       [inboxId, tenantId, numberId, phoneNumberId, `wamid.inbound.${inboxId}`, "15550001111", "hello"],
     );
+    // AI delivery authorization now verifies the real canonical source, as the
+    // application creates it before preparing an automatic reply.
+    await dbPool.query(
+      `INSERT INTO messages (tenant_id,conversation_id,whatsapp_message_id,direction,text)
+       VALUES ($1,$2,$3,'inbound','hello')`,
+      [tenantId, conversationId, `wamid.inbound.${inboxId}`],
+    );
 
     const delivery = await svc.prepareDelivery({
       tenantId,
@@ -152,6 +159,68 @@ describe("WhatsApp delivery reliability (PostgreSQL)", { skip }, () => {
       [deliveryId],
     );
   }
+
+  it("request-start rejects a paused AI conversation and allows an explicit resume", async () => {
+    const f = await seedDelivery();
+    const claim = await svc.claimDelivery(f.delivery.id, f.tenantId);
+    await dbPool.query("UPDATE conversations SET ai_paused=TRUE WHERE id=$1", [f.conversationId]);
+    await assert.rejects(svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count), /paused.*human takeover/);
+    assert.equal((await svc.getDelivery(f.delivery.id, f.tenantId)).provider_request_started_at, null);
+    await dbPool.query("UPDATE conversations SET ai_paused=FALSE WHERE id=$1", [f.conversationId]);
+    await assert.rejects(svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count + 1), /lease is no longer valid/);
+    const started = await svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count);
+    assert.ok(started.provider_request_started_at);
+  });
+
+  it("request-start fails closed if an automatic reply's canonical source no longer exists", async () => {
+    const f = await seedDelivery();
+    const claim = await svc.claimDelivery(f.delivery.id, f.tenantId);
+    await dbPool.query("DELETE FROM messages WHERE tenant_id=$1 AND conversation_id=$2", [f.tenantId, f.conversationId]);
+    await assert.rejects(svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count), /source message is deleted or missing/);
+    assert.equal((await svc.getDelivery(f.delivery.id, f.tenantId)).provider_request_started_at, null);
+  });
+
+  it("AI pause does not silently cancel an explicitly configured non-AI automation delivery", async () => {
+    const f = await seedAutomationDelivery();
+    await dbPool.query("UPDATE conversations SET ai_paused=TRUE WHERE id=$1", [f.conversationId]);
+    const claim = await svc.claimDelivery(f.automationDelivery.id, f.tenantId);
+    const started = await svc.markDeliveryRequestStarted(f.automationDelivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count);
+    assert.ok(started.provider_request_started_at);
+    assert.equal(started.inbox_message_id, null);
+    assert.equal(started.automation_run_id, f.automationRunId);
+  });
+
+  it("a takeover transaction already in progress fences request-start when it commits", async () => {
+    const f = await seedDelivery();
+    const claim = await svc.claimDelivery(f.delivery.id, f.tenantId);
+    const takeover = await dbPool.connect();
+    let start;
+    try {
+      await takeover.query("BEGIN");
+      await takeover.query("UPDATE conversations SET ai_paused=TRUE WHERE id=$1", [f.conversationId]);
+      // Capture rejection immediately; the pending promise must never become
+      // an unhandled rejection while the controlling transaction is held.
+      start = svc.markDeliveryRequestStarted(f.delivery.id, f.tenantId, claim.leaseToken, claim.delivery.attempt_count)
+        .then((value) => ({ value }), (error) => ({ error }));
+      let waiting = false;
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const activity = await dbPool.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%UPDATE whatsapp_deliveries AS delivery%'");
+        if (activity.rowCount > 0) { waiting = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(waiting, true, "request-start must wait for the pending conversation policy change");
+      await takeover.query("COMMIT");
+      const outcome = await start;
+      assert.ok(outcome.error, "a committed takeover must reject the pending provider dispatch");
+      assert.match(outcome.error.message, /paused.*human takeover/);
+      assert.equal((await svc.getDelivery(f.delivery.id, f.tenantId)).provider_request_started_at, null);
+    } finally {
+      await takeover.query("ROLLBACK").catch(() => undefined);
+      takeover.release();
+      if (start) await start;
+    }
+  });
 
   it("exports a bounded delivery attempt maximum", () => {
     assert.equal(svc.MAX_DELIVERY_ATTEMPTS, 5);
