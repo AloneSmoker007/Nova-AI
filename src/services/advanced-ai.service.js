@@ -110,7 +110,10 @@ const MEMORY_DIRECTIVE_PATTERNS = [
 function isInstructionLikeMemoryFact(value) {
   const normalized = String(value ?? "")
     .normalize("NFKC")
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    // Instruction words separated by hyphens still read as directives to a model.
+    // Compare against a normalized copy, retaining ordinary hyphenated names as stored.
+    .replace(/[\p{Pd}_]+/gu, " ");
   return MEMORY_DIRECTIVE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
