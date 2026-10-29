@@ -92,6 +92,23 @@ test("quoted JSON credential fields fail closed before persistence or delivery",
   }
 });
 
+test("credentials containing punctuation fail closed without rejecting ordinary password advice", () => {
+  const examples = [
+    JSON.stringify({ password: "MyP@ssword123456!" }),
+    JSON.stringify({ client_secret: "ab:cd$ef@123456789" }),
+    JSON.stringify({ access_token: "abc:def$123456789012" }),
+  ];
+
+  for (const value of examples) {
+    const decision = enforceGeneratedAiOutput(value);
+    assert.equal(decision.safe, false, value);
+    assert.equal(decision.reason, "credential_assignment", value);
+    assert.equal(decision.text, SAFE_AI_FALLBACK, value);
+  }
+
+  assert.equal(inspectGeneratedAiOutput("Use the password reset option to update your account.").safe, true);
+});
+
 test("quoted business data and password guidance still pass the output gate", () => {
   for (const value of [
     JSON.stringify({ appointment: "tomorrow at 3 PM", status: "confirmed" }),
