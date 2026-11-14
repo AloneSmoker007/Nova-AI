@@ -147,3 +147,45 @@ This section distills published guidance from experienced engineering practition
 
 ---
 **Safety note:** This document is a research backlog only. It does not authorize merging, deployment, production database changes, credential changes, customer/provider actions, or paid services.
+
+
+## 7. AI coding-agent benchmark (research update — 2026-11-14)
+
+This is a capability-pattern comparison from current official documentation, not a claim that any one tool is universally “best”. Availability, model quality, limits and pricing vary by plan and change frequently.
+
+| Tool | Verified capability patterns | Useful lesson for Nova-AI | Guardrail |
+|---|---|---|---|
+| GitHub Copilot | IDE agent mode, plan mode, subagents/custom agents, cloud agent delegation, repository agent skills, MCP integrations and Copilot code review | Put repository-specific instructions and review skills in version control; separate planning, implementation and review roles | Require human review and CI; restrict agent permissions and secrets |
+| OpenAI Codex | Multi-agent software lifecycle workflows, PR review, multiple files/terminals, remote devbox support and repeatable tasks | Give agents explicit goals, acceptance criteria, durable repo knowledge and evidence of completion | Treat agent output as an untrusted proposed change; verify tests, diff and runtime evidence |
+| Cursor | Ask/Plan/Agent/Debug modes; agents can inspect/edit multiple files and run commands; cloud agents can produce PRs and evidence artifacts | Use read-only exploration first, approved plans for complex changes, isolated cloud execution and reviewable artifacts | Cloud agents may have repo, secrets and network access; grant only task-required access |
+| Gemini CLI | Configurable sandboxing for shell execution and file modifications; project-specific sandbox setup | Sandbox code-execution tools and make the environment reproducible | Sandboxing is documented as disabled by default unless enabled; do not assume safe defaults |
+
+### Recommended Nova-AI workflow inspired by these tools
+
+39. **Plan before write:** an agent first reads the relevant code/tests and returns current behavior, scope, risks, files likely affected, acceptance criteria and rollback plan. No edits during this stage.
+40. **Isolated implementation:** one bounded task per branch/PR; no direct writes to main; least-privilege GitHub token; no production credentials; sandbox any command execution.
+41. **Independent review agent:** a separate reviewer checks the diff for tenant isolation, authorization, data exposure, injection, idempotency, concurrency, migration safety and test quality. It must report evidence and uncertainty, not just a score.
+42. **Evidence-based completion:** require exact commit SHA, changed-file list, test command/results, CI run URL, migration evidence where relevant, and known limitations. Never accept an agent's “done” statement as proof.
+43. **Human-controlled gates:** require human approval for merge, production deployment, credentials, billing, customer WhatsApp numbers and destructive data operations.
+44. **Repository knowledge as source of truth:** keep architecture decisions, invariants, runbooks, task status and agent instructions in version-controlled docs; avoid relying on long chat history alone.
+45. **Bounded agent permissions and cost:** cap task scope, runtime, retries, tool permissions and model spend; stop when acceptance criteria fail or scope expands.
+46. **No parallel edits to shared files:** parallel agents may research or review independent areas, but implementation ownership must be explicit to avoid conflicting changes.
+
+### Best-fit decision for Nova-AI
+
+- **Adopt now as process/documentation:** plan-first mode, task-scoped custom review instructions, independent security review, isolated execution, evidence-based completion and human approval gates.
+- **Do not build a new autonomous coding-agent platform into Nova-AI:** it would increase attack surface and operating cost without solving the current product reliability blocker.
+- **Do not switch the repository or coding stack:** GitHub remains the source of truth; retain the existing modular monolith.
+- **Priority remains N-13:** coding-agent workflow improvements do not replace the failing real-app Redis-outage shutdown test.
+
+### Official sources
+
+- GitHub Copilot agents and plan/subagent/custom-agent workflows: https://docs.github.com/en/copilot/how-tos/copilot-in-your-ide/use-copilot-agents
+- GitHub Copilot CLI delegation and custom agents: https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli
+- GitHub Copilot code review and repository agent skills: https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-code-review
+- GitHub Copilot feature matrix: https://docs.github.com/en/copilot/reference/copilot-feature-matrix
+- OpenAI Codex lifecycle and multi-agent workflow update: https://openai.com/index/codex-for-almost-everything/
+- OpenAI harness engineering: https://openai.com/index/harness-engineering/
+- Cursor Agent modes: https://cursor.com/help/ai-features/agent
+- Cursor Cloud Agents and isolation model: https://prod.cursor.com/help/ai-features/background-agents
+- Gemini CLI sandbox configuration: https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md
