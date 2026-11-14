@@ -194,14 +194,17 @@ else
   exit 1
 fi
 
-# The app process is gone, so its blocked message transaction has rolled back.
-# Remove the one-shot trigger before the worker is allowed to recover the job.
-docker exec "$db_name" psql -v ON_ERROR_STOP=1 -U nova -d nova_network \
-  -c 'DROP TRIGGER IF EXISTS n13_pause_message_insert ON messages; DROP FUNCTION IF EXISTS n13_pause_message_insert();' >/dev/null
-echo "N13_STAGE=trigger_removed"
+# The helper owns the advisory lock used by the blocking trigger. Release it
+# before DDL: DROP TRIGGER needs an AccessExclusive table lock and would wait
+# behind the worker INSERT while that INSERT is still waiting on the helper.
+# The app container has already exited, so releasing the fixture cannot cause
+# a live application worker to commit this transaction.
 touch "$network_tmp/release-lock"
 test "$(timeout 10s docker wait "$control_name")" = 0
 echo "N13_STAGE=fixture_helper_released"
+docker exec "$db_name" psql -v ON_ERROR_STOP=1 -U nova -d nova_network \
+  -c 'DROP TRIGGER IF EXISTS n13_pause_message_insert ON messages; DROP FUNCTION IF EXISTS n13_pause_message_insert();' >/dev/null
+echo "N13_STAGE=trigger_removed"
 docker rm -f "$control_name" >/dev/null
 
 rollback_check=$(docker exec "$db_name" psql -At -v ON_ERROR_STOP=1 -U nova -d nova_network \
