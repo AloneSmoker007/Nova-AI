@@ -278,17 +278,17 @@ export function createGeminiGenerator({ getClientFn = getClient } = {}) {
     const ai = getClientFn();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    const request = {
-      model: MODEL,
-      contents: prompt.contents,
-      config: {
-        systemInstruction: prompt.systemInstruction,
-        abortSignal: controller.signal,
-      },
-    };
 
     let response;
     try {
+      const request = {
+        model: MODEL,
+        contents: prompt.contents,
+        config: {
+          systemInstruction: prompt.systemInstruction,
+          abortSignal: controller.signal,
+        },
+      };
       // This synchronous callback is the exact dispatch boundary: all local
       // preparation is complete and it runs immediately before the SDK call.
       onProviderDispatch?.();
