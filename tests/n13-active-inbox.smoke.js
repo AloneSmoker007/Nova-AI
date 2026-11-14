@@ -13,7 +13,6 @@ const controlDir = process.env.N13_CONTROL_DIR || "/control";
 const inboxId = process.env.N13_INBOX_ID;
 const messageId = process.env.N13_MESSAGE_ID;
 const tenantId = process.env.N13_TENANT_ID;
-const phoneNumberId = process.env.N13_PHONE_NUMBER_ID;
 const advisoryA = 171;
 const advisoryB = 1301;
 
