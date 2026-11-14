@@ -39,6 +39,7 @@ describe("AI usage reservation ownership and orphan reconciliation (PostgreSQL)"
     const migrated = await runMigrations();
     assert.equal(migrated.configured, true);
     assert.ok(migrated.applied.includes("032_ai_usage_reservation_fencing.sql"));
+    assert.ok(migrated.applied.includes("036_ai_diagnostic_reservation_type.sql"));
   });
 
   after(async () => {
@@ -307,5 +308,83 @@ describe("AI usage reservation ownership and orphan reconciliation (PostgreSQL)"
       [seed.tenantId, reservation.eventKey],
     );
     assert.equal(remaining.rows[0].count, 0);
+  });
+
+  it("reserves, commits and releases every supported billable AI event type in PostgreSQL", async () => {
+    const eventTypes = ["ai_message", "copilot_draft", "ocr_document", "ai_diagnostic"];
+
+    for (const type of eventTypes) {
+      for (const action of ["commit", "release"]) {
+        const seed = await seedMessage();
+        const reservation = await reserveAiUsage({
+          tenantId: seed.tenantId,
+          type,
+          ...(type === "ai_message" ? {
+            conversationId: seed.message.conversationId,
+            messageId: seed.message.messageId,
+            whatsappMessageId: seed.whatsappMessageId,
+          } : {}),
+          ...(type === "copilot_draft" ? {
+            conversationId: seed.message.conversationId,
+          } : {}),
+        });
+
+        assert.equal(reservation.allowed, true, `${type} reservation must be accepted`);
+        assert.ok(reservation.reservationToken, `${type} reservation must have an owner token`);
+
+        if (action === "commit") {
+          const result = await commitAiUsage({
+            tenantId: seed.tenantId,
+            eventKey: reservation.eventKey,
+            reservationToken: reservation.reservationToken,
+            type,
+          });
+          assert.equal(result.committed, true, `${type} reservation must commit`);
+          const row = await dbPool.query(
+            "SELECT event_type, reservation_status FROM usage_events WHERE tenant_id=$1 AND event_key=$2",
+            [seed.tenantId, reservation.eventKey],
+          );
+          assert.deepEqual(row.rows[0], { event_type: type, reservation_status: "committed" });
+        } else {
+          const result = await releaseAiUsage({
+            tenantId: seed.tenantId,
+            eventKey: reservation.eventKey,
+            reservationToken: reservation.reservationToken,
+            type,
+          });
+          assert.equal(result.released, true, `${type} reservation must release`);
+          const row = await dbPool.query(
+            "SELECT count(*)::int AS count FROM usage_events WHERE tenant_id=$1 AND event_key=$2",
+            [seed.tenantId, reservation.eventKey],
+          );
+          assert.equal(row.rows[0].count, 0, `${type} released reservation must be removed`);
+        }
+      }
+    }
+  });
+
+  it("prevents a different tenant from releasing an ai_diagnostic reservation", async () => {
+    const owner = await seedMessage();
+    const otherTenant = await seedMessage();
+    const reservation = await reserveAiUsage({
+      tenantId: owner.tenantId,
+      type: "ai_diagnostic",
+    });
+
+    const crossTenant = await releaseAiUsage({
+      tenantId: otherTenant.tenantId,
+      eventKey: reservation.eventKey,
+      reservationToken: reservation.reservationToken,
+      type: "ai_diagnostic",
+    });
+    assert.equal(crossTenant.released, false);
+
+    const ownerRelease = await releaseAiUsage({
+      tenantId: owner.tenantId,
+      eventKey: reservation.eventKey,
+      reservationToken: reservation.reservationToken,
+      type: "ai_diagnostic",
+    });
+    assert.equal(ownerRelease.released, true);
   });
 });

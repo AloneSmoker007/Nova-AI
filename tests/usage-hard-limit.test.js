@@ -451,3 +451,25 @@ test("Copilot uses the dedicated structured prompt after quota reservation", () 
   assert.doesNotMatch(route, /buildCopilotPrompt\(/);
   assert.doesNotMatch(route, /customInstructions:\s*\[brain\?\.customInstructions/);
 });
+
+test("inbound, Copilot and diagnostic usage flags are set only by the Gemini dispatch callback", () => {
+  const processor = sliceBetween(
+    indexSource,
+    "async function processInboxMessage(",
+    "async function recoverPendingDeliveries()",
+  );
+  assert.match(
+    processor,
+    /generateGeminiReply\(message\.body, aiBrain, \{\s*onProviderDispatch:\s*\(\) => \{ providerCallStarted = true; \}/,
+  );
+
+  const copilot = sliceBetween(
+    indexSource,
+    'app.post("/api/conversations/:conversationId/copilot/draft"',
+    'app.put("/api/users/me/skills"',
+  );
+  assert.match(copilot, /generateCopilotDraftReply\([\s\S]*onProviderDispatch:\s*\(\) => \{ providerCallStarted = true; \}/);
+
+  const diagnostic = sliceBetween(indexSource, "const geminiTestSchema", "// Register Task 16 routes");
+  assert.match(diagnostic, /generateGeminiReply\(value\.message, null, \{\s*onProviderDispatch:\s*\(\) => \{ providerCallStarted = true; \}/);
+});
