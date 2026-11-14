@@ -348,7 +348,7 @@ test("the dev-only Gemini test route is privileged and rate-limited", () => {
   assert.ok(route.includes("await commitAiUsage({"), "diagnostic provider calls must be metered");
   assert.ok(route.includes("await releaseAiUsage({"), "pre-provider diagnostic failures must release reservations");
   assert.ok(
-    route.indexOf("reserveAiUsage({") < route.indexOf("generateGeminiReply(value.message)"),
+    route.indexOf("reserveAiUsage({") < route.indexOf("generateGeminiReply(value.message, null, {"),
     "diagnostic quota must be reserved before calling Gemini",
   );
 });
