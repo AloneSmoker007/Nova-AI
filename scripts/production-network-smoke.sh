@@ -20,8 +20,9 @@ cleanup() {
     docker logs --tail 35 "$app_name" 2>/dev/null || true
     docker logs --tail 15 "$db_name" 2>/dev/null || true
     docker logs --tail 15 "$edge_name" 2>/dev/null || true
+    docker logs --tail 30 "$network_name-n13-fixture" 2>/dev/null || true
   fi
-  docker rm -fv "$network_name-probe" "$edge_name" "$app_name" "$redis_name" "$db_name" >/dev/null 2>&1 || true
+  docker rm -fv "$network_name-probe" "$network_name-n13-fixture" "$edge_name" "$app_name" "$redis_name" "$db_name" >/dev/null 2>&1 || true
   docker network rm "$network_name" >/dev/null 2>&1 || true
   # PostgreSQL's private key has container ownership.
   docker run --rm --network none -v "$network_tmp:/cleanup" postgres:15 \
@@ -225,7 +226,6 @@ docker exec "$db_name" psql -v ON_ERROR_STOP=1 -U nova -d nova_network \
 echo 'PASS: active inbox crash recovery, stalled-job fencing and one-time canonical persistence'
 
 # N-13 idle shutdown: separately verify bounded graceful close during Redis outage.
-# This exercises app-level closeQueue() rather than only a standalone BullMQ worker.
 # This exercises app-level closeQueue() rather than only a standalone BullMQ worker.
 docker stop -t 1 "$redis_name" >/dev/null
 sleep 1
