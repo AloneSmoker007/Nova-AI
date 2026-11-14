@@ -60,7 +60,7 @@ umask 077
 cat > "$network_tmp/app.env" <<ENV
 NODE_ENV=production
 PORT=3000
-LOG_LEVEL=warn
+LOG_LEVEL=info
 TRUST_PROXY_HOPS=1
 DATABASE_URL=postgres://nova:$db_password@db:5432/nova_network?sslmode=disable
 DATABASE_SSL_CA=/certs/ca.crt
@@ -147,6 +147,11 @@ probe unavailable
 docker start "$db_name" >/dev/null
 probe recovered
 
+# N-13: the real application must also shut down while Redis is unavailable.
+# This exercises app-level closeQueue() rather than only a standalone BullMQ worker.
+docker stop -t 1 "$redis_name" >/dev/null
+sleep 1
 docker kill --signal=TERM "$app_name" >/dev/null
-test "$(timeout 15s docker wait "$app_name")" = 0
-echo 'PASS: production bootstrap exited successfully after SIGTERM'
+app_exit=$(timeout 15s docker wait "$app_name")
+test "$app_exit" = 0
+echo 'PASS: production app exited successfully after SIGTERM while Redis was unavailable'
