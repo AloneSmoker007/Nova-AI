@@ -85,5 +85,65 @@
 - BullMQ production guide: https://docs.bullmq.io/guide/going-to-production
 - BullMQ retries: https://docs.bullmq.io/guide/retrying-failing-jobs
 
+## 6. Expert engineering and cybersecurity playbook
+
+This section distills published guidance from experienced engineering practitioners and recognized security/reliability organizations. It is not a claim that any individual personally audited Nova-AI.
+
+### Engineering craft — Martin Fowler, Kent Beck and established refactoring practice
+
+19. **Small, behavior-preserving changes:** refactor in small steps, keep tests green, and avoid mixing cleanup with behavior changes.
+20. **Tests define safety, not just coverage:** add focused regression tests for every confirmed defect; include failure paths and boundary conditions, not only happy paths.
+21. **Make code easy to change:** prefer clear module boundaries, explicit contracts and simple designs over speculative abstractions or premature microservices.
+22. **Review risk before implementation:** document current behavior, desired behavior, affected callers/data, rollback path and acceptance tests before touching critical flows.
+
+### Application security — OWASP, Microsoft SDL, NIST SSDF, CISA and MITRE
+
+23. **Threat-model important flows:** map assets, actors, entry points, data flows and trust boundaries; use STRIDE prompts (spoofing, tampering, repudiation, information disclosure, denial of service, elevation of privilege).
+24. **Default deny:** every route and privileged action must explicitly prove authorization; tenant context must come from trusted server-side identity, not a client-supplied tenant ID alone.
+25. **Validate at boundaries:** treat webhooks, uploaded files, OCR output, AI output, queue payloads and external API responses as untrusted input.
+26. **Secure by default:** no default credentials, debug routes or permissive CORS in production; safe configuration should not depend on customers remembering extra hardening steps.
+27. **Protect secrets and identities:** short-lived/scoped credentials where possible, secret managers, rotation/revocation, no secrets in logs, artifacts, job payloads or test output.
+28. **Prioritize real weakness classes:** use OWASP Top 10 2025, ASVS 5.0, OWASP Cheat Sheets and MITRE CWE Top 25 as checklists for access control, injection, authentication, misconfiguration, unsafe error handling and dependency risks.
+29. **Build security into the lifecycle:** security requirements → design/threat model → implementation → verification → release → monitoring; repeat threat analysis when architecture or data flows change.
+30. **Keep an SBOM/dependency inventory:** track direct and transitive dependencies, provenance, supported versions and vulnerability remediation; prioritize exploitable paths and reachable code, not raw scanner counts alone.
+
+### Reliability and operations — Google SRE, AWS and Google Cloud Well-Architected
+
+31. **Define user-facing SLOs:** measure successful webhook acceptance, message delivery, AI response latency and availability; use error budgets to balance features against reliability work.
+32. **Observe symptoms and causes:** alerts should detect customer impact; correlate request IDs from HTTP through webhook inbox, queue, worker and provider; avoid logging message contents or credentials.
+33. **Practice failure and recovery:** test Redis/PostgreSQL outage, provider timeout, duplicate webhook, worker restart, queue backlog, backup restore and SIGTERM under load in disposable environments.
+34. **Make operations repeatable:** documented runbooks, clear owner/severity, incident timeline, customer communication, recovery verification and blameless postmortems with tracked corrective actions.
+35. **Design for safe retries:** retry transient failures with bounded exponential backoff and jitter; use idempotency keys for side effects; distinguish permanent failures from transient ones and provide a controlled DLQ replay path.
+36. **Prove backup recovery:** backup success is not enough; regularly restore into isolated disposable databases and verify integrity, tenant boundaries, encryption and documented recovery objectives.
+37. **Control blast radius:** isolate tenants, credentials, queues and admin permissions; rate-limit per tenant and globally; use circuit breakers/timeouts and bulkheads where appropriate.
+38. **Measure cost and performance:** track per-tenant AI tokens/cost, queue wait time, DB pool saturation, storage and provider failures before optimizing; avoid scaling complexity without evidence.
+
+### Direct implications for Nova-AI
+
+- N-13 remains the immediate reliability priority: prove real application shutdown while Redis is unavailable, then preserve active-job drain and stalled-job recovery.
+- Before production approval, map every tenant-owned data path and test tenant A/B access denial across APIs, SQL, cache, queues, files, backups, logs and admin operations.
+- Treat outbound WhatsApp sends as external side effects: reconcile ambiguous provider outcomes and prevent duplicate sends rather than assuming a DB transaction can roll back a provider action.
+- Keep AI-generated content untrusted until validated by deterministic outbound policy; never let model output grant permissions or bypass tenant/business rules.
+- Keep the modular monolith until measured scale or team boundaries justify a split.
+
+### Expert source library
+
+- Martin Fowler — Refactoring and behavior-preserving change: https://martinfowler.com/books/refactoring.html
+- OWASP Top 10 2025: https://owasp.org/projects/top-ten
+- OWASP ASVS 5.0: https://asvs.owasp.org/
+- OWASP Cheat Sheet Series: https://owasp.org/projects/cheat-sheet-series
+- OWASP Threat Modeling: https://cheatsheetseries.owasp.org/cheatsheets/Threat_Modeling_Cheat_Sheet.html
+- OWASP Attack Surface Analysis: https://cheatsheetseries.owasp.org/cheatsheets/Attack_Surface_Analysis_Cheat_Sheet.html
+- Microsoft SDL Threat Modeling: https://www.microsoft.com/en-us/securityengineering/sdl/threatmodeling
+- Microsoft Security Development Lifecycle: https://learn.microsoft.com/en-us/windows/security/threat-protection/msft-security-dev-lifecycle
+- NIST SSDF SP 800-218: https://csrc.nist.gov/pubs/sp/800/218/final
+- MITRE CWE Top 25 2025: https://cwe.mitre.org/top25/
+- Google SRE Incident Management: https://sre.google/resources/practices-and-processes/incident-management-guide/
+- Google SRE Error Budget Policy: https://sre.google/workbook/error-budget-policy/
+- Google Cloud Well-Architected Framework: https://docs.cloud.google.com/architecture/framework
+- AWS Well-Architected Security Pillar: https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/security.html
+- CISA Secure by Design / Secure by Demand: https://www.cisa.gov/securebydesign
+- GitHub Actions secure use: https://docs.github.com/en/actions/reference/security/secure-use
+
 ---
 **Safety note:** This document is a research backlog only. It does not authorize merging, deployment, production database changes, credential changes, customer/provider actions, or paid services.
