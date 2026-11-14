@@ -60,7 +60,7 @@ umask 077
 cat > "$network_tmp/app.env" <<ENV
 NODE_ENV=production
 PORT=3000
-LOG_LEVEL=warn
+LOG_LEVEL=info
 TRUST_PROXY_HOPS=1
 DATABASE_URL=postgres://nova:$db_password@db:5432/nova_network?sslmode=disable
 DATABASE_SSL_CA=/certs/ca.crt
