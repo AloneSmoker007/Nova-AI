@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, fix/gemini-dispatch-diagnostic-quota]
+    branches: [main, fix/gemini-dispatch-diagnostic-quota, test/n13-redis-outage-shutdown]
   pull_request:
-    branches: [main]
+    branches: [main, fix/gemini-dispatch-diagnostic-quota]
 
 permissions:
   contents: read
