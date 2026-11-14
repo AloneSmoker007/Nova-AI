@@ -348,7 +348,7 @@ test("the dev-only Gemini test route is privileged and rate-limited", () => {
   assert.ok(route.includes("await commitAiUsage({"), "diagnostic provider calls must be metered");
   assert.ok(route.includes("await releaseAiUsage({"), "pre-provider diagnostic failures must release reservations");
   assert.ok(
-    route.indexOf("reserveAiUsage({") < route.indexOf("generateGeminiReply(value.message)"),
+    route.indexOf("reserveAiUsage({") < route.indexOf("generateGeminiReply(value.message, null, {"),
     "diagnostic quota must be reserved before calling Gemini",
   );
 });
@@ -450,4 +450,26 @@ test("Copilot uses the dedicated structured prompt after quota reservation", () 
   assert.ok(route.includes("releaseAiUsage("), "provider/persistence failures must release the reservation");
   assert.doesNotMatch(route, /buildCopilotPrompt\(/);
   assert.doesNotMatch(route, /customInstructions:\s*\[brain\?\.customInstructions/);
+});
+
+test("inbound, Copilot and diagnostic usage flags are set only by the Gemini dispatch callback", () => {
+  const processor = sliceBetween(
+    indexSource,
+    "async function processInboxMessage(",
+    "async function recoverPendingDeliveries()",
+  );
+  assert.match(
+    processor,
+    /generateGeminiReply\(message\.body, aiBrain, \{\s*onProviderDispatch:\s*\(\) => \{ providerCallStarted = true; \}/,
+  );
+
+  const copilot = sliceBetween(
+    indexSource,
+    'app.post("/api/conversations/:conversationId/copilot/draft"',
+    'app.put("/api/users/me/skills"',
+  );
+  assert.match(copilot, /generateCopilotDraftReply\([\s\S]*onProviderDispatch:\s*\(\) => \{ providerCallStarted = true; \}/);
+
+  const diagnostic = sliceBetween(indexSource, "const geminiTestSchema", "// Register Task 16 routes");
+  assert.match(diagnostic, /generateGeminiReply\(value\.message, null, \{\s*onProviderDispatch:\s*\(\) => \{ providerCallStarted = true; \}/);
 });

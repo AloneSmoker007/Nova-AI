@@ -19,10 +19,9 @@ export function aiUsageEventKey({ messageId, whatsappMessageId }) {
 }
 
 // Every billable Gemini operation — inbound auto-reply, agent copilot draft,
-// and OCR extraction — shares the tenant's existing monthly AI limit
-// (monthly_ai_message_limit) under the existing hard_limit_enabled flag.
-// Distinct event types keep operations auditable without introducing new
-// billing plans; extending this list requires no schema migration.
+// OCR extraction and development diagnostics — shares the tenant's existing
+// monthly AI limit under hard_limit_enabled. Keep the database reservation-state
+// CHECK constraint in sync with this list using a forward-only migration.
 export const AI_EVENT_TYPES = ["ai_message", "copilot_draft", "ocr_document", "ai_diagnostic"];
 
 function isAiEventType(type) {

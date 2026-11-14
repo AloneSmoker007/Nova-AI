@@ -195,17 +195,23 @@ export function startWorker(processor) {
 
 export async function closeQueue() {
   if (messageWorker) {
+    logger.info("Closing BullMQ worker");
     await messageWorker.close();
     messageWorker = null;
+    logger.info("BullMQ worker closed");
   }
 
   if (messageQueue) {
+    logger.info("Closing BullMQ queue");
     await messageQueue.close();
     messageQueue = null;
+    logger.info("BullMQ queue closed");
   }
 
   if (connection) {
+    logger.info("Closing shared Redis connection");
     await connection.quit();
     connection = null;
+    logger.info("Shared Redis connection closed");
   }
 }

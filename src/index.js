@@ -614,8 +614,9 @@ async function processInboxMessage(inboxId, log = logger) {
 
         // After dispatch, provider spend may have occurred even if the
         // request errors or the customer deletes the source message.
-        providerCallStarted = true;
-        reply = await generateGeminiReply(message.body, aiBrain);
+        reply = await generateGeminiReply(message.body, aiBrain, {
+          onProviderDispatch: () => { providerCallStarted = true; },
+        });
 
         // Recheck after the provider call. If Meta's deletion webhook landed
         // while Gemini was generating, do not persist/send its text, but retain
@@ -1425,10 +1426,11 @@ app.post("/api/conversations/:conversationId/copilot/draft", requireAuth, async 
       const sourceMessageIds = messages.map((message) => message.id).filter(Boolean);
       // Once dispatched, a timeout/network error cannot prove Gemini did
       // not process the request, so retain quota for uncertain provider spend.
-      providerCallStarted = true;
       const draft = await generateCopilotDraftReply({
         businessBrain: brain,
         copilotContext,
+      }, {
+        onProviderDispatch: () => { providerCallStarted = true; },
       });
 
       // The user can delete a message while Gemini is generating. Require the
@@ -1773,8 +1775,9 @@ if (!IS_PRODUCTION) {
 
         let providerCallStarted = false;
         try {
-          providerCallStarted = true;
-          const reply = await generateGeminiReply(value.message);
+          const reply = await generateGeminiReply(value.message, null, {
+            onProviderDispatch: () => { providerCallStarted = true; },
+          });
           if (aiReservation.reservationToken) {
             try {
               await commitAiUsage({

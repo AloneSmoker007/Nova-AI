@@ -271,45 +271,55 @@ export function buildCopilotGeminiPrompt({ businessBrain = null, copilotContext 
   };
 }
 
-async function generateFromPrompt(prompt) {
-  const ai = getClient();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+export function createGeminiGenerator({ getClientFn = getClient } = {}) {
+  return async function generateFromPrompt(prompt, { onProviderDispatch } = {}) {
+    // Local SDK/client initialization must finish before the caller marks a
+    // reservation as potentially billable.
+    const ai = getClientFn();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  let response;
-  try {
-    response = await ai.models.generateContent({
-      model: MODEL,
-      contents: prompt.contents,
-      config: {
-        systemInstruction: prompt.systemInstruction,
-        abortSignal: controller.signal,
-      },
-    });
-  } catch (error) {
-    if (error?.name === "AbortError") throw new Error("Gemini request timed out");
-    throw new Error("Gemini request failed");
-  } finally {
-    clearTimeout(timeoutId);
-  }
+    let response;
+    try {
+      const request = {
+        model: MODEL,
+        contents: prompt.contents,
+        config: {
+          systemInstruction: prompt.systemInstruction,
+          abortSignal: controller.signal,
+        },
+      };
+      // This synchronous callback is the exact dispatch boundary: all local
+      // preparation is complete and it runs immediately before the SDK call.
+      onProviderDispatch?.();
+      response = await ai.models.generateContent(request);
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error("Gemini request timed out");
+      throw new Error("Gemini request failed");
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
-  const text = typeof response?.text === "string" ? response.text.trim() : "";
-  if (!text) throw new Error("Gemini returned no usable response");
+    const text = typeof response?.text === "string" ? response.text.trim() : "";
+    if (!text) throw new Error("Gemini returned no usable response");
 
-  // Enforce deterministic high-confidence leak/output checks before any caller
-  // can persist a response, prepare an outbound delivery, or surface a draft.
-  const decision = enforceGeneratedAiOutput(text, MAX_RESPONSE_LENGTH);
-  if (!decision.safe) {
-    logger.warn(
-      { reason: decision.reason },
-      "Gemini output rejected by deterministic safety gate",
-    );
-  }
+    // Enforce deterministic high-confidence leak/output checks before any caller
+    // can persist a response, prepare an outbound delivery, or surface a draft.
+    const decision = enforceGeneratedAiOutput(text, MAX_RESPONSE_LENGTH);
+    if (!decision.safe) {
+      logger.warn(
+        { reason: decision.reason },
+        "Gemini output rejected by deterministic safety gate",
+      );
+    }
 
-  return decision.text;
+    return decision.text;
+  };
 }
 
-export async function generateGeminiReply(message, businessBrain = null) {
+const generateFromPrompt = createGeminiGenerator();
+
+export async function generateGeminiReply(message, businessBrain = null, options = {}) {
   if (!message || typeof message !== "string") {
     throw new Error("Message is required");
   }
@@ -320,9 +330,12 @@ export async function generateGeminiReply(message, businessBrain = null) {
     throw new Error(`Message is too long (max ${MAX_MESSAGE_LENGTH} characters)`);
   }
 
-  return generateFromPrompt(buildGeminiPrompt(trimmed, businessBrain));
+  return generateFromPrompt(buildGeminiPrompt(trimmed, businessBrain), options);
 }
 
-export async function generateCopilotDraftReply({ businessBrain = null, copilotContext = {} } = {}) {
-  return generateFromPrompt(buildCopilotGeminiPrompt({ businessBrain, copilotContext }));
+export async function generateCopilotDraftReply(
+  { businessBrain = null, copilotContext = {} } = {},
+  options = {},
+) {
+  return generateFromPrompt(buildCopilotGeminiPrompt({ businessBrain, copilotContext }), options);
 }

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/gemini-dispatch-diagnostic-quota]
   pull_request:
     branches: [main]
 
