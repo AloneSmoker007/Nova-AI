@@ -20,8 +20,9 @@ cleanup() {
     docker logs --tail 35 "$app_name" 2>/dev/null || true
     docker logs --tail 15 "$db_name" 2>/dev/null || true
     docker logs --tail 15 "$edge_name" 2>/dev/null || true
+    docker logs --tail 30 "$network_name-n13-fixture" 2>/dev/null || true
   fi
-  docker rm -fv "$network_name-probe" "$edge_name" "$app_name" "$redis_name" "$db_name" >/dev/null 2>&1 || true
+  docker rm -fv "$network_name-probe" "$network_name-n13-fixture" "$edge_name" "$app_name" "$redis_name" "$db_name" >/dev/null 2>&1 || true
   docker network rm "$network_name" >/dev/null 2>&1 || true
   # PostgreSQL's private key has container ownership.
   docker run --rm --network none -v "$network_tmp:/cleanup" postgres:15 \
@@ -60,7 +61,7 @@ umask 077
 cat > "$network_tmp/app.env" <<ENV
 NODE_ENV=production
 PORT=3000
-LOG_LEVEL=warn
+LOG_LEVEL=info
 TRUST_PROXY_HOPS=1
 DATABASE_URL=postgres://nova:$db_password@db:5432/nova_network?sslmode=disable
 DATABASE_SSL_CA=/certs/ca.crt
@@ -147,6 +148,103 @@ probe unavailable
 docker start "$db_name" >/dev/null
 probe recovered
 
+# N-13 active-inbox crash/recovery: exercise the real signed webhook and worker.
+# The helper owns a PostgreSQL advisory lock; a one-message trigger blocks the
+# canonical INSERT only after the durable inbox lease has been committed.
+control_name="$network_name-n13-fixture"
+docker run -d --name "$control_name" --network "$network_name" \
+  --env-file "$network_tmp/app.env" -e N13_CONTROL_DIR=/control \
+  -v "$PWD:/app:ro" -w /app -v "$network_tmp:/control" \
+  -v "$network_tmp/ca.crt:/certs/ca.crt:ro" \
+  node:20-bookworm-slim node tests/n13-active-inbox.smoke.js prepare >/dev/null
+
+for attempt in {1..60}; do
+  if [ -s "$network_tmp/ready.json" ]; then break; fi
+  if [ "$(docker inspect --format '{{.State.Running}}' "$control_name" 2>/dev/null || true)" != true ]; then
+    docker logs "$control_name" 2>/dev/null || true
+    echo 'N-13 fixture helper exited before establishing the active inbox lease' >&2
+    exit 1
+  fi
+  sleep 0.5
+done
+test -s "$network_tmp/ready.json"
+inbox_id=$(jq -r '.inboxId' "$network_tmp/ready.json")
+tenant_id=$(jq -r '.tenantId' "$network_tmp/ready.json")
+message_id=$(jq -r '.messageId' "$network_tmp/ready.json")
+test -n "$inbox_id" && test -n "$tenant_id" && test -n "$message_id"
+echo "N-13 fixture claimed inbox $inbox_id"
+echo 'N13_STAGE=fixture_claimed'
+
+# Preserve Redis process and in-memory job state; disconnect only its network.
+echo "N13_STAGE=redis_disconnect_start"
+docker network disconnect "$network_name" "$redis_name"
+echo "N13_STAGE=redis_disconnected"
+sleep 1
 docker kill --signal=TERM "$app_name" >/dev/null
-test "$(timeout 15s docker wait "$app_name")" = 0
-echo 'PASS: production bootstrap exited successfully after SIGTERM'
+app_exit=$(timeout 15s docker wait "$app_name")
+echo "N13_STAGE=app_exited code=$app_exit"
+docker logs "$app_name" > "$network_tmp/n13-shutdown.log" 2>&1 || true
+if [ "$app_exit" = 0 ]; then
+  grep -q 'Nova-AI server closed successfully' "$network_tmp/n13-shutdown.log"
+elif [ "$app_exit" = 1 ]; then
+  grep -q 'Forced shutdown after 10 seconds' "$network_tmp/n13-shutdown.log"
+  echo "N13_STAGE=watchdog_confirmed"
+else
+  echo "Unexpected active-inbox shutdown exit code: $app_exit" >&2
+  exit 1
+fi
+
+# The helper owns the advisory lock used by the blocking trigger. Release it
+# before DDL: DROP TRIGGER needs an AccessExclusive table lock and would wait
+# behind the worker INSERT while that INSERT is still waiting on the helper.
+# The app container has already exited, so releasing the fixture cannot cause
+# a live application worker to commit this transaction.
+touch "$network_tmp/release-lock"
+test "$(timeout 10s docker wait "$control_name")" = 0
+echo "N13_STAGE=fixture_helper_released"
+docker exec "$db_name" psql -v ON_ERROR_STOP=1 -U nova -d nova_network \
+  -c 'DROP TRIGGER IF EXISTS n13_pause_message_insert ON messages; DROP FUNCTION IF EXISTS n13_pause_message_insert();' >/dev/null
+echo "N13_STAGE=trigger_removed"
+docker rm -f "$control_name" >/dev/null
+
+rollback_check=$(docker exec "$db_name" psql -At -v ON_ERROR_STOP=1 -U nova -d nova_network \
+  -c "SELECT CASE WHEN w.state='PROCESSING' AND w.lease_token IS NOT NULL AND w.lease_until > NOW() AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.tenant_id=w.tenant_id AND m.whatsapp_message_id='$message_id') THEN 'ok' ELSE 'bad' END FROM webhook_messages w WHERE w.id='$inbox_id' AND w.tenant_id='$tenant_id'")
+test "$rollback_check" = ok
+echo "N13_STAGE=transaction_rollback_verified"
+
+# Restore the same Redis process; its stalled BullMQ job and lock state survive.
+docker network connect --alias redis "$network_name" "$redis_name"
+docker start "$app_name" >/dev/null
+probe recovered
+echo "N13_STAGE=app_restarted"
+
+docker run --rm --network "$network_name" --env-file "$network_tmp/app.env" \
+  -e N13_INBOX_ID="$inbox_id" -e N13_TENANT_ID="$tenant_id" -e N13_MESSAGE_ID="$message_id" \
+  -v "$PWD:/app:ro" -w /app -v "$network_tmp/ca.crt:/certs/ca.crt:ro" \
+  node:20-bookworm-slim node tests/n13-active-inbox.smoke.js verify-live
+echo "N13_STAGE=live_lease_assertion_passed"
+
+# Expire only the synthetic PostgreSQL lease. The app's real 10-second recovery
+# loop must redispatch the same inbox after BullMQ's stalled-job no-op.
+docker exec "$db_name" psql -v ON_ERROR_STOP=1 -U nova -d nova_network \
+  -c "UPDATE webhook_messages SET lease_until=NOW()-INTERVAL '1 second', queue_dispatched_at=NOW()-INTERVAL '31 seconds', available_at=NOW() WHERE id='$inbox_id' AND tenant_id='$tenant_id' AND state='PROCESSING'" >/dev/null
+echo "N13_STAGE=db_lease_expired"
+
+docker run --rm --network "$network_name" --env-file "$network_tmp/app.env" \
+  -e N13_INBOX_ID="$inbox_id" -e N13_TENANT_ID="$tenant_id" -e N13_MESSAGE_ID="$message_id" \
+  -v "$PWD:/app:ro" -w /app -v "$network_tmp/ca.crt:/certs/ca.crt:ro" \
+  node:20-bookworm-slim node tests/n13-active-inbox.smoke.js verify-completed
+echo "N13_STAGE=recovery_completion_assertion_passed"
+
+docker exec "$db_name" psql -v ON_ERROR_STOP=1 -U nova -d nova_network \
+  -c "DELETE FROM tenants WHERE id='$tenant_id'" >/dev/null
+echo 'PASS: active inbox crash recovery, stalled-job fencing and one-time canonical persistence'
+
+# N-13 idle shutdown: separately verify bounded graceful close during Redis outage.
+# This exercises app-level closeQueue() rather than only a standalone BullMQ worker.
+docker stop -t 1 "$redis_name" >/dev/null
+sleep 1
+docker kill --signal=TERM "$app_name" >/dev/null
+app_exit=$(timeout 15s docker wait "$app_name")
+test "$app_exit" = 0
+echo 'PASS: production app exited successfully after SIGTERM while Redis was unavailable'

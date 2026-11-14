@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, fix/gemini-dispatch-diagnostic-quota]
+    branches: [main, fix/gemini-dispatch-diagnostic-quota, fix/n13-bullmq-shutdown-retry]
   pull_request:
     branches: [main]
 
